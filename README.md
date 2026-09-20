@@ -54,17 +54,28 @@ chained workflow — with 204 tests and no real engine required.
 |---|---|---|
 | 1 | Mock models, full architecture, DSH plugin, tests | ✅ done |
 | 2 | Real local text model (Ollama / llama.cpp / vLLM / LM Studio) | ✅ done — `openai_compatible` adapter ships |
-| 3 | Real local image model (A1111 / ComfyUI) | needs the `http_json` adapter |
+| 3 | Real local image model (A1111 / ComfyUI) | ✅ done — `http_json` and `comfyui` adapters ship |
 | 4 | Real local 3D model | needs a new adapter |
 | 5 | Runtime lifecycle + resource-aware routing | ✅ done (machine probing is not yet wired into `ModelHub`) |
 | 6 | Multi-model workflows | ✅ done |
 
 Phase 2 needs no new code: the `openai_compatible` adapter is implemented, and
 `config/examples/real-models.example.json` contains ready-to-copy Ollama and
-llama.cpp entries. Phase 3 still needs the `http_json` adapter: its kind is
-declared and validated, but not implemented, so an A1111/ComfyUI entry reports
-`no adapter registered for kind "http_json"` until it is. See
-[docs/adding-a-model.md](docs/adding-a-model.md).
+llama.cpp entries. Phase 3 is now implemented too, by **two** adapters, because
+the two engine families are genuinely different:
+
+- **`http_json`** — engines that answer one request with a finished image:
+  AUTOMATIC1111, Forge, and `stable-diffusion.cpp`'s `sd-server`. It POSTs the
+  familiar `/sdapi/v1/txt2img` body and decodes the base64 images that come back.
+- **`comfyui`** — ComfyUI takes a *node graph*, not a prompt. This adapter edits
+  a workflow template (the prompt goes to the CLIPTextEncode node wired to the
+  sampler's `positive` link; size and sampler settings go to the latent and
+  sampler nodes), queues it on `/prompt`, polls `/history`, and downloads the
+  result from `/view`.
+
+Both are registered by default. See
+[docs/adding-a-model.md](docs/adding-a-model.md) and the workflow templates in
+[`config/workflows/`](config/workflows/).
 
 ---
 
@@ -236,9 +247,15 @@ The agent never names an engine, a command, or a path. That is the whole design.
 Phase 2 needs no code: copy an Ollama or llama.cpp entry from
 [`config/examples/real-models.example.json`](config/examples/real-models.example.json)
 into `config/models.json`, point `adapterConfig.model` at a checkpoint you have
-actually pulled, restart, and check with `get_model_status`. A1111/ComfyUI entries
-do need code, because the `http_json` adapter is not implemented yet. See
-[docs/adding-a-model.md](docs/adding-a-model.md).
+actually pulled, restart, and check with `get_model_status`.
+
+Image generation needs no code either. For an A1111/Forge/sd.cpp server, copy the
+`a1111_sdxl` or `a1111_sd15` entry. For ComfyUI, copy the `comfyui` host and the
+`comfyui_z_image_turbo` model from this repository's working setup, and make sure
+`adapterConfig.workflowPath` points at an API-format workflow — an example is in
+[`config/workflows/z-image-turbo.api.json`](config/workflows/z-image-turbo.api.json).
+That file is a saved `{client_id, prompt}` payload, which the adapter accepts
+directly. See [docs/adding-a-model.md](docs/adding-a-model.md).
 
 Nothing is launched by default: `allowProcessLaunch` is `false`, so the hub talks
 to engines you run but will not start any. See
@@ -301,7 +318,8 @@ dsh-ai-model-hub/
 │   │                             published JSON Schema
 │   ├── router/                   deterministic capability-first selection
 │   ├── runtime/                  process lifecycle, health, idle timeout
-│   ├── adapters/                 adapter contract + the mock adapter, PNG/STL/WAV writers
+│   ├── adapters/                 adapter contract + mock, PNG/STL/WAV writers,
+│   │                             openai_compatible, http_json, comfyui
 │   ├── artifacts/                artifact contract + the local filesystem store
 │   ├── config/                   catalog discovery and loading
 │   ├── util/                     process guardrails, primitive validators
@@ -317,9 +335,10 @@ dsh-ai-model-hub/
 ├── config/
 │   ├── models.json               active catalog (mock models)
 │   ├── models.mock.json          Phase 1 fixtures
-│   └── examples/                 real engines, ready to copy
-├── tests/                        204 tests, all runnable without an engine
-│                                 (8 spawn-based ones need an unsandboxed shell)
+│   ├── examples/                 real engines, ready to copy
+│   └── workflows/                ComfyUI API-format graph templates
+├── tests/                        251 tests; the adapter ones run against real
+│                                 local HTTP servers, so no engine or GPU needed
 ├── examples/vertical-slice.ts    the end-to-end demonstration
 └── docs/                         architecture, components, guides
 ```

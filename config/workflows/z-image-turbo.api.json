@@ -1,0 +1,57 @@
+{"client_id":"zimage-cli-pixel","prompt":{
+  "1": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": { "width": 512, "height": 512, "batch_size": 1 }
+  },
+  "10": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "z_image_turbo_int8_convrot.safetensors", "weight_dtype": "default" }
+  },
+  "11": {
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "qwen_3_4b_fp4_mixed.safetensors", "type": "lumina2", "device": "default" }
+  },
+  "12": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": { "model": ["10", 0], "shift": 3 }
+  },
+  "13": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["11", 0],
+      "text": "retro 8-bit pixel art game character sprite of a player hero, small brave adventurer holding a sword, clean chunky pixels, limited solid color palette, thick black outlines, centered single character, plain simple solid background, crisp square pixels, no anti-aliasing, classic 1980s videogame sprite style"
+    }
+  },
+  "14": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": { "conditioning": ["13", 0] }
+  },
+  "15": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["12", 0],
+      "positive": ["13", 0],
+      "negative": ["14", 0],
+      "latent_image": ["1", 0],
+      "seed": 777001,
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "res_multistep",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "16": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "ae.safetensors" }
+  },
+  "17": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["15", 0], "vae": ["16", 0] }
+  },
+  "18": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["17", 0], "filename_prefix": "deadlock/pixel_player_v1" }
+  }
+}
+}

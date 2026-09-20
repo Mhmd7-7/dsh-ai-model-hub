@@ -92,13 +92,13 @@
       }
     },
     {
-      "$comment": "ComfyUI has a JSON graph API rather than a simple prompt endpoint, so it needs its own adapter. It is listed here to show the shape: one host, many checkpoints behind it.",
+      "$comment": "ComfyUI has a graph API rather than a prompt endpoint, so it has its own `comfyui` adapter. A model points at a template with `adapterConfig.workflowPath`; the adapter writes the prompt into the CLIPTextEncode node wired to the sampler's `positive` link, queues the graph, polls /history, and downloads from /view.",
       "id": "comfyui",
       "name": "ComfyUI",
-      "adapter": "http_json",
+      "adapter": "comfyui",
       "runtime": {
         "engine": "comfyui",
-        "adapter": "http_json",
+        "adapter": "comfyui",
         "endpoint": "http://127.0.0.1:8188",
         "path": "/prompt"
       },
@@ -211,6 +211,37 @@
       "priority": 80,
       "tags": ["local", "gpu", "image", "low-vram"],
       "notes": "Smaller footprint. On an 8 GB card this is what routing should pick, while SDXL is rejected as too large."
+    },
+    {
+      "$comment": "A ComfyUI model. Unlike the A1111 entries above, the engine is driven by a graph template rather than by request fields, so `workflowPath` is required. The template in config/workflows/ was captured from a real run.",
+      "id": "comfyui_z_image_turbo",
+      "name": "Z-Image Turbo (ComfyUI)",
+      "type": "image_generation",
+      "version": "1.0.0",
+      "host": "comfyui",
+      "capabilities": ["text_to_image"],
+      "adapterConfig": {
+        "workflowPath": "config/workflows/z-image-turbo.api.json",
+        "steps": 8,
+        "cfg": 1,
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "width": 1024,
+        "height": 1024,
+        "filenamePrefix": "deadlock/z_image"
+      },
+      "resources": {
+        "vramGb": 6,
+        "ramGb": 12
+      },
+      "limits": {
+        "maxWidth": 1024,
+        "maxHeight": 1024,
+        "resolutions": ["512x512", "768x768", "1024x1024"]
+      },
+      "priority": 10,
+      "tags": ["local", "gpu", "image", "comfyui"],
+      "notes": "Z-Image Turbo is step-distilled: 8 steps at cfg 1.0 is its intended operating point. The template names the checkpoint, text encoder and VAE, so those files must exist in your ComfyUI models directory."
     },
     {
       "$comment": "A GPU-backed text model served by llama.cpp rather than Ollama, showing two engines feeding the same capability.",

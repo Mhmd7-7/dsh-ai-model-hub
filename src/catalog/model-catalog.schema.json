@@ -66,7 +66,7 @@
     "adapterKind": {
       "type": "string",
       "description": "How the hub talks to the model. One adapter per kind is registered in code; adding a model on an existing kind requires no code.",
-      "enum": ["mock", "http_json", "openai_compatible", "cli"]
+      "enum": ["mock", "http_json", "openai_compatible", "comfyui", "cli"]
     },
     "healthCheckKind": {
       "type": "string",

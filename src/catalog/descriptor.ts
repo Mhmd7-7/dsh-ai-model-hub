@@ -54,6 +54,8 @@ export const ADAPTER_KINDS = [
   'http_json',
   /** An OpenAI-compatible `/v1/chat/completions` endpoint (Ollama, llama.cpp, vLLM, LM Studio, …). */
   'openai_compatible',
+  /** A ComfyUI server: queue a node graph on `/prompt`, poll `/history`, fetch `/view`. */
+  'comfyui',
   /** A command-line program invoked per request with a staged input directory. */
   'cli',
 ] as const;
@@ -560,7 +562,7 @@ function parseRuntimeSpec(
   const args = readOptionalStringArray(raw, 'args', path, collector);
   const env = readOptionalRecord(raw, 'env', path, collector);
 
-  if (adapter === 'http_json' || adapter === 'openai_compatible') {
+  if (adapter === 'http_json' || adapter === 'openai_compatible' || adapter === 'comfyui') {
     if (endpoint === undefined && raw['endpoint'] === undefined) {
       collector.add(`${path}.endpoint`, `is required for the ${adapter} adapter`);
     }
@@ -1080,6 +1082,9 @@ function defaultHealthFor(adapter: AdapterKind): HealthCheckSpec {
     case 'http_json':
     case 'openai_compatible':
       return { kind: 'http', path: '/', timeoutMs: DEFAULTS.healthTimeoutMs };
+    case 'comfyui':
+      // ComfyUI answers `/system_stats` cheaply and without touching a model.
+      return { kind: 'http', path: '/system_stats', timeoutMs: DEFAULTS.healthTimeoutMs };
     case 'cli':
     case 'mock':
       return { kind: 'none' };

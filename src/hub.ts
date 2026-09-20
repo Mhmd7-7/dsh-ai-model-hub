@@ -23,6 +23,7 @@ import type { ModelAdapter } from './adapters/types.ts';
 import { createMockAdapter } from './adapters/mock.ts';
 import { createOpenAiCompatibleAdapter } from './adapters/openai.ts';
 import { createHttpJsonAdapter } from './adapters/http-json.ts';
+import { createComfyUiAdapter } from './adapters/comfyui.ts';
 import type { Capability } from './catalog/capabilities.ts';
 import { isCapability } from './catalog/capabilities.ts';
 import type { ModelCatalogConfig } from './catalog/descriptor.ts';
@@ -153,12 +154,17 @@ export class ModelHub {
 
     // The shipping set: the Phase 1 fixture adapter, the real-engine adapter
     // that reaches every `/v1/chat/completions` server (Ollama, llama.cpp, vLLM,
-    // LM Studio, …), and the real-image adapter that reaches every
-    // `/sdapi/v1/txt2img` server (A1111, Forge, stable-diffusion.cpp). A
-    // deployment adds more through `extraAdapters`, or replaces the whole set
-    // with `adapters`.
+    // LM Studio, …), the real-image adapter that reaches every
+    // `/sdapi/v1/txt2img` server (A1111, Forge, stable-diffusion.cpp), and the
+    // graph-queue adapter for ComfyUI. A deployment adds more through
+    // `extraAdapters`, or replaces the whole set with `adapters`.
     const defaultAdapters: readonly ModelAdapter[] =
-      options.adapters ?? [createMockAdapter(), createOpenAiCompatibleAdapter(), createHttpJsonAdapter()];
+      options.adapters ?? [
+        createMockAdapter(),
+        createOpenAiCompatibleAdapter(),
+        createHttpJsonAdapter(),
+        createComfyUiAdapter(),
+      ];
     this.adapters = new AdapterRegistry([...defaultAdapters, ...(options.extraAdapters ?? [])]);
 
     this.runtime = new RuntimeManager({
