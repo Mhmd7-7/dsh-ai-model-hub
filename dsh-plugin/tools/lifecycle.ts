@@ -16,7 +16,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ModelHubService } from '../service.ts';
-import { toHubError } from 'dsh-ai-model-hub/index.ts';
+import { toHubError } from '../../src/index.ts';
 import { textBlock, toToolError } from './support.ts';
 
 /**

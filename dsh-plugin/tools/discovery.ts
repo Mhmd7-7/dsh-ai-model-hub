@@ -14,7 +14,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ModelHubService } from '../service.ts';
-import type { Capability } from 'dsh-ai-model-hub/index.ts';
+import type { Capability } from '../../src/index.ts';
 import { formatArtifact, formatAvailability, formatModel, textBlock, toToolError } from './support.ts';
 import type { ArtifactRootResolver } from '../workspace.ts';
 import type { ToolCallScope } from '../types.ts';

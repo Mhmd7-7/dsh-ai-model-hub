@@ -11,47 +11,51 @@
 
         .\install.ps1 -Profile web
 
-    Four steps, in this order:
+    A preflight, then two steps, because the repository IS the plugin package:
 
-      1. Preflight: Node >= 22.6, plus git, npm and dsh on PATH. Every failure is
-         reported here, by name, instead of surfacing later as an opaque module
-         error at DSH boot.
-      2. Clone — or fast-forward an existing clone of — this repository into
-         `$DSH_HOME/plugins/dsh-ai-model-hub` (`~/.dsh/plugins/...` by default),
-         which is the directory convention DSH's own plugin store already uses.
-      3. Run `scripts/install-plugin.mjs` from that checkout: it installs the
-         plugin's dependency closure, adds the plugin to the profile, and
-         registers it as a bundle layer.
-      4. Verify with `scripts/doctor.mjs`, which imports the plugin exactly the
-         way DSH's loader will.
+      Preflight: Node >= 22.6, pnpm and dsh on PATH. Every failure is reported
+      here, by name, instead of surfacing later as an opaque error.
 
-    Why this clones instead of running
-    `dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub`: the plugin is
-    written in TypeScript and DSH loads it directly through Node's type stripping,
-    but Node REFUSES to strip types for any file under `node_modules`
-    (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). A package installed by pnpm —
-    from the registry or from git — always lands inside the profile's
-    `node_modules`, so the loader could not import it. The plugin therefore has to
-    live in a real checkout OUTSIDE `node_modules` and be linked in from there,
-    which is the one thing `dsh plugin add <local path>` does correctly.
+      [1/2] `dsh plugin --profile <p> add github:Mhmd7-7/dsh-ai-model-hub` -- the
+            official CLI installs the package into the profile and, because the
+            package declares `dsh.bundle.patch`, registers it as a profile layer.
 
-    Re-run this script to update: it fast-forwards the clone and reinstalls.
+      [2/2] Verify, unless -SkipDoctor is given: run the installed package's own
+            `scripts/doctor.mjs`, which imports the plugin exactly the way DSH's
+            loader will.
+
+    Why this no longer clones. It used to clone the repository and run its
+    installer, because the plugin was TypeScript-only and Node refuses to strip
+    types for a file under `node_modules`
+    (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING) -- so the plugin had to live in a
+    real checkout OUTSIDE node_modules and be linked in from there. The package
+    now ships its compiled JavaScript (`lib/`), so a plain `dsh plugin add` from
+    GitHub works, and the checkout, the clone, `npm install` and the build are all
+    gone from this path.
+
+    Re-run this script to update: it re-adds the package and re-resolves the ref.
+    To install a local working tree instead, run `npm run install:plugin` in it.
 
 .PARAMETER Profile
     The DSH profile to install into. Defaults to `web`, the profile behind
     `dsh web`. Override with $env:DSH_PROFILE when piping into `iex`.
 
-.PARAMETER InstallDir
-    Where to clone the repository. Defaults to
-    `$DSH_HOME/plugins/dsh-ai-model-hub`. Override with $env:DSH_MODEL_HUB_DIR.
-
 .PARAMETER Ref
-    The branch, tag or commit to install. Defaults to `main`. Override with
-    $env:DSH_MODEL_HUB_REF — useful for pinning a release tag.
+    The branch, tag or commit to install, appended to the package spec as
+    `#<ref>`. Defaults to `main`. Override with $env:DSH_MODEL_HUB_REF -- useful
+    for pinning a release tag.
 
 .PARAMETER Repository
-    The git remote to clone. Defaults to the canonical GitHub URL. Override with
-    $env:DSH_MODEL_HUB_REPO to install from a fork.
+    Where to install from. Defaults to the canonical GitHub URL. The GitHub
+    forms -- `https://github.com/owner/repo(.git)`, `git@github.com:owner/repo.git`
+    and a bare `owner/repo` -- all become `github:owner/repo#<ref>`. Override with
+    $env:DSH_MODEL_HUB_REPO to install from a fork. Any other value is handed to
+    pnpm verbatim, with `#<ref>` appended when it has no fragment of its own.
+
+.PARAMETER InstallDir
+    DEPRECATED and ignored. There is no checkout to place any more: the plugin is
+    installed into the profile directly from GitHub. Kept so existing command
+    lines that pass it keep working.
 
 .PARAMETER SkipDoctor
     Install only; skip the post-install verification.
@@ -61,7 +65,7 @@
 
 .EXAMPLE
     # A different profile, from a pinned tag.
-    .\install.ps1 -Profile hubtest -Ref v0.1.0
+    .\install.ps1 -Profile hubtest -Ref v0.2.0
 
 .EXAMPLE
     # Piped form: parameters are unavailable, so use the environment.
@@ -78,13 +82,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# The installed package name, and the name of the profile bundle layer it
+# registers itself as. They are the same string: the package IS the plugin.
+$PluginPackage = 'dsh-ai-model-hub'
+
 <#
 Run a native command and judge it only by its exit code.
 
 Windows PowerShell turns anything a native program writes to stderr into a
-terminating error under `$ErrorActionPreference = 'Stop'`, and `git`, `npm` and
-`dsh plugin` all write ordinary progress information to stderr. Without this
-wrapper a successful install would abort the script.
+terminating error under `$ErrorActionPreference = 'Stop'`, and both `pnpm` and
+`dsh plugin` write ordinary progress information to stderr. Without this wrapper a
+successful install would abort the script.
 
 `2>&1` merges the streams so nothing is treated as an error and all output stays
 visible, and the output is discarded so only the exit code is returned.
@@ -131,20 +139,82 @@ function Stop-Install {
     exit 1
 }
 
+<#
+Turn the repository option into a pnpm package spec.
+
+GitHub is the case that matters and the only one with a shorthand: its https URL,
+its ssh URL and a bare `owner/repo` all become `github:owner/repo`, which pnpm
+fetches as a tarball -- no git binary, no clone. `-Ref` is appended as a `#<ref>`
+fragment. Anything else (a fork on another host, a tarball URL) is passed through
+untouched, because guessing a shorthand for it would break it.
+
+@param $Repository - the remote or spec the user asked for.
+@param $Ref - the branch, tag or commit, or an empty string to leave it unpinned.
+@returns the spec to hand to `dsh plugin add`.
+#>
+function Get-PluginSpec {
+    param([string] $Repository, [string] $Ref)
+
+    $repo = $Repository.Trim()
+    $slug = $null
+
+    foreach ($prefix in @(
+            'https://github.com/',
+            'http://github.com/',
+            'git+https://github.com/',
+            'ssh://git@github.com/')) {
+        if ($repo.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $slug = $repo.Substring($prefix.Length)
+            break
+        }
+    }
+    if (-not $slug -and $repo.StartsWith('git@github.com:', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $slug = $repo.Substring('git@github.com:'.Length)
+    }
+
+    if ($slug) {
+        $slug = ($slug -replace '\.git$', '').TrimEnd('/')
+        if ($slug -notmatch '^[^/]+/[^/]+$') { $slug = $null }
+    } elseif ($repo -notmatch ':' -and $repo -match '^[^/]+/[^/]+$') {
+        # A bare `owner/repo`, which is what `github:` means.
+        $slug = $repo
+    }
+
+    $spec = if ($slug) { "github:$slug" } else { $repo }
+    if ($Ref -and $spec -notmatch '#') { $spec = "$spec#$Ref" }
+    return $spec
+}
+
 # ── 1. Preflight ────────────────────────────────────────────────────────────
-Write-Host 'dsh-ai-model-hub — install from GitHub' -ForegroundColor Cyan
+Write-Host 'dsh-ai-model-hub -- install from GitHub' -ForegroundColor Cyan
 Write-Host ''
 
-foreach ($tool in @('node', 'npm', 'git', 'dsh')) {
+if ($InstallDir) {
+    Write-Host 'note: -InstallDir / $env:DSH_MODEL_HUB_DIR is deprecated and ignored.' -ForegroundColor Yellow
+    Write-Host '      The plugin is installed into the profile straight from GitHub, so there'
+    Write-Host '      is no checkout to place. Drop the option; this run carries on without it.'
+    Write-Host ''
+}
+
+foreach ($tool in @('node', 'pnpm', 'dsh')) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         $hint = switch ($tool) {
             'node' { 'Install Node 22.6 or newer from https://nodejs.org' }
-            'npm' { 'npm ships with Node; reinstall Node if it is missing' }
-            'git' { 'Install git from https://git-scm.com — this installer clones the repository' }
+            'pnpm' { "dsh plugin forwards to pnpm. Install it with: npm install -g pnpm" }
             'dsh' { 'Install DeepSeek Harness first: npm install -g @deepseek-ai/dsh' }
         }
         Stop-Install "'$tool' was not found on PATH. $hint"
     }
+}
+
+# git is no longer part of the install -- `github:` specs are fetched as tarballs --
+# so its absence is a note, not a failure. pnpm does fall back to git for some
+# refs, which is why this is worth saying out loud rather than not at all.
+if (-not (Get-Command 'git' -ErrorAction SilentlyContinue)) {
+    Write-Host "note: 'git' was not found on PATH. GitHub packages are fetched as tarballs," -ForegroundColor Yellow
+    Write-Host '      so this is normally fine -- but pnpm uses git to resolve an unusual ref.' -ForegroundColor Yellow
+    Write-Host '      If the add step below fails with a git error, install https://git-scm.com' -ForegroundColor Yellow
+    Write-Host ''
 }
 
 $nodeText = Get-NativeText 'node' @('--version')
@@ -155,116 +225,48 @@ if ($nodeText -match 'v(\d+)\.(\d+)') {
     $minor = [int] $Matches[2]
 }
 if ($major -lt 22 -or ($major -eq 22 -and $minor -lt 6)) {
-    Stop-Install "Node 22.6 or newer is required (found $($nodeText.Trim())). The plugin runs TypeScript directly through Node's type stripping, which older releases do not have."
+    Stop-Install "Node 22.6 or newer is required (found $($nodeText.Trim())). $PluginPackage declares engines.node >= 22.6, and DeepSeek Harness needs a modern Node as well."
 }
 
 $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
-if (-not $InstallDir) {
-    $InstallDir = Join-Path (Join-Path $dshHome 'plugins') 'dsh-ai-model-hub'
-}
+$profileDir = Join-Path $dshHome "profiles\$Profile"
+$packageDir = Join-Path (Join-Path $profileDir 'node_modules') $PluginPackage
 
-# ── 2. A checkout to install from ───────────────────────────────────────────
-# Two sources, in priority order: the directory this script itself lives in (so
-# running it from a clone installs THAT clone, and never rewrites your working
-# tree), then the canonical install directory, cloned on demand.
-#
-# `$PSScriptRoot` is empty when the script is piped into `iex`, which is exactly
-# the case this branch is here to tell apart.
-$checkout = $null
-$mode = ''
+$spec = Get-PluginSpec -Repository $Repository -Ref $Ref
 
-if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'dsh-plugin'))) {
-    $checkout = (Resolve-Path $PSScriptRoot).Path
-    $mode = 'checkout'
-    Write-Host "[1/3] Using the checkout this script lives in:" -ForegroundColor Cyan
-    Write-Host "      $checkout"
-}
-elseif ((Test-Path (Join-Path $InstallDir 'dsh-plugin')) -and (Test-Path (Join-Path $InstallDir '.git'))) {
-    $checkout = $InstallDir
-    $mode = 'update'
-    Write-Host "[1/3] Updating the existing clone..." -ForegroundColor Cyan
-    Write-Host "      $checkout"
-    Write-Host "      ref $Ref of $Repository"
-
-    # Fetch first, then move to the requested ref. The pull is best-effort: a tag
-    # or a commit hash checks out but has nothing to fast-forward, and that is not
-    # a failure.
-    $code = Invoke-Native 'git' @('-C', $checkout, 'fetch', '--prune', 'origin')
-    if ($code -ne 0) { Stop-Install "git fetch failed with exit code $code. Check your network and that $Repository is reachable." }
-
-    $code = Invoke-Native 'git' @('-C', $checkout, 'checkout', $Ref)
-    if ($code -ne 0) {
-        # The ref exists remotely but not locally yet (a new branch, or a commit
-        # that is not on any fetched branch tip).
-        Invoke-Native 'git' @('-C', $checkout, 'fetch', 'origin', $Ref) | Out-Null
-        $code = Invoke-Native 'git' @('-C', $checkout, 'checkout', 'FETCH_HEAD')
-        if ($code -ne 0) { Stop-Install "could not check out '$Ref' in $checkout." }
-    } else {
-        # A fast-forward can legitimately fail, and the common cause is this
-        # project's own installer: `npm install` inside the checkout rewrites
-        # `dsh-plugin/package-lock.json`, and git refuses to pull over a locally
-        # modified file. Say so, rather than reporting an update that did not
-        # happen — silently installing the old revision is the worst outcome.
-        $code = Invoke-Native 'git' @('-C', $checkout, 'pull', '--ff-only', 'origin', $Ref)
-        if ($code -ne 0) {
-            Write-Host '      could not fast-forward: the checkout has local changes git will not pull over.'
-            Write-Host '      An earlier install rewrites dsh-plugin/package-lock.json, so this is expected.'
-            Write-Host '      Installing the revision already present. To discard that generated change and update:'
-            Write-Host "        git -C `"$checkout`" checkout -- dsh-plugin/package-lock.json"
-        }
-    }
-}
-elseif (Test-Path $InstallDir) {
-    Stop-Install "$InstallDir already exists but is not a clone of this repository. Move it aside, or choose another location with -InstallDir."
-}
-else {
-    $mode = 'clone'
-    Write-Host "[1/3] Cloning the repository..." -ForegroundColor Cyan
-    Write-Host "      $Repository"
-    Write-Host "      ref $Ref"
-    Write-Host "      into $InstallDir"
-
-    # A shallow clone of a branch or tag is the fast path. It fails for a commit
-    # hash — git cannot ask for a single commit by name — so that case falls back
-    # to a full clone followed by an explicit checkout.
-    #
-    # The fallback deliberately does not claim the ref is the problem: it runs for
-    # any shallow-clone failure, including an unreachable remote. The full clone
-    # below is what produces the real error, and it is the one reported.
-    $code = Invoke-Native 'git' @('clone', '--depth', '1', '--branch', $Ref, $Repository, $InstallDir)
-    if ($code -ne 0) {
-        Write-Host "      shallow clone failed; retrying in full (this also covers a commit hash, which --depth cannot name)..."
-        if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
-        $code = Invoke-Native 'git' @('clone', $Repository, $InstallDir)
-        if ($code -ne 0) { Stop-Install "git clone failed with exit code $code." }
-        $code = Invoke-Native 'git' @('-C', $InstallDir, 'checkout', $Ref)
-        if ($code -ne 0) { Stop-Install "'$Ref' is not a branch, tag or commit in $Repository." }
-    }
-    $checkout = $InstallDir
-}
-
-if (-not (Test-Path (Join-Path $checkout 'scripts\install-plugin.mjs'))) {
-    Stop-Install "$checkout does not look like dsh-ai-model-hub (no scripts/install-plugin.mjs)."
-}
-
-# ── 3. Install into the profile ─────────────────────────────────────────────
-# Everything below is the repository's own installer. This script exists to get a
-# checkout onto the machine and hand over; it deliberately does not re-implement
-# installation, so there is one place where that logic can be right or wrong.
-Write-Host ''
-Write-Host "[2/3] Installing into profile '$Profile'..." -ForegroundColor Cyan
-
-$installerArgs = @('--no-deprecation', (Join-Path $checkout 'scripts\install-plugin.mjs'), '--profile', $Profile)
-if ($SkipDoctor) { $installerArgs += '--skip-doctor' }
-
-Push-Location $checkout
-try {
-    $code = Invoke-Native 'node' $installerArgs
-} finally {
-    Pop-Location
-}
+# ── 2. Install into the profile ─────────────────────────────────────────────
+# One command, because the CLI does the rest: pnpm installs the package into the
+# profile directory, then `dsh plugin` reconciles `dsh.profile.bundles` against the
+# installed state and appends this package, whose `dsh.bundle.patch` makes it a
+# profile layer. No profile file is edited by hand.
+Write-Host "[1/2] Installing into profile '$Profile'..." -ForegroundColor Cyan
+Write-Host "      $spec"
+$code = Invoke-Native 'dsh' @('plugin', '--profile', $Profile, 'add', $spec)
 if ($code -ne 0) {
-    Stop-Install "the installer failed with exit code $code. Nothing was half-installed: re-run this script once the cause is fixed."
+    Stop-Install "dsh plugin add failed with exit code $code. See pnpm's output above; re-run this script once the cause is fixed."
+}
+
+# ── 3. Verify ───────────────────────────────────────────────────────────────
+if (-not $SkipDoctor) {
+    Write-Host ''
+    Write-Host '[2/2] Verifying...' -ForegroundColor Cyan
+
+    if (-not (Test-Path (Join-Path $packageDir 'package.json'))) {
+        Stop-Install "the package is not in the profile at $packageDir. Check pnpm's output above; 'dsh plugin --profile $Profile list' shows what the profile actually has."
+    }
+    Write-Host "      installed: $packageDir"
+
+    # The package's own doctor, when it ships one, is the deep check: it imports
+    # the plugin exactly the way DSH's loader will.
+    $installedDoctor = Join-Path $packageDir 'scripts\doctor.mjs'
+    if (Test-Path $installedDoctor) {
+        $code = Invoke-Native 'node' @($installedDoctor, '--profile', $Profile)
+        if ($code -ne 0) {
+            Stop-Install 'verification failed: the plugin will not load until this passes. Re-run with -SkipDoctor to install without verifying.'
+        }
+    } else {
+        Write-Host '      the installed package ships no scripts/doctor.mjs; skipping the deeper check.'
+    }
 }
 
 Write-Host ''
@@ -273,8 +275,14 @@ Write-Host ''
 Write-Host "Restart DeepSeek Harness so the '$Profile' profile reloads, then ask the agent:"
 Write-Host '    List the available AI model capabilities.' -ForegroundColor White
 Write-Host ''
-Write-Host "  source:  $checkout ($mode)"
-Write-Host "  update:  re-run this script; it fast-forwards the clone and reinstalls"
-Write-Host "  catalog: the clone ships config/models.json, which the plugin finds"
-Write-Host "           without configuration. Edit that file to add real models."
-Write-Host "  remove:  dsh plugin --profile $Profile remove dsh-ai-model-hub-plugin"
+Write-Host "  source:  $spec"
+Write-Host "  profile: $profileDir  (bundle layer: $PluginPackage)"
+Write-Host "  update:  re-run this script; it re-adds the package and re-resolves the ref"
+Write-Host "  catalog: the installed package ships config/models.json, which the plugin"
+Write-Host "           finds without configuration -- it searches up from the agent's"
+Write-Host "           working directory and then from its own installation directory."
+Write-Host "           Edit that file, or set searchRoots/configPath in the plugin row."
+Write-Host "  remove:  dsh plugin --profile $Profile remove $PluginPackage"
+Write-Host ''
+Write-Host "  checkout: to install a local working tree instead, run 'npm run install:plugin'"
+Write-Host '            in that checkout -- it also runs the peer install and the build.'

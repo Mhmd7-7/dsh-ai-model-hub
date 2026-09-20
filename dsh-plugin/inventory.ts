@@ -30,8 +30,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
-import type { ModelHub } from 'dsh-ai-model-hub/hub.ts';
-import type { ModelHost } from 'dsh-ai-model-hub/index.ts';
+import type { ModelHub } from '../src/hub.ts';
+import type { ModelHost } from '../src/index.ts';
 import type { PluginLogger } from './types.ts';
 
 /** The route the settings page reads. Absolute, no trailing slash. */

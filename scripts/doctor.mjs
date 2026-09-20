@@ -23,7 +23,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** The plugin package name this doctor verifies. */
-const PLUGIN_PACKAGE = 'dsh-ai-model-hub-plugin';
+const PLUGIN_PACKAGE = 'dsh-ai-model-hub';
 
 /** Every `@deepseek-ai/*` package the plugin needs present in the profile. */
 const REQUIRED_PEERS = [
@@ -150,7 +150,7 @@ const profileManifest = readJson(profileManifestPath);
 check(
   `profile '${profile}' exists`,
   profileManifest !== undefined,
-  `no readable package.json at ${profileManifestPath}. Run: dsh plugin --profile ${profile} add <path-to-dsh-plugin>`,
+  `no readable package.json at ${profileManifestPath}. Run: dsh plugin --profile ${profile} add <package-or-path>`,
 );
 if (profileManifest === undefined) {
   report();
@@ -166,7 +166,7 @@ check(
   isBundle,
   isBundle
     ? undefined
-    : `bundles are: ${bundles.join(', ') || '(none)'}. Re-run: dsh plugin --profile ${profile} add <path-to-dsh-plugin>`,
+    : `bundles are: ${bundles.join(', ') || '(none)'}. Re-run: dsh plugin --profile ${profile} add <package-or-path>`,
 );
 
 // ── The plugin is installed and its entry point resolves ────────────────────
@@ -207,25 +207,36 @@ check(
   missingPeers.length === 0 ? undefined : `missing: ${missingPeers.join(', ')}`,
 );
 
-// ── The hub library resolves from the plugin's own scope ────────────────────
-// The plugin imports `dsh-ai-model-hub` by package name. Under a junction install the
-// real path is this repository, so it must be resolvable from there.
-let hubResolved = false;
-if (pluginDir !== undefined) {
-  const pluginRequire = createRequire(join(pluginDir, 'package.json'));
-  try {
-    pluginRequire.resolve('dsh-ai-model-hub');
-    hubResolved = true;
-  } catch {
-    hubResolved = false;
-  }
-}
+// ── The package ships both halves ───────────────────────────────────────────
+// The host half is `main` / `exports["."]`; the Web UI half is
+// `exports["./client"]` plus the `dsh.client.platform` declaration that tells DSH
+// to look for it. Both are checked here because both fail quietly at runtime: a
+// missing entry means no tools, and a missing or misplaced client bundle means the
+// "Local models" settings page never appears while every other check still passes.
+//
+// The bundle's own registration id has to be the package name, which is why the
+// package name and the id cannot drift apart: DSH keys composed client modules by
+// the loader row's package name.
+const packageManifest =
+  pluginDir === undefined ? undefined : readJson(join(pluginDir, 'package.json'));
+const clientExport = packageManifest?.exports?.['./client'];
+const clientRelative =
+  typeof clientExport === 'string' ? clientExport : clientExport?.default;
+const clientPath =
+  typeof clientRelative === 'string' && pluginDir !== undefined
+    ? join(pluginDir, clientRelative)
+    : undefined;
 check(
-  "the 'dsh-ai-model-hub' library resolves from the plugin",
-  hubResolved,
-  hubResolved
-    ? undefined
-    : `run 'npm install' in ${pluginDir ?? '<the dsh-plugin directory>'} so its 'file:..' dependency is linked`,
+  'the package declares its Web UI half',
+  packageManifest?.dsh?.client?.platform === 'web' && typeof clientRelative === 'string',
+  "the manifest must declare dsh.client.platform and an exports['./client'] bundle",
+);
+check(
+  'the client bundle exists',
+  clientPath !== undefined && existsSync(clientPath),
+  clientPath === undefined
+    ? "no exports['./client'] path in the manifest"
+    : `missing file: ${clientPath}`,
 );
 
 // ── The plugin's own bundle patch names a real plugin ───────────────────────
@@ -274,8 +285,9 @@ if (pluginDir !== undefined) {
           isPlugin,
           isPlugin
             ? undefined
-            : `it exports: ${Object.keys(target).sort().join(', ') || '(nothing)'}. The row's \`name\` must point ` +
-              `at the package exporting name/inject/apply; naming a library such as 'dsh-ai-model-hub' fails the whole boot.`,
+            : `it exports: ${Object.keys(target).sort().join(', ') || '(nothing)'}. The row's \`name\` must be the ` +
+              `bare package name, whose '.' export is the plugin (name/inject/apply). A subpath such as ` +
+              `'dsh-ai-model-hub/library' resolves to the hub library and fails the whole boot.`,
         );
         check('the patch row has an id usable for overrides', id.length > 0);
       } catch (error) {
@@ -357,7 +369,8 @@ function report() {
     for (const anchor of catalogSearched) console.log(`  ${anchor}`);
     console.log('The plugin still loads: it logs "model hub disabled", registers no');
     console.log('tools, and lets DSH boot. Create models.json in one of those');
-    console.log('directories (see config/models.mock.json) to enable it.');
+    console.log('directories to enable it — config/models.json in this checkout is a');
+    console.log('working starter catalog you can copy or point configPath at.');
   }
   console.log('');
 

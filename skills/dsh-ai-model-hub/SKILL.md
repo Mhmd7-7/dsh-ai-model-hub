@@ -134,7 +134,8 @@ it. Two switches must agree before anything launches, and both are data:
 2. **The deployment** opts in through the plugin row's config:
    `allowProcessLaunch: true`.
 
-Only a live server needs `lifecycle`; an in-process mock needs none. The executable is
+Only a live server needs `lifecycle`; a model that answers in-process needs none, and
+no shipped catalog declares one. The executable is
 matched by basename against the built-in allowlist of local inference runtimes
 (`python`, `python.exe`, `ollama`, `comfyui`, `llama-server`, `blender`, …), so
 `C:/ComfyUI/venv/Scripts/python.exe` and `ollama` need nothing extra. A launcher
@@ -187,9 +188,10 @@ order, check:
 ## Pitfalls that cost real time
 
 - **A wrong model name can look like success.** With `openai_compatible`, a model
-  name Ollama does not have answers HTTP 404, the hub falls back to a mock model,
-  and you get fixture output instead of an error. Check the `modelId` in the result
-  against what you asked for — a mock id means the real one was unreachable.
+  name Ollama does not have answers HTTP 404; with two models declared for the
+  same capability the hub then falls back to the other one. Check the `modelId` in
+  the result against what you asked for — a different id means the one you wanted
+  was unreachable.
 - **`allowProcessLaunch` defaults to false.** Then `start_model` refuses with
   `UNSAFE_OPERATION` and only already-running engines are usable. That is the
   deployment's choice, not a bug — and not a reason to launch the engine yourself.
@@ -198,14 +200,15 @@ order, check:
   the catalog can serve, not what happens to be running right now. Check health, then
   start it, before concluding anything is unavailable.
 - **Two names in `cordis.patch.yml` are easy to conflate.** `id` is the row's name in
-  the composed tree; `name` is the module specifier the loader imports and must be
-  `dsh-ai-model-hub-plugin`. Pointing `name` at the `dsh-ai-model-hub` library makes
-  the whole profile refuse to boot.
+  the composed tree; `name` is the module specifier the loader imports and must be the
+  bare package name, `dsh-ai-model-hub`, whose `.` export is the plugin. Pointing it at
+  a subpath (`dsh-ai-model-hub/library`) loads the wrong thing, and a subpath entry
+  silently drops the Web UI half.
 - **Do not hand-edit `~/.dsh/profiles/<profile>/cordis.yml`.** It is generated; the
   patch layers and `package.json` are the inputs.
 - **`unavailable` beats a guess.** When `list_capabilities` reports a capability as
-  not served here, say so. Falling back to a mock model silently is worse than
-  reporting the gap.
+  not served here, say so — adding a model for it is a config edit, and pretending
+  it worked is worse than reporting the gap.
 
 ## Where things live
 

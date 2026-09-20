@@ -30,8 +30,8 @@ when the author omits them, and to render the capability snapshot the agent sees
 so it can compose workflows.
 
 Adding a capability means editing this tuple. Nothing else in the hub branches on
-capability identity except the mock adapter's handler table, which is exactly the
-layer that *should* know what each capability produces.
+capability identity except the test-double adapter's handler table, which is
+exactly the layer that *should* know what each capability produces.
 
 ---
 
@@ -212,16 +212,16 @@ with a real engine, without leaking the override.
 
 | Kind | Status | Covers |
 |---|---|---|
-| `mock` | ✅ implemented | Phase 1 fixtures: text, PNG images, STL meshes, WAV audio, JSON video manifests |
+| `mock` | ✅ implemented | **A test double, never a shipped model.** In-process, deterministic, and used by this repository's own tests: text, PNG images, STL meshes, WAV audio, JSON video manifests. No catalog in `config/` references it. |
 | `openai_compatible` | ✅ implemented | Ollama, llama.cpp, vLLM, LM Studio, KoboldCpp — `text_to_text` and `image_understanding` |
-| `http_json` | contract ready | A1111/Forge, ComfyUI, and any JSON-in/JSON-out engine |
+| `http_json` | ✅ implemented | A1111/Forge, and any JSON-in/JSON-out image engine |
+| `comfyui` | ✅ implemented | ComfyUI's graph API, driven by an API-format workflow template |
 | `cli` | contract ready | Process-per-request engines reading a local checkpoint |
 
-`http_json` and `cli` are registered as valid configuration — the catalog accepts
-them, and a model declaring one is reported honestly as `error` with "no adapter
-registered for kind …" rather than failing silently — but they have no
-implementation yet. They are the documented Phase 3–4 work; see
-[roadmap.md](roadmap.md).
+`cli` is registered as valid configuration — the catalog accepts it, and a model
+declaring it is reported honestly as `error` with "no adapter registered for
+kind …" rather than failing silently — but it has no implementation yet. It is
+documented Phase 4 work; see [roadmap.md](roadmap.md).
 
 ---
 
@@ -233,13 +233,13 @@ loading it.
 
 ```json
 {
-  "id": "image_mock-image-for-a-futuris_1e2ca8fae09a",
+  "id": "image_a-futuristic-city-at-dus_1e2ca8fae09a",
   "type": "image",
-  "uri": "file:///…/files/image_mock-image-for-a-futuris_1e2ca8fae09a.png",
+  "uri": "file:///…/files/image_a-futuristic-city-at-dus_1e2ca8fae09a.png",
   "mimeType": "image/png",
   "byteLength": 67888,
   "createdAt": 1758300000000,
-  "producerModelId": "mock_image_model",
+  "producerModelId": "comfyui_z_image_turbo",
   "metadata": { "width": 640, "height": 384, "format": "png", "prompt": "…" }
 }
 ```

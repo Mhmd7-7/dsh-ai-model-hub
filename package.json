@@ -1,31 +1,58 @@
 {
   "name": "dsh-ai-model-hub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "A modular local AI model ecosystem for DeepSeek Harness: capability catalog, router, runtime manager, adapters, artifacts, and a thin DSH plugin layer.",
+  "description": "DeepSeek Harness plugin and library for local AI models: a capability catalog, router, runtime manager, and real engine adapters. The agent names a capability; the hub selects, starts, and calls a suitable model.",
   "type": "module",
   "engines": {
     "node": ">=22.6.0"
   },
+  "main": "./lib/dsh-plugin/index.js",
+  "types": "./dsh-plugin/index.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
-    },
-    "./index.ts": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
-    },
-    "./hub.ts": {
-      "types": "./src/hub.ts",
-      "default": "./src/hub.ts"
-    },
-    "./dsh-plugin": {
       "types": "./dsh-plugin/index.ts",
-      "default": "./dsh-plugin/index.ts"
+      "default": "./lib/dsh-plugin/index.js"
+    },
+    "./plugin": {
+      "types": "./dsh-plugin/index.ts",
+      "default": "./lib/dsh-plugin/index.js"
+    },
+    "./library": {
+      "types": "./src/index.ts",
+      "default": "./lib/src/index.js"
+    },
+    "./hub": {
+      "types": "./src/hub.ts",
+      "default": "./lib/src/hub.js"
+    },
+    "./client": {
+      "default": "./dsh-plugin/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
+  "files": [
+    "lib",
+    "src",
+    "dsh-plugin",
+    "config",
+    "skills",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-test-isolation=none tests/run.ts",
     "test:isolated": "node --test \"tests/*.test.ts\"",
@@ -41,7 +68,8 @@
     "@deepseek-ai/dsh-llm": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
@@ -56,5 +84,15 @@
     "@deepseek-ai/schemastery": "3.18.2",
     "@types/node": "24.10.1",
     "typescript": "5.9.3"
-  }
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "local-models",
+    "capability-catalog",
+    "model-router"
+  ],
+  "license": "MIT"
 }

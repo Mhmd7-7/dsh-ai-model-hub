@@ -8,6 +8,12 @@
  *   profile resolution → module import → apply() → catalog discovery →
  *   hub construction → tool registration
  *
+ * The package name is `dsh-ai-model-hub`: the repository IS the plugin package, so
+ * its root `main`/`exports["."]` (`lib/dsh-plugin/index.js`) is the entry point
+ * DSH's loader imports. When the profile has no copy to resolve — nothing is
+ * installed yet — this falls back to that same file in this repository, which is
+ * the file a link install loads anyway.
+ *
  * It is deliberately separate from `doctor.mjs` because it *does* work rather than
  * inspect: it registers nine tools, reads a model catalog, and offers the bundled
  * skill. Point it at a throwaway profile if you would rather not touch one.
@@ -22,10 +28,10 @@
  */
 
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /**
  * Read a `--flag value` argument.
@@ -41,6 +47,14 @@ function readArgument(flag, fallback) {
   return fallback;
 }
 
+/**
+ * The plugin package name. The repository root IS the package, so this is both
+ * the name the profile resolves and the name of the bundle layer it registers.
+ */
+const PLUGIN_PACKAGE = 'dsh-ai-model-hub';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(here, '..');
 const profile = readArgument('profile', 'web');
 const dshHome = process.env['DSH_HOME'] ?? join(homedir(), '.dsh');
 const profileDir = join(dshHome, 'profiles', profile);
@@ -48,37 +62,86 @@ const profileDir = join(dshHome, 'profiles', profile);
 console.log('dsh-ai-model-hub smoke test');
 console.log(`  profile: ${profileDir}`);
 console.log(`  cwd:     ${process.cwd()}`);
-console.log('');
 
 const profileRequire = createRequire(join(profileDir, 'package.json'));
 
-// Resolve through the profile, exactly as the loader does.
+/**
+ * The relative entry path a package manifest declares.
+ *
+ * `exports["."]` is what the loader actually honours and `main` is the fallback,
+ * so read them in that order rather than assuming one.
+ *
+ * @param {any} manifest - a parsed package.json.
+ * @returns {string} the relative path of the plugin entry point.
+ */
+function entryFromManifest(manifest) {
+  const root = manifest?.exports?.['.'];
+  const exported = typeof root === 'string' ? root : root?.default;
+  return exported ?? manifest?.main ?? 'lib/dsh-plugin/index.js';
+}
+
+// Resolve through the profile, exactly as the loader does. The fallback is this
+// repository's own `main`/`exports["."]` — the same file the profile is given —
+// so the script still works from a checkout that has not been installed, and
+// either way it exercises the real entry point rather than a copy of it.
 let entryPath;
+let anchor;
+let origin;
+let fallbackReason;
 try {
-  const manifestPath = profileRequire.resolve('dsh-ai-model-hub-plugin/package.json');
+  const manifestPath = profileRequire.resolve(`${PLUGIN_PACKAGE}/package.json`);
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  entryPath = join(dirname(manifestPath), manifest.main ?? 'index.ts');
+  entryPath = join(dirname(manifestPath), entryFromManifest(manifest));
+  anchor = profileRequire;
+  origin = `the '${profile}' profile`;
 } catch (error) {
-  console.error(`FAILED: the plugin does not resolve from the profile: ${error.message}`);
+  const manifestPath = join(repoRoot, 'package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  entryPath = join(repoRoot, entryFromManifest(manifest));
+  anchor = createRequire(manifestPath);
+  origin = 'this repository';
+  fallbackReason = error.message;
+}
+
+if (!existsSync(entryPath)) {
+  console.error(`FAILED: the plugin entry point does not exist: ${entryPath}`);
+  console.error('A checkout needs its build output — run `npm run build` at the repository root.');
   process.exit(1);
 }
 
-const plugin = await import(pathToFileURL(entryPath).href);
+console.log(`  plugin:  ${entryPath}`);
+console.log(`  source:  ${origin}`);
+if (fallbackReason !== undefined) {
+  console.log(`           (the profile does not resolve '${PLUGIN_PACKAGE}': ${fallbackReason})`);
+}
+console.log('');
+
+let plugin;
+try {
+  plugin = await import(pathToFileURL(entryPath).href);
+} catch (error) {
+  console.error(`FAILED: the plugin module could not be imported from ${entryPath}: ${error.message}`);
+  console.error('A copy under node_modules must be JavaScript: Node refuses to strip types inside');
+  console.error('node_modules (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). That is why this');
+  console.error('package ships lib/ and points main/exports["."] at it — reinstall the profile copy');
+  console.error("if the file above is a .ts source, which means the profile holds an old version.");
+  process.exit(1);
+}
 
 // A real cordis Context, with only the members the plugin touches replaced. The
 // real Context matters: `Service` registers itself through `ctx.reflect`, so a
 // plain object literal cannot host a service.
 //
-// cordis is resolved through the *profile*, not through this script's location.
-// The plugin will hold a `Context` from whichever copy the loader gives it, and
-// the service registry is keyed by that copy, so the smoke test has to use the
-// same one or it is not reproducing what DSH does.
+// cordis is resolved through whichever scope the plugin itself came from, not
+// through this script's location. The plugin will hold a `Context` from whichever
+// copy the loader gives it, and the service registry is keyed by that copy, so
+// the smoke test has to use the same one or it is not reproducing what DSH does.
 let Context;
 try {
-  const cordisPath = profileRequire.resolve('@deepseek-ai/cordis');
+  const cordisPath = anchor.resolve('@deepseek-ai/cordis');
   ({ Context } = await import(pathToFileURL(cordisPath).href));
 } catch (error) {
-  console.error(`FAILED: @deepseek-ai/cordis does not resolve from the profile: ${error.message}`);
+  console.error(`FAILED: @deepseek-ai/cordis does not resolve from ${origin}: ${error.message}`);
   process.exit(1);
 }
 

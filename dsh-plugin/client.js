@@ -16,8 +16,13 @@
  * `@deepseek-ai/dsh-client-ui-settings`, which is how every feature page joins the
  * settings shell.
  */
+// The registration id is the PACKAGE NAME, not a free label: DSH keys composed
+// client modules by the loader row's package name, and a bundle registered under
+// any other id is stored where nothing ever requires it — the settings section
+// then silently never mounts. This file is the client half of the package
+// `dsh-ai-model-hub`, so the id is exactly that.
 window.__ModuleLoader__.load({
-  id: 'dsh-ai-model-hub-plugin',
+  id: 'dsh-ai-model-hub',
   factory: (require) => {
     const module = { exports: {} };
 

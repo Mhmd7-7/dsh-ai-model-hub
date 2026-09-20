@@ -495,18 +495,32 @@ describe('the catalog drives behaviour, not the code', () => {
 });
 
 describe('configuration loading', () => {
-  it('loads and validates the shipped mock catalog', () => {
-    const loaded = loadCatalogConfig({ configPath: 'config/models.mock.json' });
-    assert.equal(loaded.config.models.length, 3);
-    assert.deepEqual(
-      loaded.config.models.map((model) => model.id).sort(),
-      ['mock_3d_model', 'mock_image_model', 'mock_text_model'],
-    );
-  });
-
-  it('loads the shipped active catalog', () => {
+  it('loads the shipped active catalog, which holds real engines only', () => {
     const loaded = loadCatalogConfig({ configPath: 'config/models.json' });
-    assert.equal(loaded.config.models.length, 3);
+
+    // No count assertion: the catalog is meant to be edited by whoever runs it.
+    // What must hold is that nothing in the shipped file is a mock — a synthetic
+    // model reaching a real deployment would answer with fixture output while
+    // looking like success.
+    assert.ok(loaded.config.models.length >= 1);
+    for (const model of loaded.config.models) {
+      assert.notEqual(model.adapter, 'mock', `${model.id} must not use the mock adapter`);
+      assert.doesNotMatch(model.id, /mock/, `${model.id} must not be a mock model id`);
+      assert.ok(model.host !== undefined || model.runtime !== undefined, `${model.id} has no engine`);
+    }
+    assert.ok(
+      loaded.config.models.some((model) => model.id === 'ollama_text_model'),
+      'the starter catalog should keep a real text model',
+    );
+    assert.ok(
+      loaded.config.models.some((model) => model.id === 'comfyui_z_image_turbo'),
+      'the starter catalog should keep a real image model',
+    );
+    // Every host is external: the hub talks to endpoints, it never launches one
+    // unless an operator opts in.
+    for (const host of loaded.config.hosts ?? []) {
+      assert.notEqual(host.lifecycle?.startable, true, `${host.id} must not be startable by default`);
+    }
   });
 
   it('validates the real-engine example catalog, ignoring its $comment fields', () => {

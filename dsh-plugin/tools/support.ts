@@ -13,8 +13,8 @@
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
-import type { Artifact, ModelView, ModelRuntimeStatus } from 'dsh-ai-model-hub/index.ts';
-import { describeArtifact, toHubError } from 'dsh-ai-model-hub/index.ts';
+import type { Artifact, ModelView, ModelRuntimeStatus } from '../../src/index.ts';
+import { describeArtifact, toHubError } from '../../src/index.ts';
 
 /**
  * Wrap text as a single model-facing content block.

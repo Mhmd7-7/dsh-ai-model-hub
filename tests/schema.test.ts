@@ -357,7 +357,7 @@ describe('published JSON Schema', () => {
 
   it('accepts every shipped catalog', () => {
     const schema = loadSchema();
-    for (const relative of ['config/models.json', 'config/models.mock.json', 'config/examples/real-models.example.json']) {
+    for (const relative of ['config/models.json', 'config/examples/real-models.example.json']) {
       const document = JSON.parse(readFileSync(join(process.cwd(), relative), 'utf8')) as unknown;
       const issues = validate(schema, schema, document, '$');
       assert.deepEqual(issues, [], `${relative} failed the published schema:\n${issues.map((issue) => `  ${issue.path}: ${issue.message}`).join('\n')}`);

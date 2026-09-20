@@ -70,9 +70,9 @@ export interface Rgb {
 /**
  * Deterministically derive a colour from a string.
  *
- * The mock models are fixtures, so their output should be stable across runs:
- * the same prompt must always yield the same picture. Hashing the seed gives
- * that property without any global state.
+ * The test double's models are fixtures, so their output should be stable across
+ * runs: the same prompt must always yield the same picture. Hashing the seed
+ * gives that property without any global state.
  *
  * @param seed - the string to colourise, typically the prompt.
  * @returns an RGB triple.

@@ -4,11 +4,18 @@
  * The point of this example is what it does *not* contain: no engine name, no
  * launch command, no model-specific branching. It states a sequence of
  * capabilities and lets the router satisfy each step. Swap SDXL for ComfyUI, or
- * the mock mesh generator for TripoSR, and this file does not change.
+ * ComfyUI for Automatic1111, and this file does not change.
  *
- * Run it with:
+ * Which steps can actually run is a property of the catalog, not of this file:
+ * the pipeline below spans four capabilities, so it needs a catalog that serves
+ * all four. The shipped `config/models.json` serves one of them, which is why
+ * the run stops early and says which ones are missing rather than failing
+ * halfway through. Run it with:
  *
- *   node examples/workflow.ts
+ *   node examples/workflow.ts [path/to/catalog.json]
+ *
+ * The catalog path defaults to `config/models.json`, and every engine it names
+ * must already be running — the hub never launches a process on its own.
  *
  * @module dsh-ai-model-hub/examples/workflow
  */
@@ -125,7 +132,8 @@ async function runStep(
  */
 async function main(): Promise<void> {
   const artifactRoot = await mkdtemp(join(tmpdir(), 'dsh-ai-model-hub-workflow-'));
-  const loaded = loadCatalogConfig({ configPath: 'config/models.mock.json' });
+  const catalogPath = process.argv[2] ?? 'config/models.json';
+  const loaded = loadCatalogConfig({ configPath: catalogPath });
   const hub = new ModelHub({
     config: loaded.config,
     artifactRoot,
@@ -147,11 +155,19 @@ async function main(): Promise<void> {
     );
     if (unavailable.length > 0) {
       console.error(
-        `\nThis deployment cannot run the pipeline. Missing capabilities: ${unavailable
+        `\n${loaded.path} cannot run the whole pipeline. Missing capabilities: ${unavailable
           .map((step) => step.capability)
           .join(', ')}`,
       );
-      console.error('Run with config/models.mock.json, which serves all four.');
+      console.error(
+        'Add a model for each one — hosts and entries for A1111, ComfyUI and llama.cpp\n' +
+          'are ready to copy in config/examples/real-models.example.json, and\n' +
+          'docs/adding-a-model.md walks through the edit. No code changes are involved.',
+      );
+      console.error(
+        'Every engine is external, so the hub never starts one: start it yourself, then\n' +
+          'run this again with the catalog that declares it.',
+      );
       process.exitCode = 1;
       return;
     }

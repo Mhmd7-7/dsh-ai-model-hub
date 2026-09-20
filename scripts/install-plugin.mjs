@@ -1,16 +1,27 @@
 /**
  * Cross-platform installer.
  *
- * Runs the same three steps as `install-plugin.ps1`, but from Node, so the
+ * Runs the same four steps as `install-plugin.ps1`, but from Node, so the
  * install works on macOS and Linux too and needs no shell of its own.
  *
- *   1. `npm install` inside `dsh-plugin/` to materialise the DSH peer closure.
- *   2. `dsh plugin add` to install the plugin and register it as a profile layer.
- *   3. Verify by importing the plugin exactly the way DSH's loader will.
+ *   1. `npm install` at the repository root, to materialise the DSH peer closure
+ *      the plugin imports at runtime.
+ *   2. `npm run build`, to emit `lib/`. The package's `main` and `exports["."]`
+ *      point at that compiled JavaScript, because Node refuses to strip types
+ *      inside `node_modules` — which is where the profile keeps the package.
+ *   3. `dsh plugin --profile <p> add <repository root>` to install the package
+ *      into the profile and register it as a profile layer.
+ *   4. Verify by importing the plugin exactly the way DSH's loader will.
+ *
+ * This repository IS the plugin package: `package.json` at the root carries the
+ * `name`/`inject`/`apply` entry, the `dsh.bundle.patch` layer and the `./client`
+ * half. There is no separate package under `dsh-plugin/` any more, so the thing
+ * to install is the repository root itself.
  *
  * Usage:
  *
  *   node scripts/install-plugin.mjs [--profile web] [--skip-doctor]
+ *   node scripts/install-plugin.mjs --help
  *
  * @module dsh-ai-model-hub/scripts/install-plugin
  */
@@ -23,7 +34,10 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
-const pluginDir = join(repoRoot, 'dsh-plugin');
+
+// The plugin path is the repository root: the root manifest IS the plugin
+// package (`main`/`exports["."]` → `lib/dsh-plugin/index.js`).
+const pluginDir = repoRoot;
 
 /**
  * Read a `--flag value` argument.
@@ -44,6 +58,32 @@ const skipDoctor = process.argv.includes('--skip-doctor');
 
 const dshHome = process.env['DSH_HOME'] ?? join(homedir(), '.dsh');
 const profileDir = join(dshHome, 'profiles', profile);
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log(`dsh-ai-model-hub plugin installer
+
+Installs the checkout this script lives in (${repoRoot}).
+
+Usage: node scripts/install-plugin.mjs [options]
+
+Options:
+  -p, --profile <name>  DSH profile to install into (default: web)
+      --skip-doctor     install only; skip the post-install verification
+  -h, --help            show this help
+
+Steps:
+  1. npm install at the repository root   (the plugin's DSH peer closure)
+  2. npm run build                        (emits lib/, the JavaScript DSH loads)
+  3. dsh plugin --profile <name> add ${pluginDir}
+  4. node scripts/doctor.mjs --profile <name>
+
+To install from GitHub instead, with no checkout on the machine:
+
+  dsh plugin --profile <name> add github:Mhmd7-7/dsh-ai-model-hub
+
+...or run install.ps1 / install.sh, which do exactly that.`);
+  process.exit(0);
+}
 
 /**
  * Resolve a command to an executable that can be spawned without a shell.
@@ -107,16 +147,25 @@ console.log(`  plugin:  ${pluginDir}`);
 console.log(`  profile: ${profileDir}`);
 console.log('');
 
-if (!existsSync(join(pluginDir, 'package.json'))) {
+const pluginManifestPath = join(pluginDir, 'package.json');
+if (!existsSync(pluginManifestPath)) {
   console.error(`Could not find the plugin package at ${pluginDir}`);
+  console.error('The repository root is the plugin package; run this script from a checkout.');
+  process.exit(1);
+}
+const pluginManifest = JSON.parse(readFileSync(pluginManifestPath, 'utf8'));
+const pluginPackageName = pluginManifest.name;
+if (typeof pluginPackageName !== 'string' || pluginPackageName.length === 0) {
+  console.error(`  ${pluginManifestPath} declares no "name"`);
   process.exit(1);
 }
 
 // ── 1. The plugin's dependencies ────────────────────────────────────────────
 // DSH installs plugins as junction links, so Node loads the plugin from its real
-// path here rather than from a copy inside the profile. Resolution therefore walks
-// up from this repository, and the node_modules that matters is the plugin's own.
-console.log("[1/3] Installing the plugin's DSH dependencies...");
+// path here rather than from a copy inside the profile. Resolution therefore
+// walks up from this repository, and the node_modules that matters is the one at
+// the repository root — the same directory that holds package.json.
+console.log("[1/4] Installing the plugin's DSH dependencies...");
 const installed = run(
   'npm',
   ['install', '--no-audit', '--no-fund', '--cache', join(repoRoot, '.npm-cache')],
@@ -144,17 +193,37 @@ if (missing.length > 0) {
 }
 console.log('  dependencies present.');
 
-// ── 2. Install into the profile ─────────────────────────────────────────────
-// `dsh plugin add` also appends the package to `dsh.profile.bundles`, because the
-// plugin declares `dsh.bundle.patch`. No profile file is edited by hand.
+// ── 2. The JavaScript DSH actually loads ────────────────────────────────────
+// `main` and `exports["."]` point at `lib/dsh-plugin/index.js`. DSH installs the
+// package as a dependency of the profile, i.e. under `node_modules`, where Node
+// refuses to strip types — so the compiled output has to exist before the
+// package is added, and the build has to run here rather than on the user's
+// machine. (`npm run build` = `tsc -p tsconfig.build.json`.)
 console.log('');
-console.log(`[2/3] Installing into profile '${profile}'...`);
+console.log('[2/4] Building lib/ (the JavaScript DSH loads)...');
+if (!run('npm', ['run', 'build'], pluginDir)) {
+  console.error('  npm run build failed.');
+  process.exit(1);
+}
+const builtEntry = join(pluginDir, 'lib', 'dsh-plugin', 'index.js');
+if (!existsSync(builtEntry)) {
+  console.error(`  the build did not emit ${builtEntry}`);
+  console.error('  Check "main" in package.json and the outDir in tsconfig.build.json.');
+  process.exit(1);
+}
+console.log(`  build output present: ${builtEntry}`);
+
+// ── 3. Install into the profile ─────────────────────────────────────────────
+// `dsh plugin add` also appends the package to `dsh.profile.bundles`, because the
+// package declares `dsh.bundle.patch`. No profile file is edited by hand.
+console.log('');
+console.log(`[3/4] Installing into profile '${profile}'...`);
 if (!run('dsh', ['plugin', '--profile', profile, 'add', pluginDir])) {
   console.error('  dsh plugin add failed.');
   process.exit(1);
 }
 
-// ── 2b. Guarantee the bundle layer is registered ────────────────────────────
+// ── 3b. Guarantee the bundle layer is registered ────────────────────────────
 // `dsh plugin add` reconciles `dsh.profile.bundles` against installed packages by
 // checking whether each dependency declares `dsh.bundle.patch`. That check reads
 // the manifest through the profile's resolution, and it silently does the wrong
@@ -167,12 +236,6 @@ if (!run('dsh', ['plugin', '--profile', profile, 'add', pluginDir])) {
 const profileManifestPath = join(profileDir, 'package.json');
 if (!existsSync(profileManifestPath)) {
   console.error(`  profile manifest missing at ${profileManifestPath}`);
-  process.exit(1);
-}
-const pluginManifest = JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8'));
-const pluginPackageName = pluginManifest.name;
-if (typeof pluginPackageName !== 'string' || pluginPackageName.length === 0) {
-  console.error(`  ${join(pluginDir, 'package.json')} declares no "name"`);
   process.exit(1);
 }
 
@@ -192,10 +255,10 @@ if (bundles.includes(pluginPackageName)) {
   console.log(`  registered '${pluginPackageName}' as a bundle layer.`);
 }
 
-// ── 3. Verify ───────────────────────────────────────────────────────────────
+// ── 4. Verify ───────────────────────────────────────────────────────────────
 if (!skipDoctor) {
   console.log('');
-  console.log('[3/3] Verifying...');
+  console.log('[4/4] Verifying...');
   if (!run('node', [join(here, 'doctor.mjs'), '--profile', profile])) {
     console.error('');
     console.error('Verification failed; the plugin will not load until this passes.');
@@ -209,7 +272,11 @@ console.log('');
 console.log(`Restart DeepSeek Harness so the '${profile}' profile reloads, then ask the agent:`);
 console.log('    List the available AI model capabilities.');
 console.log('');
+console.log(`  plugin:  ${pluginDir}`);
+console.log(`  profile: ${profileDir}`);
+console.log(`  remove:  dsh plugin --profile ${profile} remove ${pluginPackageName}`);
+console.log('');
 console.log('The plugin finds its model catalog by searching upward from the DSH working');
-console.log("directory and then from this plugin's own installation directory, so the");
+console.log("directory and then from this package's own installation directory, so the");
 console.log('catalog shipped in this repository is used with no configuration. Set');
 console.log('`searchRoots` or `configPath` in the plugin row to point it somewhere else.');

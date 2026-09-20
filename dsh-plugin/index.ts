@@ -41,10 +41,10 @@ import { createArtifactRootResolver } from './workspace.ts';
 import { registerDiscoveryTools, registerRoutingTool } from './tools/discovery.ts';
 import { registerLifecycleTools } from './tools/lifecycle.ts';
 import { registerInvokeTool } from './tools/invoke.ts';
-import { ModelHub, ModelHubError, loadCatalogFromAnchors, toHubError } from 'dsh-ai-model-hub/index.ts';
-import { DEFAULT_EXECUTION_POLICY } from 'dsh-ai-model-hub/index.ts';
-import type { ModelCatalogConfig } from 'dsh-ai-model-hub/index.ts';
-import type { ModelHost } from 'dsh-ai-model-hub/index.ts';
+import { ModelHub, ModelHubError, loadCatalogFromAnchors, toHubError } from '../src/index.ts';
+import { DEFAULT_EXECUTION_POLICY } from '../src/index.ts';
+import type { ModelCatalogConfig } from '../src/index.ts';
+import type { ModelHost } from '../src/index.ts';
 
 /**
  * This plugin's own installation directory.

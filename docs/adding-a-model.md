@@ -19,10 +19,15 @@ The router, the DSH plugin, and DeepSeek Harness are never touched at any level.
 
 1. Copy the relevant host and model entries from
    [`config/examples/real-models.example.json`](../config/examples/real-models.example.json)
-   into `config/models.json`.
+   into `config/models.json`. The shipped catalog already declares an Ollama host
+   and a ComfyUI host, so often the host is there and only a model entry is new.
 2. Adjust `id`, `name`, `capabilities`, and `adapterConfig`.
 3. Restart DSH, or reload the plugin.
 4. Ask the agent: *"what capabilities are available?"*
+
+Nothing in `config/models.json` is synthetic. Every entry names an engine that
+must already be running, or that the hub launches only if the entry says
+`startable: true` *and* the deployment set `allowProcessLaunch: true`.
 
 ### Why hosts exist
 
@@ -296,7 +301,8 @@ Then a model uses it with `"adapter": "my_engine"`.
 
 1. Add it to `CAPABILITIES` and `CAPABILITY_IO` in
    `src/catalog/capabilities.ts`.
-2. Add a handler to the mock adapter's `HANDLERS` table.
+2. Add a handler to the test double's `HANDLERS` table in
+   `src/adapters/mock.ts`, so the capability is exercisable without an engine.
 3. Add a real adapter handler.
 4. Mirror it in `src/catalog/model-catalog.schema.json` — the drift test in
    `tests/schema.test.ts` will fail until you do, which is the point.
@@ -314,9 +320,14 @@ After adding anything, confirm:
 
 ```sh
 npm run typecheck    # strict TypeScript
-npm test             # 182 tests, including schema drift
+npm test             # unit, integration, adapter, and plugin suites
 npm run demo         # the vertical slice still works
 ```
+
+`npm run demo` needs the engine the catalog names to be running, since the hub
+never starts one on its own. Both examples take a catalog path as their first
+argument, so a scratch catalog can be demonstrated without touching the shipped
+one: `npm run demo -- path/to/catalog.json`.
 
 Then, from an agent session:
 

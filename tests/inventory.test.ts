@@ -403,7 +403,7 @@ describe('the settings page (browser half)', () => {
         await import(pathToFileURL(clientPath).href);
       }
 
-      assert.equal(capturedId, 'dsh-ai-model-hub-plugin', 'the module id matches the package name');
+      assert.equal(capturedId, 'dsh-ai-model-hub', 'the module id matches the package name');
       assert.notEqual(capturedFactory, undefined);
 
       // A minimal React with hooks that actually hold state, so the page's

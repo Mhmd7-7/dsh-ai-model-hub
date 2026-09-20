@@ -385,7 +385,7 @@ export function catalogFromConfig(
  *
  * @param model - the resolved model.
  * @param indent - leading whitespace for nested rendering.
- * @returns a summary such as `mock_image_model — Mock Image Model [image_generation]`.
+ * @returns a summary such as `comfyui_z_image_turbo — Z-Image Turbo (ComfyUI) [image_generation]`.
  */
 export function summarizeModel(model: ResolvedModel, indent = ''): string {
   const host = model.hostId === undefined ? '' : ` via host ${model.hostId}`;

@@ -71,7 +71,8 @@ the test suite:
 | **availability** | may the router choose this? | health + config + resources |
 | **lifecycle** | is there a process, and do we own it? | process ownership, endpoint liveness |
 
-An in-process adapter (the mock) is *healthy* with no process at all. Treating
+An in-process adapter — the mock, which exists only as a test double — is
+*healthy* with no process at all. Treating
 "healthy" as "already running" made the hub refuse to launch models it should
 launch. The fix is that liveness is established only by an owned process or by a
 live **endpoint** — never by an adapter's own opinion of itself.
@@ -96,20 +97,21 @@ The router satisfies the second call by checking that some model declares
 1  agent            invoke_model({ capability: 'text_to_image', prompt: '…' })
 2  plugin           validates args through the real DSH tool schema
 3  hub              resolveRequestInputs()      → no inputs
-4  router           filter by capability        → mock_text_model rejected
-                                                → mock_3d_model   rejected
-                                                → mock_image_model eligible
-                    sort by priority, then id   → mock_image_model
-5  runtime          ensureReady()               → healthy, no cold start needed
-6  adapter          mock.invoke()               → renders a real PNG
-7  artifacts        store.put()                 → image_mock-image-for-…_1e2ca8.png
+4  router           filter by capability        → ollama_text_model     rejected
+                                                 → comfyui_z_image_turbo eligible
+                    sort by priority, then id   → comfyui_z_image_turbo
+5  runtime          ensureReady()               → endpoint live, no cold start needed
+6  adapter          comfyui.invoke()            → queues the graph, returns a PNG
+7  artifacts        store.put()                 → image_a-futuristic-city_1e2ca8.png
 8  hub              InvocationResult { outputs: [artifact], decision, durationMs }
 9  plugin           renders model-facing text naming the artifact id
 10 agent            continues, optionally feeding that id into the next step
 ```
 
 Steps 4–8 are capability-generic. Step 6 is the only one that knows anything
-about images, and it is replaceable by a config edit.
+about images, and it is replaceable by a config edit. The two ids above are the
+ones the shipped `config/models.json` declares; a catalog that declares others
+produces the same shape with different names, because nothing above reads them.
 
 ## Routing policy
 

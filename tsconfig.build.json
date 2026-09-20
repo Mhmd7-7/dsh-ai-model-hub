@@ -1,0 +1,29 @@
+{
+  // Build configuration: emit the same sources `typecheck` checks, as JavaScript, into lib/.
+  //
+  // Why a build exists at all. Node runs this project's .ts sources directly
+  // through type stripping while it is a linked checkout, but it refuses to strip
+  // types for any file under node_modules
+  // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). A profile that installs this
+  // package by name — `dsh plugin add github:Mhmd7-7/dsh-ai-model-hub` — gets a
+  // copy inside the profile's node_modules, so it can only be loaded if the
+  // JavaScript is already there. lib/ is committed for exactly that reason:
+  // installing from GitHub needs no build step on the user's machine.
+  //
+  // `rewriteRelativeImportExtensions` is load-bearing. The sources import each
+  // other as `./x.ts`; the emitted JavaScript must say `./x.js`, or Node would
+  // look for a TypeScript file inside node_modules — the failure this build
+  // exists to prevent.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./lib",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false,
+    "removeComments": false,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["src/**/*.ts", "dsh-plugin/**/*.ts"],
+  "exclude": ["node_modules", ".npm-cache", "tests", "examples", "lib"]
+}

@@ -20,9 +20,9 @@
 
 import { Service } from '@deepseek-ai/cordis';
 import type { Context } from '@deepseek-ai/cordis';
-import type { ModelHub } from 'dsh-ai-model-hub/hub.ts';
-import { ModelHub as Hub } from 'dsh-ai-model-hub/hub.ts';
-import type { ModelCatalogConfig } from 'dsh-ai-model-hub/index.ts';
+import type { ModelHub } from '../src/hub.ts';
+import { ModelHub as Hub } from '../src/hub.ts';
+import type { ModelCatalogConfig } from '../src/index.ts';
 
 /** The cordis service name other plugins inject. */
 export const MODEL_HUB_SERVICE = 'modelHub';

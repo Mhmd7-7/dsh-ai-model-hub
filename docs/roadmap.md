@@ -1,8 +1,10 @@
 # Roadmap
 
 Phase 1 is complete: the architecture is built, tested, and demonstrated end to
-end with mock models. What follows is what each later phase actually requires —
-measured against what already exists, not estimated from scratch.
+end. The mock models it was validated with survive only as an internal test
+double — `src/adapters/mock.ts`, referenced by tests and by no shipped catalog.
+What follows is what each later phase actually requires — measured against what
+already exists, not estimated from scratch.
 
 ---
 
@@ -15,9 +17,10 @@ Delivered:
 - Capability vocabulary, model descriptor schema, and a validating catalog
 - Deterministic, capability-first router with per-candidate explanations
 - Runtime manager: process lifecycle, health, idle timeout, resource gating
-- Adapter contract plus three mock models producing **real** artifacts — a
-  structurally valid PNG (every chunk CRC verified), a loadable ASCII STL, and a
-  playable WAV
+- Adapter contract plus a deterministic in-process test double producing **real**
+  artifacts — a structurally valid PNG (every chunk CRC verified), a loadable
+  ASCII STL, and a playable WAV. It exists to validate the architecture and is
+  never referenced by `config/models.json`
 - Durable artifact store with a tamper-resistant path resolver
 - DSH plugin exposing nine capability tools and a dynamic capability snapshot
 - 198 tests: unit, integration, adapter, and plugin — all runnable without an

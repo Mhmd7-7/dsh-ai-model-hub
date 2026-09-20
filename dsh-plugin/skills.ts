@@ -30,8 +30,9 @@
  * @module dsh-ai-model-hub/dsh-plugin/skills
  */
 
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import type {
@@ -63,16 +64,44 @@ export const BUNDLED_SKILL_RANK = 600;
  */
 const SKILL_NAME_GRAMMAR = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-/** The shipped skill file: `skills/dsh-ai-model-hub/SKILL.md` in this checkout. */
-export const SKILL_FILE = fileURLToPath(new URL('../skills/dsh-ai-model-hub/SKILL.md', import.meta.url));
+/**
+ * Walk up from a module's own directory to the package root.
+ *
+ * A fixed number of `..` segments cannot work here: the sources run from
+ * `dsh-plugin/` in a checkout and from `lib/dsh-plugin/` once compiled, so
+ * `new URL('../skills', import.meta.url)` is right in exactly one of the two
+ * layouts — and silently wrong in the other, which costs the installed copy its
+ * skill. The nearest `package.json` is right in both, and in an installed copy
+ * sitting in `node_modules` as well.
+ *
+ * @param start - the directory this module was loaded from.
+ * @returns the package root, or `start` if no manifest is found above it.
+ */
+function findPackageRoot(start: string): string {
+  let directory = start;
+  for (;;) {
+    if (existsSync(join(directory, 'package.json'))) return directory;
+    const parent = dirname(directory);
+    if (parent === directory) return start;
+    directory = parent;
+  }
+}
+
+/** The directory this module was loaded from: `dsh-plugin/` or `lib/dsh-plugin/`. */
+const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
+
+/** The package root — the directory that ships `skills/`, `config/` and `docs/`. */
+const PACKAGE_ROOT = findPackageRoot(MODULE_DIRECTORY);
+
+/** The shipped skill file: `skills/dsh-ai-model-hub/SKILL.md` in this package. */
+export const SKILL_FILE = join(PACKAGE_ROOT, 'skills', 'dsh-ai-model-hub', 'SKILL.md');
 
 /**
- * The checkout root, used as the loaded body's resource base so the paths the
+ * The package root, used as the loaded body's resource base so the paths the
  * instructions cite (`docs/adding-a-model.md`, `config/models.json`) resolve.
- * Normalized through `resolve` so it never carries the trailing separator a
- * directory URL produces.
+ * Normalized through `resolve` so it never carries a trailing separator.
  */
-const REPOSITORY_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const REPOSITORY_ROOT = resolve(PACKAGE_ROOT);
 
 /** The parts of a skill file this provider needs. */
 interface LoadedSkill {

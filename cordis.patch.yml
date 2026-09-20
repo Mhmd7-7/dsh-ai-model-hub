@@ -1,43 +1,45 @@
 # dsh-ai-model-hub — DeepSeek Harness plugin bundle patch
 #
-# This is the `dsh.bundle.patch` layer of the plugin package. When the plugin is
+# This is the `dsh.bundle.patch` layer of the package. When the plugin is
 # installed through the official CLI —
 #
+#   dsh plugin --profile <name> add dsh-ai-model-hub
+#   dsh plugin --profile <name> add github:Mhmd7-7/dsh-ai-model-hub
 #   dsh plugin --profile <name> add /absolute/path/to/dsh-ai-model-hub
 #
 # — the command reconciles `dsh.profile.bundles` against installed packages and,
 # seeing this declaration, appends the package to the bundle stack. Profile boot
-# then merges THIS patch (a single `insert` of the plugin row), so no profile file
-# needs editing by hand.
+# then merges THIS patch (a single `insert` of the plugin row), so no profile
+# file needs editing by hand and the plugin is live on every boot.
+#
+# NOTE on the two names, which are easy to conflate and fail loudly if you do:
+#   `id`   is this row's own name in the composed tree — what a profile's own
+#          cordis.patch.yml uses to override or disable the row.
+#   `name` is the Node module specifier the loader imports. It MUST be the bare
+#          package name: the package's "." export is the plugin
+#          (`lib/dsh-plugin/index.js`, exporting `name`/`inject`/`apply`).
+#          It must NOT be a subpath (`dsh-ai-model-hub/plugin`): DSH's client
+#          module system resolves a row's package manifest only from a bare
+#          specifier, so a subpath would silently drop the Web UI half.
 #
 # Configuration is optional. Every field has a default that makes the
 # zero-config case work: the catalog is discovered from ordered anchors (an
 # explicit configPath, then `searchRoots`, then the host process's working
-# directory, then this plugin's own installation directory), artifacts land in
-# `<cwd>/artifacts`, and — importantly — process launching is DISABLED, so the
-# hub will talk to engines you run but will never start one.
+# directory, then this package's own installation directory), artifacts land in
+# the calling session's workspace, and — importantly — process launching is
+# DISABLED, so the hub will talk to engines you run but will never start one.
 #
 # To configure, uncomment and adjust. See docs/security.md before enabling
 # `allowProcessLaunch`, and docs/adding-a-model.md for the catalog format.
 #
-# NOTE on the two names, which are easy to conflate and fail loudly if you do:
-#   `id`   is this row's own name in the composed tree — what your profile's
-#          cordis.patch.yml uses to override or disable the row.
-#   `name` is the Node module specifier the loader imports. It MUST be this
-#          plugin package, which exports `name`/`inject`/`apply`.
-#          It must NOT be `dsh-ai-model-hub`: that is the hub *library*, which exports
-#          classes rather than a plugin, so the loader rejects it with
-#          "invalid plugin, expect function or object with an apply method,
-#          received object" and the whole profile fails to boot.
-#
 - insert:
     - id: dsh-ai-model-hub
-      name: 'dsh-ai-model-hub-plugin'
+      name: 'dsh-ai-model-hub'
       # config:
       #   # Explicit catalog path. When set it is the ONLY candidate tried, so a
       #   # wrong path is an error rather than a silent fallback. Omitted =>
       #   # discovery from ordered anchors: `searchRoots`, then the host process's
-      #   # working directory, then this plugin's own installation directory. At
+      #   # working directory, then this package's own installation directory. At
       #   # each level: models.json, model-catalog.json, or dsh-ai-model-hub.json,
       #   # directly or in a config/ subdirectory.
       #   configPath: ''

@@ -1,12 +1,16 @@
 /**
- * The mock adapter (Phase 1).
+ * The mock adapter — an internal test double.
  *
- * Three mock models — `mock_text_model`, `mock_image_model`, `mock_3d_model` —
+ * Three synthetic models — `mock_text_model`, `mock_image_model`, `mock_3d_model` —
  * exist to validate the *architecture* end to end before any real engine is
  * involved. They are not stubs: they honor the same adapter contract, produce
  * real artifacts in real formats (a genuine PNG, a loadable STL, real text), and
  * fail the same way a real engine does. Swapping one for a real adapter later
  * changes nothing above this file.
+ *
+ * **No shipped catalog references this adapter.** `config/models.json` holds real
+ * engines only; these models are declared inline by the tests that need them, so
+ * a deployment cannot accidentally route work to synthetic output.
  *
  * Everything here is deterministic. The same prompt always yields byte-identical
  * output, which is what makes the integration tests meaningful rather than flaky.

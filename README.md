@@ -32,8 +32,8 @@ Everything below that question is this project's job.
 │  └────────────────┴──────────────────┴───────────────────────────┘   │
 │  ┌──────────────────────────────┬────────────────────────────────┐   │
 │  │ Model Adapters               │ Artifact Store                 │   │
-│  │ mock · http_json ·           │ durable, typed, addressable    │   │
-│  │ openai_compatible · cli      │ text/image/audio/video/3D/…    │   │
+│  │ openai_compatible · http_json│ durable, typed, addressable    │   │
+│  │ comfyui · mock (tests only)  │ text/image/audio/video/3D/…    │   │
 │  └──────────────────────────────┴────────────────────────────────┘   │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │  spawn (argv, never a shell string)
@@ -46,13 +46,21 @@ Everything below that question is this project's job.
 
 ## Status
 
-**Phase 1 complete and verified.** Three mock models validate the whole
-architecture end to end — catalog → routing → runtime → adapter → artifact →
-chained workflow — with 204 tests and no real engine required.
+**Live as a DSH profile plugin.** The package installs as one unit — `dsh plugin
+add` mounts it, so the hub is composed on every boot — and it serves **real local
+engines only**: Ollama for text, ComfyUI / A1111 / Forge for images, llama.cpp for
+a second text engine. There are no mock models anywhere in the shipped catalogs
+and no mock fallback at runtime: a wrong model name or a stopped engine is a loud
+error (or a cold start), never fixture output.
+
+The whole architecture — catalog → routing → runtime → adapter → artifact →
+chained workflow — is covered by the test suite, which uses an in-process **mock
+adapter as a test double**. That adapter is not a model: nothing ships it in a
+catalog, and no deployment can reach it by accident.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Mock models, full architecture, DSH plugin, tests | ✅ done |
+| 1 | Full architecture, DSH plugin, tests | ✅ done |
 | 2 | Real local text model (Ollama / llama.cpp / vLLM / LM Studio) | ✅ done — `openai_compatible` adapter ships |
 | 3 | Real local image model (A1111 / ComfyUI) | ✅ done — `http_json` and `comfyui` adapters ship |
 | 4 | Real local 3D model | needs a new adapter |
@@ -79,27 +87,20 @@ Both are registered by default. See
 
 ---
 
-## Install from GitHub
+## Install
 
-One line, on a machine that already has Node ≥ 22.6 and DeepSeek Harness:
-
-**Windows (PowerShell)**
-
-```powershell
-irm https://raw.githubusercontent.com/Mhmd7-7/dsh-ai-model-hub/main/install.ps1 | iex
-```
-
-**macOS / Linux**
+One command, on a machine that already has Node ≥ 22.6 and DeepSeek Harness:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Mhmd7-7/dsh-ai-model-hub/main/install.sh | sh
+# into the profile behind `dsh web` — the normal case
+dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub
 ```
 
-Either one checks the toolchain, clones the repository to
-`~/.dsh/plugins/dsh-ai-model-hub` — the directory convention DSH's own plugin
-store already uses — installs the plugin into the `web` profile, and then
-verifies the result by importing the plugin the way the loader will. Re-run it to
-update: it fast-forwards the clone and reinstalls.
+This package **is** the plugin: it declares `dsh.bundle.patch`, so `dsh plugin
+add` installs it *and* appends `dsh-ai-model-hub` to `dsh.profile.bundles`. The
+profile composes that bundle on every boot, which is what makes the plugin
+**live**, not merely installed. No profile file is edited by hand and no
+`cordis.patch.yml` has to be written.
 
 Then **restart DeepSeek Harness** and ask:
 
@@ -107,31 +108,55 @@ Then **restart DeepSeek Harness** and ask:
 List the available AI model capabilities.
 ```
 
-| What you want | Windows (PowerShell) | macOS / Linux |
-|---|---|---|
-| Another profile | `.\install.ps1 -Profile hubtest` | `./install.sh --profile hubtest` |
-| A pinned release | `.\install.ps1 -Ref v0.1.0` | `./install.sh --ref v0.1.0` |
-| Another location | `.\install.ps1 -InstallDir D:\hub` | `./install.sh --dir /opt/hub` |
-| From a fork | `.\install.ps1 -Repository <url>` | `./install.sh --repository <url>` |
-| Install without verifying | `.\install.ps1 -SkipDoctor` | `./install.sh --skip-doctor` |
+| What you want | Command |
+|---|---|
+| Another profile | `dsh plugin --profile hubtest add github:Mhmd7-7/dsh-ai-model-hub` |
+| A pinned release | `dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub#v0.2.0` |
+| A published copy | `dsh plugin --profile web add dsh-ai-model-hub` |
+| A checkout you are editing | `node --no-deprecation scripts/install-plugin.mjs --profile web` |
 
-`irm | iex` and `curl | sh` cannot take arguments, so the piped form is
-configured through the environment instead: `DSH_PROFILE`, `DSH_MODEL_HUB_DIR`,
-`DSH_MODEL_HUB_REF` and `DSH_MODEL_HUB_REPO`, as in
-`$env:DSH_PROFILE = 'hubtest'; irm … | iex`.
+The last one links the working tree instead of copying it, so the plugin loads
+your sources; run `npm run build` there first if you edited anything under
+`src/` or `dsh-plugin/`.
 
-Run either script from inside a clone and it installs *that* clone and never
-fast-forwards it, so a working tree you are editing is never touched. To remove
-an installation:
+`install.ps1` and `install.sh` remain one-line wrappers for the first row, and
+keep their flags (`-Profile`, `-Ref`, `-Repository`, `-SkipDoctor`):
 
-```sh
-dsh plugin --profile web remove dsh-ai-model-hub-plugin
-rm -rf ~/.dsh/plugins/dsh-ai-model-hub     # PowerShell: Remove-Item -Recurse -Force
+```powershell
+irm https://raw.githubusercontent.com/Mhmd7-7/dsh-ai-model-hub/main/install.ps1 | iex
 ```
 
-Why the GitHub route has to clone instead of installing straight from a git URL
-is explained under [Why the installer has three
-steps](#why-the-installer-has-three-steps).
+```sh
+curl -fsSL https://raw.githubusercontent.com/Mhmd7-7/dsh-ai-model-hub/main/install.sh | sh
+```
+
+To remove an installation:
+
+```sh
+dsh plugin --profile web remove dsh-ai-model-hub
+```
+
+### Why the package ships compiled JavaScript
+
+The plugin's sources are TypeScript, and Node runs them directly through type
+stripping while you work in a checkout. It refuses to do that inside
+`node_modules`:
+
+```
+ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING: Stripping types is currently
+unsupported for files under node_modules
+```
+
+A package installed by name — from GitHub, from a registry — lands *inside* the
+profile's `node_modules`, so a `.ts` entry there could never be imported. That is
+the entire reason this repository commits `lib/`: `lib/` is the same sources
+compiled to JavaScript, and the package's entry points (`main`, `exports`) point
+at it, so `dsh plugin add` needs no build step on your machine.
+
+`lib/` is generated, never edited: `npm run build` regenerates it from `src/` and
+`dsh-plugin/`. The one setting that makes it work is
+`rewriteRelativeImportExtensions`, so the emitted JavaScript imports `./x.js`
+where the source said `./x.ts`.
 
 ---
 
@@ -145,30 +170,36 @@ There are two halves, and you can use either without the other.
 cd dsh-ai-model-hub
 
 npm install                  # typescript + the DSH packages the plugin links against
-npm test                     # 204 tests, ~10 s, no engines required
+npm test                     # the suite, ~10 s, no engines required
 npm run typecheck            # strict TypeScript, no errors
+npm run build                # compile src/ + dsh-plugin/ into lib/
 npm run demo                 # the vertical slice, end to end
-npm run demo:workflow        # a 4-step cross-model pipeline
+npm run demo:workflow        # a multi-step cross-model pipeline
 ```
 
 The demo prints the full path — capability discovery, routing with reasons,
-invocation, a real PNG on disk, then a chained image → 3D step:
+invocation, and the artifact on disk:
 
 ```
 === catalog: capability discovery ===
-  text_to_image        text → image  via mock_image_model
-  image_to_3d          image/text → model_3d  via mock_3d_model
-  not available here: audio_generation, speech_to_text, image_understanding, video_generation
+  text_to_image        text → image  via comfyui_z_image_turbo
+  text_to_text         text → text  via ollama_text_model
+  not available here: image_to_3d, image_to_image, audio_generation, …
 
 === routing ===
-  chose mock_image_model
-  rationale: mock_image_model (score 100): cold but startable; priority 100
-    [rejected] mock_text_model: does not declare capability "text_to_image"
+  chose comfyui_z_image_turbo
+  rationale: comfyui_z_image_turbo (score 1): …
+    [rejected] ollama_text_model: does not declare capability "text_to_image"
 
 === artifact ===
   valid PNG: yes
-  size:      66.3 KiB
+  size:      1.2 MiB
 ```
+
+It runs against `config/models.json`, so it needs the engines that catalog names:
+Ollama for text, ComfyUI for images. `node examples/vertical-slice.ts <catalog>`
+takes another catalog, and the last section deliberately asks for a capability
+nobody serves, to show what a refusal looks like.
 
 ### B. Give the capability to the DeepSeek Harness agent
 
@@ -186,16 +217,7 @@ Then **restart DeepSeek Harness** and ask the agent:
 List the available AI model capabilities.
 ```
 
-The installer does three things, in order, and is safe to re-run:
-
-1. `npm install` inside `dsh-plugin/` — materialises the DSH peer closure. This
-   is required and cannot be skipped; see [Why the installer has three steps](#why-the-installer-has-three-steps).
-2. `dsh plugin add` — installs the plugin and registers it as a profile layer,
-   because the package declares `dsh.bundle.patch`. No profile file is edited.
-3. `node scripts/doctor.mjs` — imports the plugin the same way DSH's loader will,
-   and reports precisely what is wrong if it cannot.
-
-Check an installation at any time:
+### Checking an installation
 
 ```sh
 npm run doctor                          # inspects: is it loadable, and if not, why not
@@ -211,13 +233,12 @@ Registered tools:
   check_model_health   explain_routing    get_model_status   invoke_model
   list_artifacts       list_capabilities  list_models        start_model
   stop_model
-Catalog: model hub ready: 3 model(s), 5 capability(ies) from …/models.json
+Catalog: model hub ready: 2 model(s), 2 capability(ies) from …/config/models.json
 ```
 
 > **Note on flags.** `npm run` forwards flags to the script, but npm 12 parses
 > `--profile` as its own config flag and fails. Use the direct
-> `node scripts/smoke.mjs --profile <name>` form for a non-default profile, or
-> `-Profile` with the PowerShell installer.
+> `node scripts/smoke.mjs --profile <name>` form for a non-default profile.
 
 ### If DSH fails to boot after installing
 
@@ -227,14 +248,21 @@ If the harness dies with:
 invalid plugin, expect function or object with an "apply" method, received object
 ```
 
-then the inserted row's `name` is pointing at a **library** rather than at the
-plugin package. The row has two names and they are easy to conflate:
-`id` is the row's name in the composed tree (used to override or disable it),
-while `name` is the module specifier the loader imports — and it must be
-`dsh-ai-model-hub-plugin`, which exports `name`/`inject`/`apply`. Naming
-`dsh-ai-model-hub` there imports the hub library, which exports classes, and the
-whole profile refuses to load. `cordis.patch.yml` documents this in place, and
-`npm run doctor` now checks it.
+then the row `cordis.patch.yml` inserts is pointing at something that is not a
+plugin. In this package that can only happen if the row's `name` was changed
+away from the bare package name: `dsh-ai-model-hub` resolves to the package's
+`.` export, which is the plugin (`lib/dsh-plugin/index.js`, exporting
+`name`/`inject`/`apply`/`Config`). The hub **library** lives behind the
+`dsh-ai-model-hub/library` subpath instead, precisely so the two cannot be
+confused.
+
+The row has two names, and they are easy to conflate: `id` is the row's name in
+the composed tree (what a profile's own `cordis.patch.yml` uses to override or
+disable it), while `name` is the module specifier the loader imports. Keep
+`name` bare — a subpath such as `dsh-ai-model-hub/plugin` would load the host half
+but silently drop the **Web UI half**, because DSH's client module system only
+resolves a row's package manifest from a bare specifier. `cordis.patch.yml`
+documents this in place, and `npm run doctor` checks it.
 
 ### Where does the catalog come from?
 
@@ -266,57 +294,28 @@ If no anchor yields a catalog the plugin logs `model hub disabled` together with
 **every directory it tried**, registers no tools, and lets DSH boot normally — a
 missing or broken catalog never makes the agent unusable.
 
-### Why the installer has three steps
+### Installing from a checkout instead of from GitHub
 
-DSH installs profile plugins as **junction links**, so Node loads the plugin from
-its real path in this repository rather than from a copy inside the profile.
-Module resolution therefore walks up from *here*, and the `node_modules` that
-matters is `dsh-plugin/node_modules` — not the profile's. That directory must
-exist, and `dsh plugin add` (which forwards to pnpm) only warns about peer
-dependencies instead of installing them.
+`dsh plugin add <path>` **links** the working tree — DSH installs profile plugins
+as junction links — so Node resolves the plugin to its real path in the
+repository instead of to a copy inside the profile. Peer dependencies then
+resolve by walking up from the package: from `lib/dsh-plugin/` to
+`<repo>/node_modules`. Run `npm install` once in the repository and that
+directory exists, because `dsh plugin add` forwards to pnpm, which only *warns*
+about peer dependencies instead of installing them.
 
 This is not theoretical: it was found by installing into a throwaway profile,
-deleting this workspace's `node_modules`, and watching the plugin fail to
-resolve `@deepseek-ai/schemastery`.
+deleting the workspace's `node_modules`, and watching the plugin fail to resolve
+`@deepseek-ai/schemastery`.
 
-If all of this is unappealing, the simplest correct fix is to use `pnpm` with a
-workspace that has `hoist-pattern` enabled, or to publish `dsh-ai-model-hub` and
-depend on it by version instead of by path. Both are recorded in
-[docs/roadmap.md](docs/roadmap.md).
+A linked checkout also loads `lib/`, exactly like an installed copy does — so run
+`npm run build` after editing `src/` or `dsh-plugin/`. If you would rather not
+think about that, work on the hub as a library (`npm test`, `npm run typecheck`)
+and only build when you want the plugin to pick the change up.
 
-### Why not `dsh plugin add github:...`?
-
-The one-liner that works for a compiled plugin does not work here, and the
-obstacle is Node's rather than DSH's:
-
-```sh
-dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub   # fails
-```
-
-This plugin ships TypeScript and is loaded through Node's type stripping, but
-Node refuses to strip types for any file under `node_modules`:
-
-```
-ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING: Stripping types is currently
-unsupported for files under node_modules
-```
-
-pnpm materialises a registry or git dependency *inside* the profile's
-`node_modules` — a directory copy, or a link into `node_modules/.pnpm` — so the
-loader would fail on the first `.ts` import. Installing from a git URL would not
-help for a second reason either: the repository root is the hub *library* and
-declares no plugin bundle, while `dsh-plugin/` reaches the library through a
-`file:..` dependency, which only means something inside a real checkout.
-
-The junction install is what sidesteps the first problem, and it is worth being
-precise about why: the link points at a checkout *outside* `node_modules`, and
-Node resolves the module to that real path before deciding whether type stripping
-is allowed. That is the whole reason the plugin has to be installed by path.
-
-Lifting the restriction is a structural change, not a configuration one, and
-neither option is implemented: compile the plugin to JavaScript at release time
-so it can be installed like any other package, or publish both packages to a
-registry and depend on the plugin by version.
+The historical obstacle on the GitHub route — Node refusing to strip types for
+files under `node_modules` — is what committing `lib/` removes; see [Why the
+package ships compiled JavaScript](#why-the-package-ships-compiled-javascript).
 
 ### What the agent can then do
 
@@ -388,20 +387,26 @@ Two halves, both dependency-free:
   hand-written JavaScript with **no bundler and no build step**, matching the rest
   of the project. It registers one `settings.section` contribution.
 
-### Turning on real models
+### Pointing the hub at your engines
 
-Phase 2 needs no code: copy an Ollama or llama.cpp entry from
-[`config/examples/real-models.example.json`](config/examples/real-models.example.json)
-into `config/models.json`, point `adapterConfig.model` at a checkpoint you have
-actually pulled, restart, and check with `get_model_status`.
+The catalog the package ships ([`config/models.json`](config/models.json)) already
+declares two real engines — Ollama for text and ComfyUI for images — so the first
+run needs no editing at all; it needs those engines installed, and the model
+names to match what you actually pulled (`ollama list`) and what your ComfyUI
+models directory holds.
 
-Image generation needs no code either. For an A1111/Forge/sd.cpp server, copy the
-`a1111_sdxl` or `a1111_sd15` entry. For ComfyUI, copy the `comfyui` host and the
-`comfyui_z_image_turbo` model from this repository's working setup, and make sure
-`adapterConfig.workflowPath` points at an API-format workflow — an example is in
-[`config/workflows/z-image-turbo.api.json`](config/workflows/z-image-turbo.api.json).
-That file is a saved `{client_id, prompt}` payload, which the adapter accepts
-directly. See [docs/adding-a-model.md](docs/adding-a-model.md).
+To change them, or to add more, edit that file or point the plugin at your own
+with `configPath` / `searchRoots`. Everything else is copy-and-adjust from
+[`config/examples/real-models.example.json`](config/examples/real-models.example.json):
+an A1111/Forge/sd.cpp server uses `http_json`, llama.cpp uses
+`openai_compatible`, and ComfyUI uses its own `comfyui` adapter driven by a graph
+template — an example is in
+[`config/workflows/z-image-turbo.api.json`](config/workflows/z-image-turbo.api.json),
+a saved `{client_id, prompt}` payload the adapter accepts directly.
+
+A wrong model name is a loud failure — the engine answers 404 and the invocation
+fails — never fixture text: there are no mock models in any shipped catalog. See
+[docs/adding-a-model.md](docs/adding-a-model.md).
 
 Nothing is launched by default: `allowProcessLaunch` is `false`, so the hub talks
 to engines you run but will not start any. See
@@ -500,8 +505,9 @@ dsh-ai-model-hub/
 │   │                             published JSON Schema
 │   ├── router/                   deterministic capability-first selection
 │   ├── runtime/                  process lifecycle, health, idle timeout
-│   ├── adapters/                 adapter contract + mock, PNG/STL/WAV writers,
-│   │                             openai_compatible, http_json, comfyui
+│   ├── adapters/                 adapter contract + the mock test double,
+│   │                             PNG/STL/WAV writers, openai_compatible,
+│   │                             http_json, comfyui
 │   ├── artifacts/                artifact contract + the local filesystem store
 │   ├── config/                   catalog discovery and loading
 │   ├── util/                     process guardrails, primitive validators
@@ -519,15 +525,18 @@ dsh-ai-model-hub/
 │   └── tools/                    discovery · lifecycle · invoke
 ├── skills/dsh-ai-model-hub/
 │   └── SKILL.md                  the agent-facing skill the plugin registers
+├── lib/                          src/ and dsh-plugin/ compiled to JavaScript:
+│                                 the entry points `dsh plugin add` loads, and
+│                                 the reason a GitHub install needs no build
+├── cordis.patch.yml              the bundle patch: the row the profile mounts
 ├── install.ps1                   one-line install from GitHub (Windows/PowerShell)
 ├── install.sh                    one-line install from GitHub (macOS/Linux)
 ├── scripts/                      install-plugin · doctor · smoke — install and verification
 ├── config/
-│   ├── models.json               active catalog (mock models)
-│   ├── models.mock.json          Phase 1 fixtures
-│   ├── examples/                 real engines, ready to copy
+│   ├── models.json               the catalog the package ships: real engines
+│   ├── examples/                 more real engines, ready to copy
 │   └── workflows/                ComfyUI API-format graph templates
-├── tests/                        251 tests; the adapter ones run against real
+├── tests/                        the suite; the adapter ones run against real
 │                                 local HTTP servers, so no engine or GPU needed
 ├── examples/vertical-slice.ts    the end-to-end demonstration
 └── docs/                         architecture, components, guides
@@ -554,14 +563,15 @@ the entire hub keeps working and keeps passing its tests.
 
 ## Requirements
 
-- **Node ≥ 22.6** — the hub runs TypeScript directly through Node's type
-  stripping, with no build step.
+- **Node ≥ 22.6** — the hub *sources* run directly through Node's type stripping
+  while you work in a checkout. The installed package loads the compiled `lib/`
+  instead, because Node refuses to strip types under `node_modules`;
+  `npm run build` regenerates it.
 - **pnpm** — only for `dsh plugin`, which forwards to it.
-- **git** — only for the [install-from-GitHub](#install-from-github) scripts,
-  which clone this repository. A manual clone needs nothing extra.
-- No runtime dependencies. The hub is dependency-free by design: a plugin whose
-  `node_modules` must resolve inside a DSH profile is a plugin that breaks on the
-  next release.
+- **No runtime dependencies.** The hub is dependency-free by design: a plugin
+  whose `node_modules` must resolve inside a DSH profile is a plugin that breaks
+  on the next release. The DSH packages it imports are peers, supplied by the
+  profile that loads it.
 
 ## License
 

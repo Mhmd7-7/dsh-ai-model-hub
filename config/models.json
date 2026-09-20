@@ -1,81 +1,115 @@
 {
-  "$comment": "Active configuration. Phase 1 ships mock models only. To add a real engine, copy the relevant host and model entries from examples/real-models.example.json into this file — no code changes are needed for any engine whose adapter kind is already registered. See docs/adding-a-model.md.",
+  "$comment": "Active catalog. It contains real engines only — there are no mock entries and nothing here is synthetic. Adding a model means editing this file: copy the host and model entries you run from config/examples/real-models.example.json, adjust them, and restart DSH. No code changes are needed for any engine whose adapter kind is already registered. See docs/adding-a-model.md. The two hosts below are declared startable:false deliberately — the hub talks to the endpoints you already run and never launches anything until you opt in.",
   "version": "1",
-  "hosts": [],
+  "hosts": [
+    {
+      "$comment": "Ollama runs as a background service you manage. `ollama serve` owns port 11434, and every pulled model is reachable through the same OpenAI-compatible surface. Set startable/stoppable to true and add a `start` command if you want the hub to launch it for you.",
+      "id": "ollama",
+      "name": "Ollama",
+      "adapter": "openai_compatible",
+      "runtime": {
+        "engine": "ollama",
+        "adapter": "openai_compatible",
+        "endpoint": "http://127.0.0.1:11434",
+        "path": "/v1/chat/completions"
+      },
+      "health": {
+        "kind": "http",
+        "path": "/api/tags",
+        "timeoutMs": 2000
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "resources": {
+        "vramGb": 0,
+        "ramGb": 0
+      },
+      "notes": "External process. The hub only ever probes /api/tags and posts to /v1/chat/completions."
+    },
+    {
+      "$comment": "ComfyUI has a graph API rather than a prompt endpoint, so it has its own `comfyui` adapter. A model points at a template with `adapterConfig.workflowPath`; the adapter writes the prompt into the CLIPTextEncode node wired to the sampler's `positive` link, queues the graph, polls /history, and downloads from /view.",
+      "id": "comfyui",
+      "name": "ComfyUI",
+      "adapter": "comfyui",
+      "runtime": {
+        "engine": "comfyui",
+        "adapter": "comfyui",
+        "endpoint": "http://127.0.0.1:8188",
+        "path": "/prompt"
+      },
+      "health": {
+        "kind": "http",
+        "path": "/system_stats",
+        "timeoutMs": 3000
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "resources": {
+        "vramGb": 0,
+        "ramGb": 0
+      },
+      "notes": "External process. Start ComfyUI yourself, then the hub can queue graphs against it."
+    }
+  ],
   "models": [
     {
-      "id": "mock_text_model",
-      "name": "Mock Text Model",
+      "$comment": "A generic starter. `adapterConfig.model` is the name Ollama knows the checkpoint by, so point it at something you have actually pulled: `ollama list` shows the names, `ollama pull llama3.2` gets this one.",
+      "id": "ollama_text_model",
+      "name": "Ollama text model",
       "type": "text_generation",
       "version": "1.0.0",
+      "host": "ollama",
       "capabilities": ["text_to_text"],
-      "adapter": "mock",
-      "runtime": {
-        "engine": "in_process_mock",
-        "adapter": "mock"
-      },
       "adapterConfig": {
-        "fixture": "deterministic-text"
+        "model": "llama3.2",
+        "temperature": 0.7,
+        "maxTokens": 2048
+      },
+      "resources": {
+        "vramGb": 0,
+        "ramGb": 0
       },
       "limits": {
         "contextTokens": 8192
       },
-      "lifecycle": {
-        "startable": false,
-        "stoppable": false
-      },
       "priority": 100,
-      "tags": ["mock", "phase-1"]
+      "tags": ["local", "text"],
+      "notes": "Rename this to the checkpoint you run, or add one entry per checkpoint — several models may share the `ollama` host."
     },
     {
-      "id": "mock_image_model",
-      "name": "Mock Image Model",
+      "$comment": "The template in config/workflows/ was captured from a real run. Z-Image Turbo is step-distilled: 8 steps at cfg 1.0 is its intended operating point.",
+      "id": "comfyui_z_image_turbo",
+      "name": "Z-Image Turbo (ComfyUI)",
       "type": "image_generation",
       "version": "1.0.0",
-      "capabilities": ["text_to_image", "image_to_image"],
-      "adapter": "mock",
-      "runtime": {
-        "engine": "in_process_mock",
-        "adapter": "mock"
-      },
+      "host": "comfyui",
+      "capabilities": ["text_to_image"],
       "adapterConfig": {
-        "fixture": "deterministic-png",
-        "width": 640,
-        "height": 384,
-        "gridStep": 64
+        "workflowPath": "config/workflows/z-image-turbo.api.json",
+        "steps": 8,
+        "cfg": 1,
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "width": 1024,
+        "height": 1024,
+        "filenamePrefix": "deadlock/z_image"
+      },
+      "resources": {
+        "vramGb": 0,
+        "ramGb": 0
       },
       "limits": {
-        "maxWidth": 2048,
-        "maxHeight": 2048,
-        "resolutions": ["512x512", "640x384", "1024x1024"]
-      },
-      "lifecycle": {
-        "startable": false,
-        "stoppable": false
+        "maxWidth": 1024,
+        "maxHeight": 1024,
+        "resolutions": ["512x512", "768x768", "1024x1024"]
       },
       "priority": 100,
-      "tags": ["mock", "phase-1"]
-    },
-    {
-      "id": "mock_3d_model",
-      "name": "Mock 3D Model",
-      "type": "three_d_generation",
-      "version": "1.0.0",
-      "capabilities": ["text_to_3d", "image_to_3d"],
-      "adapter": "mock",
-      "runtime": {
-        "engine": "in_process_mock",
-        "adapter": "mock"
-      },
-      "adapterConfig": {
-        "fixture": "deterministic-stl"
-      },
-      "lifecycle": {
-        "startable": false,
-        "stoppable": false
-      },
-      "priority": 100,
-      "tags": ["mock", "phase-1"]
+      "tags": ["local", "gpu", "image", "comfyui"],
+      "notes": "The template names the checkpoint, text encoder and VAE, so those files must exist in your ComfyUI models directory. Delete this entry if you do not run ComfyUI."
     }
   ]
 }

@@ -15,11 +15,11 @@
  */
 
 import { strict as assert } from 'node:assert';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { Context } from '@deepseek-ai/cordis';
@@ -187,7 +187,15 @@ async function mount(
   };
 }
 
-/** The three mock models as a catalog document. */
+/**
+ * The three in-process models this file's tests mount, as a catalog document.
+ *
+ * A test double, not a shipped catalog: it is the only way to drive every tool —
+ * including `image_to_3d` — without an engine installed. The repository ships no
+ * mock catalog, and `config/models.json` holds real engines only.
+ *
+ * @returns the catalog document.
+ */
 function mockCatalog(): Record<string, unknown> {
   const base = { adapter: 'mock', runtime: { engine: 'mock', adapter: 'mock' } } as const;
   return {
@@ -780,7 +788,7 @@ describe('lifecycle tools', () => {
         healthyCount: number;
       };
       assert.equal(value.results.length, 3);
-      assert.equal(value.healthyCount, 3, 'the mock adapter is always healthy');
+      assert.equal(value.healthyCount, 3, 'an in-process adapter has no process to fail a probe');
     } finally {
       await mounted.cleanup();
     }
@@ -788,13 +796,31 @@ describe('lifecycle tools', () => {
 });
 
 describe('apply() end to end', () => {
-  it('loads the shipped catalog from disk and registers the tools', async () => {
+  // The plugin loads its catalog from disk, and the repository no longer ships a
+  // mock catalog to point at. These tests therefore write the inline test double
+  // above to a real file and hand the plugin that path: the same contract as a
+  // deployment, without depending on any engine being installed or running.
+  let catalogRoot = '';
+  let catalogPath = '';
+
+  before(async () => {
+    catalogRoot = await mkdtemp(join(tmpdir(), 'aimh-plugin-catalog-'));
+    catalogPath = join(catalogRoot, 'models.json');
+    await writeFile(catalogPath, JSON.stringify(mockCatalog()), 'utf8');
+  });
+
+  after(async () => {
+    await rm(catalogRoot, { recursive: true, force: true });
+  });
+
+  it('loads the catalog it is pointed at and registers the tools', async () => {
     const captured: CapturedTools = { definitions: new Map(), promptContexts: [], logLines: [], effects: [] };
     const ctx = fakeContext(captured);
     const cwd = process.cwd();
-    // The plugin discovers config/models.json by walking up from the working
-    // directory, which is exactly how it behaves inside a DSH session.
-    apply(ctx, resolvePluginConfig({ configPath: 'config/models.mock.json', exposeCapabilityContext: true }));
+    // An explicit configPath, because that is the deployment that names its own
+    // catalog; discovery by walking up from the working directory is covered by
+    // its own test below.
+    apply(ctx, resolvePluginConfig({ configPath: catalogPath, exposeCapabilityContext: true }));
 
     try {
       assert.equal(captured.definitions.size, 9);
@@ -826,7 +852,7 @@ describe('apply() end to end', () => {
     apply(
       ctx,
       resolvePluginConfig({
-        configPath: 'config/models.mock.json',
+        configPath: catalogPath,
         exposeCapabilityContext: false,
       }),
     );
@@ -836,10 +862,10 @@ describe('apply() end to end', () => {
   it('collapses process launching unless the deployment opts in', async () => {
     const captured: CapturedTools = { definitions: new Map(), promptContexts: [], logLines: [], effects: [] };
     const ctx = fakeContext(captured);
-    apply(ctx, resolvePluginConfig({ configPath: 'config/models.mock.json' }));
+    apply(ctx, resolvePluginConfig({ configPath: catalogPath }));
 
-    // Every model in the shipped mock catalog is already non-startable, so a
-    // start attempt must be refused for that reason rather than reaching a spawn.
+    // The inline catalog's models are all non-startable, so a start attempt must
+    // be refused for that reason rather than reaching a spawn.
     const start = captured.definitions.get('start_model');
     assert.ok(start);
     await assert.rejects(

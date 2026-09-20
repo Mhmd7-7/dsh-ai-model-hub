@@ -4,7 +4,7 @@
  * Kept in its own module so the plugin entry can be read as pure wiring. Every
  * field here is a deployment decision, and every one of them has a default that
  * makes the zero-config case work: `dsh plugin add` followed by a restart is
- * enough to get the mock models behind the agent.
+ * enough to get the catalog the plugin ships behind the agent.
  *
  * @module dsh-ai-model-hub/dsh-plugin/config
  */
