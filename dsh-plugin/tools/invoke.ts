@@ -24,6 +24,8 @@ import { toHubError } from 'dsh-ai-model-hub/index.ts';
 import { withTimeout } from 'dsh-ai-model-hub/index.ts';
 import { formatArtifact, formatFailure, textBlock } from './support.ts';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
+import type { ArtifactRootResolver } from '../workspace.ts';
+import type { ToolCallScope } from '../types.ts';
 
 /** How the tool asks for work. Mirrors `InvocationRequest` minus the parts the agent must not set. */
 interface InvokeArgs {
@@ -66,7 +68,11 @@ function normalizeInputs(
 export function registerInvokeTool(
   ctx: Context,
   service: ModelHubService,
-  options: { readonly invocationTimeoutMs: number },
+  options: {
+    readonly invocationTimeoutMs: number;
+    /** Where this call's artifacts go: the calling session's workspace by default. */
+    readonly artifactRootFor: ArtifactRootResolver;
+  },
 ): void {
   const hub = service.hub;
 
@@ -193,6 +199,9 @@ export function registerInvokeTool(
 
         try {
           const normalizedInputs = normalizeInputs(args.inputs);
+          // Resolved from the calling session, so a long-lived host writes each
+          // conversation's images beside that conversation's code.
+          const artifactRoot = options.artifactRootFor(exec as unknown as ToolCallScope);
           const invocation = hub.invokeModel(
             {
               capability: args.capability as Capability,
@@ -205,7 +214,11 @@ export function registerInvokeTool(
               ...(args.requiredTags === undefined ? {} : { requiredTags: args.requiredTags }),
               signal: controller.signal,
             },
-            { allowFallback: true, maxAttempts: 3 },
+            {
+              allowFallback: true,
+              maxAttempts: 3,
+              ...(artifactRoot === undefined ? {} : { artifactRoot }),
+            },
           );
 
           const settled = await withTimeout(

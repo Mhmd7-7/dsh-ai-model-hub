@@ -164,9 +164,12 @@ async function mount(
   const { registerInvokeTool } = await import('../dsh-plugin/tools/invoke.ts');
 
   const resolved = resolvePluginConfig(pluginConfig as never);
-  registerDiscoveryTools(ctx, service);
-  registerRoutingTool(ctx, service);
-  registerInvokeTool(ctx, service, { invocationTimeoutMs: resolved.invocationTimeoutMs });
+  // A pass-through resolver: these tests exercise one workspace at a time, so the
+  // hub's own store (the temp root they built it with) is what they assert on.
+  const artifactRootFor = (): undefined => undefined;
+  registerDiscoveryTools(ctx, service, { artifactRootFor });
+  registerRoutingTool(ctx, service, { artifactRootFor });
+  registerInvokeTool(ctx, service, { invocationTimeoutMs: resolved.invocationTimeoutMs, artifactRootFor });
   registerLifecycleTools(ctx, service, { allowProcessLaunch: resolved.allowProcessLaunch });
 
   return {
@@ -565,7 +568,10 @@ describe('invoke_model', () => {
     const captured: CapturedTools = { definitions: new Map(), promptContexts: [], logLines: [], effects: [] };
     const ctx = fakeContext(captured);
     const { registerInvokeTool } = await import('../dsh-plugin/tools/invoke.ts');
-    registerInvokeTool(ctx, new ModelHubService(ctx, hub), { invocationTimeoutMs: 30_000 });
+    registerInvokeTool(ctx, new ModelHubService(ctx, hub), {
+      invocationTimeoutMs: 30_000,
+      artifactRootFor: () => undefined,
+    });
 
     try {
       const tool = captured.definitions.get('invoke_model');

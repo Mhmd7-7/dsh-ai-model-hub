@@ -47,7 +47,10 @@
       #   # an exact file.
       #   searchRoots: []
       #
-      #   # Where produced artifacts are stored. Omitted => <working directory>/artifacts.
+      #   # Where produced artifacts are stored. Omitted (the normal case) => each
+      #   # tool call writes under the CALLING SESSION's workspace, at
+      #   # <workspace>/artifacts, resolved per call from DSH's sandbox policy. Set it
+      #   # to one absolute directory only to collect every session's output centrally.
       #   artifactRoot: ''
       #
       #   # Let the hub start and stop model processes. Requires the model's own

@@ -40,6 +40,161 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /**
+ * The subset of DSH's sandbox-policy service this plugin borrows.
+ *
+ * Read through `ctx.get('sandboxPolicy')`, never through a declared `inject`: the
+ * hub must keep loading in a composition without it (a headless or SDK profile),
+ * and it is only ever consulted to place artifacts, so its absence degrades one
+ * default rather than the plugin.
+ *
+ * `resolve` is verified against `SandboxPolicyService` in
+ * `@deepseek-ai/dsh-sandbox-policy`: an optional session and approved mode in,
+ * the fully resolved `{ mode, workspaceRoot }` out, where a session's immutable
+ * `cwd` becomes `workspaceRoot` and the deployment's configured root is only the
+ * fallback for calls that carry no session.
+ */
+export interface SandboxPolicyService {
+  /**
+   * Resolve the policy for one capability call.
+   * @param request - the calling session, when there is one.
+   * @returns the per-call mode and absolute workspace root.
+   */
+  resolve(request?: { readonly session?: unknown }): { readonly mode: string; readonly workspaceRoot: string };
+}
+
+/**
+ * The shape of a tool call this plugin reads its session from.
+ *
+ * Declared structurally rather than imported, for the same reason as everything
+ * else in this file: the plugin pins its DSH coupling to the few facts it
+ * verifies, and `ToolRunContext.agent.session.cwd` is one of them.
+ */
+export interface ToolCallScope {
+  /** The calling agent, when the outer call has one. */
+  readonly agent?: { readonly session?: { readonly cwd?: string } };
+}
+
+/**
+ * The subset of the DSH skill registry this plugin borrows.
+ *
+ * `skills` is read through `ctx.get('skills')`, never through a declared
+ * `inject`, because the hub must keep loading in a deployment that has no skill
+ * registry at all — a headless or SDK profile, or any composition that omits
+ * `@deepseek-ai/dsh-skill`. Declaring it in `inject` would park the plugin's
+ * fiber forever waiting for a service that never arrives, which costs the agent
+ * every model tool rather than one skill.
+ *
+ * `registerProvider` is verified against `SkillRegistry` in
+ * `@deepseek-ai/dsh-skill`: it takes a synchronous factory receiving this
+ * registration's lifecycle control, registers into the calling context's layer,
+ * and returns the disposer that unregisters it.
+ */
+export interface SkillsService {
+  /**
+   * Register a skill provider owned by the current fiber.
+   * @param create - factory receiving this registration's control handles.
+   * @returns the disposer that unregisters the provider.
+   */
+  registerProvider(create: (control: SkillProviderControl) => SkillProvider): () => void;
+}
+
+/**
+ * Registration-scoped lifecycle handles handed to a provider factory.
+ *
+ * Only `signal` is used: it aborts when this exact registration is disposed, so a
+ * provider can stop in-flight work instead of touching a registry it no longer
+ * belongs to.
+ */
+export interface SkillProviderControl {
+  /** Aborts when this exact provider registration is disposed. */
+  readonly signal: AbortSignal;
+}
+
+/** Invocation controls shared by skill discovery consumers. */
+export interface SkillInvocationPolicy {
+  /** Whether model-facing catalogs and loaders include this skill. */
+  readonly modelInvocable: boolean;
+  /** Whether human-facing command catalogs and loaders include this skill. */
+  readonly userInvocable: boolean;
+}
+
+/** Skill metadata a provider returns from `list`, before the body is loaded. */
+export interface SkillCandidate {
+  /** Kebab-case identifier used to address the skill. */
+  readonly name: string;
+  /** Short routing description shown by discovery consumers. */
+  readonly description: string;
+  /** Optional extra routing guidance. */
+  readonly whenToUse?: string;
+  /** Resolved model and user invocation controls. */
+  readonly invocation: SkillInvocationPolicy;
+  /** Discovery source bucket; prompt-visible metadata, not precedence. */
+  readonly source: string;
+  /** Provider that owns this skill body. */
+  readonly provider: string;
+  /** Provider-specific base used by the loaded body to resolve relative resources. */
+  readonly resourceBase?: SkillResourceBase;
+  /** Lower ranks win duplicate skill names before provider registration order. */
+  readonly rank: number;
+  /** Opaque provider-owned handle passed back to `get`. */
+  readonly locator: unknown;
+  /** Absolute file path when the provider has one. */
+  readonly path?: string;
+}
+
+/** A complete skill, including the body the registry hands to the model. */
+export interface SkillDefinition {
+  /** Kebab-case identifier used to address the skill. */
+  readonly name: string;
+  /** Short routing description shown by discovery consumers. */
+  readonly description: string;
+  /** Optional extra routing guidance. */
+  readonly whenToUse?: string;
+  /** Resolved model and user invocation controls. */
+  readonly invocation: SkillInvocationPolicy;
+  /** Discovery source bucket; prompt-visible metadata, not precedence. */
+  readonly source: string;
+  /** Provider that owns this skill body. */
+  readonly provider: string;
+  /** Provider-specific base used by the body to resolve relative resources. */
+  readonly resourceBase?: SkillResourceBase;
+  /** Markdown instruction body, with provider metadata already removed. */
+  readonly content: string;
+  /** Absolute file path when the skill came from disk. */
+  readonly path?: string;
+}
+
+/** Provider-specific base for resolving a loaded body's relative resources. */
+export type SkillResourceBase = { readonly kind: 'directory'; readonly path: string };
+
+/**
+ * One source of skills, as consumed by the registry.
+ *
+ * `list` may return an incomplete observation instead of an array; this provider
+ * never needs that, because one file on disk either reads or does not.
+ */
+export interface SkillProvider {
+  /** Unique provider name in the `ctx.skills` registry. */
+  readonly name: string;
+  /**
+   * List the candidates this provider currently offers.
+   * @param options - lookup options; only `signal` is consulted here.
+   * @returns the provider's candidates.
+   */
+  list(options: { readonly signal?: AbortSignal | undefined }): Promise<readonly SkillCandidate[]>;
+  /**
+   * Load one candidate's full body.
+   * @param candidate - a candidate previously returned by {@link list}.
+   * @param options - lookup options; only `signal` is consulted here.
+   * @returns the loaded skill, or `undefined` when it is no longer loadable.
+   */
+  get(
+    candidate: SkillCandidate,
+    options: { readonly signal?: AbortSignal | undefined },
+  ): Promise<SkillDefinition | undefined>;
+}
+
+/**
  * The subset of a cordis logger the plugin uses.
  *
  * Mirrors `Logger` from `@deepseek-ai/cordis` without importing it, so the tool

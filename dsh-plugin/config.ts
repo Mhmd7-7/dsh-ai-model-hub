@@ -49,8 +49,15 @@ export interface PluginConfig {
   /**
    * Where produced artifacts are stored.
    *
-   * Defaults to `<working directory>/artifacts`, so a conversation's generated
-   * images land beside its code rather than in a shared global directory.
+   * **Unset is the normal case, and the right one.** Every tool call then writes
+   * under the *calling session's* workspace — `<workspace>/artifacts`, resolved
+   * per call from DSH's sandbox policy — so each conversation's images land beside
+   * that conversation's code, and switching workspace in the GUI switches where
+   * output goes without any configuration.
+   *
+   * Setting it pins one absolute directory for every session, which is what a
+   * deployment that collects artifacts centrally wants. There is no relative
+   * form: the hub refuses a non-absolute root rather than guessing at a base.
    */
   artifactRoot?: string;
   /**

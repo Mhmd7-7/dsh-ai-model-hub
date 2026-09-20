@@ -332,6 +332,62 @@ registry and depend on the plugin by version.
 
 The agent never names an engine, a command, or a path. That is the whole design.
 
+### The hub ships its own skill
+
+The plugin also teaches the agent how to use it.
+[`skills/dsh-ai-model-hub/SKILL.md`](skills/dsh-ai-model-hub/SKILL.md) is registered
+as a skill provider on `ctx.skills`, the way DSH's own bundled `dsh-badge` skill is,
+so:
+
+- **nothing is copied** into `~/.dsh/skills` or a project skill root, and no profile
+  file is edited — installing or updating the plugin installs the skill;
+- the body stays the file in this checkout, so a `git pull` changes what the agent
+  reads on its next load, with no reinstall step and no stale copy;
+- registration lands in the **global** layer, which is the layer DSH merges into
+  every preset's session catalog, so no preset has to know about it.
+
+The registration is deliberately *not* a declared `inject`. It goes through
+`ctx.inject(['skills'], …)`, so a composition with no skill registry — headless, or
+the `sdk-minimal` profile — still gets the model tools and simply never runs the
+skill callback. A missing or malformed skill file costs one warning and the skill,
+never the tools beside it.
+
+The file is an ordinary skill, so it also works the old-fashioned way: link or copy
+`skills/dsh-ai-model-hub/` into a `.dsh/skills` root if you would rather not run the
+plugin at all. Its frontmatter is the single source of truth for the name and
+description on both paths.
+
+### A settings page for what is on this machine
+
+The agent is not the only one who needs to know where the engines are. The plugin
+also adds a **Local models** section to the DSH settings, which answers the question
+a user actually has: which engines are on this PC, where is each one installed,
+is it running, and what is inside it.
+
+| Row | Where it comes from |
+|---|---|
+| Installed at | The launch command's `cwd`, then a short list of well-known install directories |
+| Listens on / running | A live probe of the catalog's endpoint (`Check now`), or the last known state |
+| Models | The engine itself where it has an API — Ollama's `/api/tags` — otherwise the files in its model store |
+| Hub can start it | The descriptor's `startable`, after the deployment's `allowProcessLaunch` |
+| Catalog models / capabilities | The same live hub the tools read, so the page cannot disagree with behaviour |
+
+Engines the catalog does **not** declare are still listed — `a1111`, `comfyui`, and
+`ollama` are known by name — with the directories that were checked, so "Forge is
+installed but the hub has not been told" is visible instead of silent.
+
+Two halves, both dependency-free:
+
+- `dsh-plugin/inventory.ts` builds the answer and serves it on
+  `GET /dsh-ai-model-hub/inventory`. Every probe is bounded and failures are
+  contained; the route is injected on demand, so a headless profile with no web
+  server keeps every tool and simply serves no page.
+- `dsh-plugin/client.js` is the browser half. DSH loads plugin clients through
+  `window.__ModuleLoader__` as plain side-effect scripts — no top-level
+  `import`/`export`, React handed in through the factory's `require` — so this is
+  hand-written JavaScript with **no bundler and no build step**, matching the rest
+  of the project. It registers one `settings.section` contribution.
+
 ### Turning on real models
 
 Phase 2 needs no code: copy an Ollama or llama.cpp entry from
@@ -350,6 +406,42 @@ directly. See [docs/adding-a-model.md](docs/adding-a-model.md).
 Nothing is launched by default: `allowProcessLaunch` is `false`, so the hub talks
 to engines you run but will not start any. See
 [docs/security.md](docs/security.md) before turning that on.
+
+### Where the output goes
+
+Artifacts land in **`<workspace>/artifacts`**, where "workspace" means the
+*calling session's*, not the host process's working directory. That distinction is
+the whole point: `dsh web` is one long-lived process serving many sessions with
+different workspaces, and it is built — and used to resolve this path — before any
+session exists. So the root is resolved per tool call, from DSH's own
+`ctx.sandboxPolicy.resolve({ session }).workspaceRoot`, which is the same value the
+file tools treat as the workspace boundary.
+
+The consequence a user notices: switch workspace in the GUI and output follows,
+with no configuration. `list_artifacts` reads the same per-call root, so chaining a
+workflow still finds what the previous step produced.
+
+Set `artifactRoot` in the plugin row to pin one absolute directory for every
+session instead — the right choice when collecting artifacts centrally, the wrong
+one when you want each conversation's images beside its code. The hub refuses a
+relative root rather than guessing at a base.
+
+Turn it on and engines start themselves. A descriptor that marks its engine
+startable — `"startable": true` plus a `start` command, as the `a1111` host in
+[`config/examples/real-models.example.json`](config/examples/real-models.example.json)
+does — lets `start_model` bring the engine up, and lets `invoke_model` do it
+implicitly for a cold model, waiting for the health check before the request is
+sent. A stopped ComfyUI then costs one cold start, not a failed task:
+
+```
+invoke_model({ capability: 'text_to_image', prompt: 'a red fox in deep snow' })
+  → text_to_image served by comfyui_z_image_turbo in 22620 ms (cold start).
+```
+
+Two switches have to agree — the descriptor's `startable` and the deployment's
+`allowProcessLaunch` — so an 8 GB model cannot be started by a catalog file alone.
+Starting an engine that is already healthy is a no-op rather than a duplicate
+process, and only processes the hub started can be stopped by `stop_model`.
 
 ---
 
@@ -421,7 +513,12 @@ dsh-ai-model-hub/
 │   ├── service.ts                the hub as a cordis service
 │   ├── config.ts                 plugin configuration schema
 │   ├── types.ts                  the DSH API bridge — where a breaking change lands
+│   ├── skills.ts                 the bundled agent skill: one provider, one file
+│   ├── inventory.ts              engine discovery + the route the settings page reads
+│   ├── client.js                 the browser half: the "Local models" settings page
 │   └── tools/                    discovery · lifecycle · invoke
+├── skills/dsh-ai-model-hub/
+│   └── SKILL.md                  the agent-facing skill the plugin registers
 ├── install.ps1                   one-line install from GitHub (Windows/PowerShell)
 ├── install.sh                    one-line install from GitHub (macOS/Linux)
 ├── scripts/                      install-plugin · doctor · smoke — install and verification

@@ -9,8 +9,8 @@
  *   hub construction → tool registration
  *
  * It is deliberately separate from `doctor.mjs` because it *does* work rather than
- * inspect: it registers nine tools and reads a model catalog. Point it at a
- * throwaway profile if you would rather not touch one.
+ * inspect: it registers nine tools, reads a model catalog, and offers the bundled
+ * skill. Point it at a throwaway profile if you would rather not touch one.
  *
  * Usage:
  *
@@ -86,6 +86,25 @@ const registered = new Map();
 const promptContexts = [];
 const logs = [];
 const disposers = [];
+const skillProviders = [];
+const injectRequests = [];
+
+// ── Stand in for the skill registry ─────────────────────────────────────────
+// A real profile has `ctx.skills`, provided by `@deepseek-ai/dsh-skill`. This
+// harness mounts no service lifecycle at all, so `ctx.inject(['skills'], …)`
+// would never fire and the bundled skill would be reported as missing for a
+// reason that has nothing to do with the plugin. The stand-in registers a
+// recording registry and runs any injected callback immediately, which is what
+// cordis does once the required service is available.
+const skillsStandIn = {
+  registerProvider: (create) => {
+    skillProviders.push(create({ signal: new AbortController().signal }));
+    return () => {};
+  },
+};
+
+/** Assigned below; the inject stand-in needs the proxied context to hand back. */
+let ctx;
 
 const base = new Context();
 const extended = base.extend({
@@ -114,6 +133,13 @@ const extended = base.extend({
     disposers.push(disposer);
     return disposer;
   },
+  skills: skillsStandIn,
+  inject: (deps, callback) => {
+    const names = Array.isArray(deps) ? deps : Object.keys(deps);
+    injectRequests.push(names.join(', '));
+    if (names.includes('skills')) callback(ctx);
+    return { then: () => {} };
+  },
 });
 
 // ── Enforce the `inject` contract, the way cordis does ──────────────────────
@@ -137,7 +163,7 @@ const cordisBuiltins = new Set([
 ]);
 const undeclaredReads = [];
 
-const ctx = new Proxy(extended, {
+ctx = new Proxy(extended, {
   get(target, property, receiver) {
     if (typeof property === 'string' && !cordisBuiltins.has(property) && !injected.has(property)) {
       // Only flag reads that resolve to nothing: property access on our own test
@@ -174,6 +200,27 @@ if (disabled) console.log(`Catalog: ${disabled.replace(/^warn\s*/, '')}`);
 console.log(`Capability context registered: ${promptContexts.length > 0 ? 'yes' : 'no'}`);
 console.log(`Lifetime disposers registered: ${disposers.length}`);
 console.log(`Declared inject: ${JSON.stringify([...injected])}`);
+if (injectRequests.length > 0) {
+  console.log(`Injected on demand: ${JSON.stringify([...new Set(injectRequests)])}`);
+}
+
+// Read what the bundled skill provider actually advertises: a registered
+// provider that offers nothing means the skill file could not be read or parsed,
+// which would otherwise be visible only as a missing entry in a live session.
+const offeredSkills = [];
+for (const provider of skillProviders) {
+  for (const candidate of await provider.list({})) {
+    offeredSkills.push(`${candidate.name} (provider ${provider.name}, rank ${candidate.rank})`);
+  }
+}
+if (skillProviders.length === 0) {
+  console.log('Bundled skill: (no provider registered)');
+} else if (offeredSkills.length === 0) {
+  console.log('Bundled skill: (provider registered but offered nothing)');
+} else {
+  for (const offered of offeredSkills) console.log(`Bundled skill: ${offered}`);
+}
+
 if (undeclaredReads.length > 0) {
   console.log(`Undeclared service reads: ${[...new Set(undeclaredReads)].join(', ')}`);
 }
@@ -208,6 +255,12 @@ if (registered.size === 0) {
   console.error('searches upward from the DSH working directory and then from its own');
   console.error('installation directory, logs the reason, and stays disabled rather than');
   console.error('failing the boot. Create models.json in one of those directories.');
+  process.exit(1);
+}
+if (skillProviders.length > 0 && offeredSkills.length === 0) {
+  console.error('FAILED: the skill provider registered but offers no skill.');
+  console.error('Its file is unreadable or its frontmatter is invalid; the warning above');
+  console.error('names the problem. Check skills/dsh-ai-model-hub/SKILL.md.');
   process.exit(1);
 }
 

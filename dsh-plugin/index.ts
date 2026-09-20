@@ -14,6 +14,7 @@
  * | `name` / `inject` / `apply` / `Config` | plugin registration (Loader contract)  |
  * | `ctx.tools.register`             | exposing capability tools to the model      |
  * | `ctx.systemPrompt.context`       | a dynamic snapshot of available capabilities |
+ * | `ctx.inject` / `ctx.skills`      | offering the bundled skill                  |
  * | `ctx.logger`                     | diagnostics                                 |
  * | `ctx.effect`                     | disposing the hub with the plugin           |
  *
@@ -34,12 +35,16 @@ import { fileURLToPath } from 'node:url';
 import { Config as SchemaConfig, resolvePluginConfig } from './config.ts';
 import type { PluginConfig, ResolvedPluginConfig } from './config.ts';
 import { ModelHubService } from './service.ts';
+import { registerInventoryRoute } from './inventory.ts';
+import { registerModelHubSkill } from './skills.ts';
+import { createArtifactRootResolver } from './workspace.ts';
 import { registerDiscoveryTools, registerRoutingTool } from './tools/discovery.ts';
 import { registerLifecycleTools } from './tools/lifecycle.ts';
 import { registerInvokeTool } from './tools/invoke.ts';
 import { ModelHub, ModelHubError, loadCatalogFromAnchors, toHubError } from 'dsh-ai-model-hub/index.ts';
 import { DEFAULT_EXECUTION_POLICY } from 'dsh-ai-model-hub/index.ts';
 import type { ModelCatalogConfig } from 'dsh-ai-model-hub/index.ts';
+import type { ModelHost } from 'dsh-ai-model-hub/index.ts';
 
 /**
  * This plugin's own installation directory.
@@ -100,13 +105,26 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
   const config: ResolvedPluginConfig = resolvePluginConfig(rawConfig);
   const log = ctx.logger('dsh-ai-model-hub');
 
+  // Offer the hub's own instructions as a skill before anything can fail: the
+  // skill is most valuable precisely when the catalog did not load, because it
+  // tells the agent how to check and where to look. Its own failure is contained
+  // to one warning and never affects the tools below.
+  registerModelHubSkill(ctx, log);
+
   let hub: ModelHub;
+  // The catalog's own facts, carried out of the try block for the settings page:
+  // the hub deliberately does not republish them, because a hub built from a live
+  // service is not the same object as the document it was built from.
+  let catalogPath = '';
+  let catalogHosts: readonly ModelHost[] = [];
   try {
     const loaded = loadCatalogFromAnchors({
       ...(config.configPath.length === 0 ? {} : { configPath: config.configPath }),
       anchors: catalogAnchors(config),
     });
     hub = buildHub(loaded.config, config, log);
+    catalogPath = loaded.path;
+    catalogHosts = loaded.config.hosts ?? [];
     log.info(
       `model hub ready: ${hub.catalog.listModels().length} model(s), ${hub.catalog.listCapabilities().length} capability(ies) from ${loaded.path}`,
     );
@@ -137,14 +155,33 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
     'dsh-ai-model-hub: dispose the model hub and every process it started',
   );
 
-  registerDiscoveryTools(ctx, service);
-  registerRoutingTool(ctx, service);
-  registerInvokeTool(ctx, service, { invocationTimeoutMs: config.invocationTimeoutMs });
+  // Where a call's artifacts go: the calling session's workspace by default, since
+  // the hub is built before any session exists and the host's working directory
+  // says nothing about the conversation's.
+  const artifactRootFor = createArtifactRootResolver(ctx, config.artifactRoot, log);
+
+  registerDiscoveryTools(ctx, service, { artifactRootFor });
+  registerRoutingTool(ctx, service, { artifactRootFor });
+  registerInvokeTool(ctx, service, {
+    invocationTimeoutMs: config.invocationTimeoutMs,
+    artifactRootFor,
+  });
   registerLifecycleTools(ctx, service, { allowProcessLaunch: config.allowProcessLaunch });
 
   if (config.exposeCapabilityContext) {
     registerCapabilityContext(ctx, service);
   }
+
+  // The same facts, for the human: the "Local models" settings page reads a live
+  // inventory of the engines on this machine. Injected on demand, so a profile with
+  // no web server (headless, sdk-minimal) keeps every tool and serves no page.
+  registerInventoryRoute(ctx, log, {
+    hub,
+    hosts: catalogHosts,
+    catalogPath,
+    artifactRoot: config.artifactRoot,
+    allowProcessLaunch: config.allowProcessLaunch,
+  });
 
   // One diagnostic line per invocation, so an operator can see what ran without
   // the hub knowing about logging. This is the only event subscriber.

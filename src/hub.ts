@@ -105,6 +105,17 @@ export interface InvokeOptions {
   readonly allowFallback?: boolean;
   /** Maximum number of models to attempt, including the first. Defaults to 3. */
   readonly maxAttempts?: number;
+  /**
+   * Read and write this call's artifacts under `root` instead of the hub's own
+   * store, which stays the default for every call that omits it.
+   *
+   * This is what lets a long-lived host give each session its own artifact
+   * directory: the hub is constructed once, before any session exists, so the
+   * workspace is only knowable per call. The store for a root is created on first
+   * use and reused afterwards, so passing the same root on every call from one
+   * session costs a map lookup.
+   */
+  readonly artifactRoot?: string;
 }
 
 /**
@@ -131,6 +142,12 @@ export class ModelHub {
   private readonly log: (message: string, fields?: Readonly<Record<string, unknown>>) => void;
   private readonly ownsArtifacts: boolean;
   private disposed = false;
+
+  /**
+   * Stores for the per-call roots {@link InvokeOptions.artifactRoot} names, keyed
+   * by the root as given. The hub's own {@link artifacts} store is not in here.
+   */
+  private readonly callStores = new Map<string, ArtifactStore>();
 
   /**
    * @param options - configuration, adapters, and policies.
@@ -177,6 +194,28 @@ export class ModelHub {
     });
 
     if (options.manageTimers !== false) this.runtime.start();
+  }
+
+  /**
+   * The artifact store one call reads and writes through.
+   *
+   * Omitting the root returns the hub's own store — the deployment's configured
+   * root, or the process-working-directory default — so a caller that says
+   * nothing keeps the single-store behaviour. A named root gets its own store,
+   * created once and reused, which is how a per-session workspace costs one map
+   * lookup per call rather than a directory listing.
+   *
+   * @param root - the per-call artifact root, when the caller named one.
+   * @returns the store to use.
+   * @throws ModelHubError when the named root is not absolute.
+   */
+  private storeFor(root: string | undefined): ArtifactStore {
+    if (root === undefined) return this.artifacts;
+    const existing = this.callStores.get(root);
+    if (existing !== undefined) return existing;
+    const created = new LocalArtifactStore({ root, log: (message) => this.log(message) });
+    this.callStores.set(root, created);
+    return created;
   }
 
   /**
@@ -427,11 +466,12 @@ export class ModelHub {
    * @param request - the invocation request.
    * @returns the routing decision.
    */
-  async route(request: InvocationRequest): Promise<RoutingDecision> {
+  async route(request: InvocationRequest, options: InvokeOptions = {}): Promise<RoutingDecision> {
     this.assertUsableCapability(request.capability);
-    const resolved = await resolveRequestInputs({ artifacts: this.artifacts }, request);
+    const artifacts = this.storeFor(options.artifactRoot);
+    const resolved = await resolveRequestInputs({ artifacts }, request);
     const decision = routeRequest(
-      { catalog: this.catalog, runtime: this.runtime, artifacts: this.artifacts },
+      { catalog: this.catalog, runtime: this.runtime, artifacts },
       resolved,
       this.routingPolicy,
     );
@@ -463,9 +503,10 @@ export class ModelHub {
     options: InvokeOptions = {},
   ): Promise<InvocationResult & { readonly decision: RoutingDecision }> {
     this.assertUsableCapability(request.capability);
-    const resolved = await resolveRequestInputs({ artifacts: this.artifacts }, request);
+    const artifacts = this.storeFor(options.artifactRoot);
+    const resolved = await resolveRequestInputs({ artifacts }, request);
     const decision = routeRequest(
-      { catalog: this.catalog, runtime: this.runtime, artifacts: this.artifacts },
+      { catalog: this.catalog, runtime: this.runtime, artifacts },
       resolved,
       this.routingPolicy,
     );
@@ -490,7 +531,7 @@ export class ModelHub {
       const modelId = attempts[index];
       if (modelId === undefined) continue;
       try {
-        const result = await this.invokeOn(request, resolved, modelId, decision);
+        const result = await this.invokeOn(request, resolved, modelId, decision, artifacts);
         if (index > 0) {
           const previous = attempts[index - 1];
           this.emit({
@@ -544,6 +585,7 @@ export class ModelHub {
    * @param resolved - the resolved inputs.
    * @param modelId - the model to run.
    * @param decision - the routing decision, for logging.
+   * @param artifacts - the store this call reads and writes through.
    * @returns the invocation result.
    */
   private async invokeOn(
@@ -551,6 +593,7 @@ export class ModelHub {
     resolved: Awaited<ReturnType<typeof resolveRequestInputs>>,
     modelId: string,
     decision: RoutingDecision,
+    artifacts: ArtifactStore,
   ): Promise<InvocationResult> {
     const model = this.catalog.requireModel(modelId);
     const adapter = this.adapters.get(model.adapter);
@@ -586,7 +629,7 @@ export class ModelHub {
         ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
         inputs: resolved.inputs,
         options: request.options ?? {},
-        artifacts: this.artifacts,
+        artifacts,
         signal: request.signal ?? new AbortController().signal,
         log: this.runtime.adapterLogger(modelId),
       });
@@ -670,8 +713,8 @@ export class ModelHub {
    * @param artifactId - the artifact id.
    * @returns the artifact, or `undefined`.
    */
-  async getArtifact(artifactId: string): Promise<Artifact | undefined> {
-    return this.artifacts.get(artifactId);
+  async getArtifact(artifactId: string, artifactRoot?: string): Promise<Artifact | undefined> {
+    return this.storeFor(artifactRoot).get(artifactId);
   }
 
   /**
@@ -679,8 +722,8 @@ export class ModelHub {
    * @param limit - maximum number to return. Defaults to 20.
    * @returns artifact references.
    */
-  async listArtifacts(limit = 20): Promise<readonly Artifact[]> {
-    return this.artifacts.list(limit);
+  async listArtifacts(limit = 20, artifactRoot?: string): Promise<readonly Artifact[]> {
+    return this.storeFor(artifactRoot).list(limit);
   }
 
   // ───────────────────────────── lifecycle of the hub ──────────────────
@@ -715,11 +758,19 @@ export class ModelHub {
   }
 }
 /**
- * The default artifact root: `artifacts/` under the current working directory.
+ * The hub library's fallback artifact root: `artifacts/` under the current
+ * working directory.
  *
- * Deliberately workspace-local and containable, so one conversation's generated
- * images land beside its code rather than in a shared global directory where a
- * second session could collide with them.
+ * This is what a hub built *without* `artifactRoot` and called *without*
+ * {@link InvokeOptions.artifactRoot} uses. For a process that owns its working
+ * directory — a CLI, a test, a script — that is exactly right.
+ *
+ * For a long-lived host it is the wrong question: `dsh web` is one process
+ * serving many sessions, its working directory is whatever it was launched from,
+ * and a caller's notion of "here" lives on the session. DSH's plugin layer
+ * therefore resolves the calling session's workspace per call and passes it as
+ * {@link InvokeOptions.artifactRoot}; this remains the last-resort default for
+ * every other caller.
  *
  * @returns an absolute path.
  */

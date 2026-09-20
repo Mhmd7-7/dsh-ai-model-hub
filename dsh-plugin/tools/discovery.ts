@@ -16,14 +16,22 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ModelHubService } from '../service.ts';
 import type { Capability } from 'dsh-ai-model-hub/index.ts';
 import { formatArtifact, formatAvailability, formatModel, textBlock, toToolError } from './support.ts';
+import type { ArtifactRootResolver } from '../workspace.ts';
+import type { ToolCallScope } from '../types.ts';
 
 /**
  * Register the read-only discovery tools.
  *
  * @param ctx - the context whose `tools` registry receives them.
  * @param service - the hub service to read from.
+ * @param options - the per-call artifact root resolver, so a listing shows the
+ *   calling session's artifacts rather than the boot-time store's.
  */
-export function registerDiscoveryTools(ctx: Context, service: ModelHubService): void {
+export function registerDiscoveryTools(
+  ctx: Context,
+  service: ModelHubService,
+  options: { readonly artifactRootFor: ArtifactRootResolver },
+): void {
   const hub = service.hub;
 
   ctx.tools.register(
@@ -371,9 +379,10 @@ export function registerDiscoveryTools(ctx: Context, service: ModelHubService): 
           );
         },
       },
-      execute: async (args) => {
+      execute: async (args, exec) => {
         const limit = Math.max(1, Math.min(200, args.limit ?? 20));
-        const artifacts = await hub.listArtifacts(limit);
+        const artifactRoot = options.artifactRootFor(exec as unknown as ToolCallScope);
+        const artifacts = await hub.listArtifacts(limit, artifactRoot);
         return {
           count: artifacts.length,
           artifacts: artifacts.map((artifact) => ({
@@ -397,7 +406,11 @@ export function registerDiscoveryTools(ctx: Context, service: ModelHubService): 
  * @param ctx - the context whose `tools` registry receives it.
  * @param service - the hub service to read from.
  */
-export function registerRoutingTool(ctx: Context, service: ModelHubService): void {
+export function registerRoutingTool(
+  ctx: Context,
+  service: ModelHubService,
+  options: { readonly artifactRootFor: ArtifactRootResolver },
+): void {
   const hub = service.hub;
 
   ctx.tools.register(
@@ -453,15 +466,19 @@ export function registerRoutingTool(ctx: Context, service: ModelHubService): voi
           return textBlock(lines.join('\n'));
         },
       },
-      execute: async (args) => {
+      execute: async (args, exec) => {
         try {
-          const decision = await hub.route({
-            capability: args.capability as Capability,
-            ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
-            ...(args.inputArtifactIds === undefined
-              ? {}
-              : { inputs: args.inputArtifactIds.map((id) => ({ id })) }),
-          });
+          const artifactRoot = options.artifactRootFor(exec as unknown as ToolCallScope);
+          const decision = await hub.route(
+            {
+              capability: args.capability as Capability,
+              ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
+              ...(args.inputArtifactIds === undefined
+                ? {}
+                : { inputs: args.inputArtifactIds.map((id) => ({ id })) }),
+            },
+            artifactRoot === undefined ? {} : { artifactRoot },
+          );
           return {
             chosen: decision.modelId,
             rationale: decision.rationale,
