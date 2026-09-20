@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dsh-ai-model-hub.local/schema/model-catalog.schema.json",
+  "title": "AI Model Hub catalog",
+  "description": "The document read from config/models.json. `hosts` declares shared engine processes once; `models` declares each model as data. Adding a model means adding an entry here plus, only if its engine kind is unsupported, one adapter — never a change to the router, the agent prompt, or DeepSeek Harness.",
+  "type": "object",
+  "required": ["models"],
+  "additionalProperties": true,
+  "properties": {
+    "$comment": {
+      "type": "string",
+      "description": "A note for human readers. Unknown keys anywhere in this document are ignored, so a hand-edited catalog is tolerant of stray fields."
+    },
+    "version": {
+      "type": "string",
+      "description": "Schema version of this document, so a future breaking change can migrate rather than guess. Currently `1`."
+    },
+    "hosts": {
+      "type": "array",
+      "description": "Shared processes. A host exists so that 'how do I launch this engine' is written once when several models sit behind it.",
+      "items": { "$ref": "#/$defs/host" }
+    },
+    "models": {
+      "type": "array",
+      "description": "The models. Every entry must declare `host` or an inline `runtime`, but not both.",
+      "items": { "$ref": "#/$defs/model" }
+    }
+  },
+  "$defs": {
+    "capability": {
+      "type": "string",
+      "description": "What a caller asks for. The router filters on this and only this.",
+      "enum": [
+        "text_to_text",
+        "text_to_image",
+        "image_to_image",
+        "text_to_3d",
+        "image_to_3d",
+        "audio_generation",
+        "speech_to_text",
+        "image_understanding",
+        "video_generation"
+      ]
+    },
+    "modelType": {
+      "type": "string",
+      "description": "What the model fundamentally is. Drives operator-facing grouping and adapter defaults; the router does not filter on it.",
+      "enum": [
+        "text_generation",
+        "image_generation",
+        "image_editing",
+        "image_understanding",
+        "three_d_generation",
+        "audio_generation",
+        "speech_recognition",
+        "video_generation",
+        "multimodal",
+        "custom"
+      ]
+    },
+    "ioType": {
+      "type": "string",
+      "description": "An artifact kind a model can consume or produce.",
+      "enum": ["text", "image", "audio", "video", "model_3d", "json", "file"]
+    },
+    "adapterKind": {
+      "type": "string",
+      "description": "How the hub talks to the model. One adapter per kind is registered in code; adding a model on an existing kind requires no code.",
+      "enum": ["mock", "http_json", "openai_compatible", "cli"]
+    },
+    "healthCheckKind": {
+      "type": "string",
+      "description": "How liveness is established. `none` trusts the adapter; `tcp`/`http` probe the endpoint; `command` runs a program and accepts exit code 0.",
+      "enum": ["none", "tcp", "http", "command"]
+    },
+    "command": {
+      "type": "object",
+      "description": "A command plus its arguments, passed to spawn as an argv array. Never a shell string, so there is nothing to inject into.",
+      "required": ["command"],
+      "additionalProperties": true,
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Executable name or absolute path. A bare name must appear in the deployment's command allowlist unless `allowAnyCommand` is set."
+        },
+        "args": {
+          "type": "array",
+          "maxItems": 256,
+          "description": "Arguments passed verbatim. NUL bytes and line breaks are refused.",
+          "items": { "type": "string", "maxLength": 4096 }
+        },
+        "cwd": { "type": "string", "description": "Working directory for the process." }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Where and how a model executes. `endpoint` covers 'already running somewhere'; `launch` covers 'we know how to start it'.",
+      "required": ["engine", "adapter"],
+      "additionalProperties": true,
+      "properties": {
+        "engine": {
+          "type": "string",
+          "description": "Free-form engine label for operators and logs, e.g. `llama.cpp`, `ollama`, `diffusers`, `comfyui`, `blender`."
+        },
+        "adapter": { "$ref": "#/$defs/adapterKind" },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^https?://",
+          "description": "Base URL of a long-lived server. Required for the `http_json` and `openai_compatible` adapters."
+        },
+        "path": {
+          "type": "string",
+          "description": "Request path appended to `endpoint`, e.g. `/sdapi/v1/txt2img`. Omitted means the adapter's own default."
+        },
+        "modelPath": {
+          "type": "string",
+          "description": "Where the weights live. Only meaningful for CLI engines that read a local checkpoint."
+        },
+        "env": {
+          "type": "object",
+          "description": "Extra environment variables for a launched process. Credential-shaped variables are stripped from the inherited environment regardless.",
+          "additionalProperties": { "type": "string" }
+        },
+        "args": {
+          "type": "array",
+          "description": "Extra arguments appended to the launch command's own arguments.",
+          "items": { "type": "string" }
+        },
+        "dataDir": { "type": "string", "description": "Directory the engine should use for caches and outputs." }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "description": "What the model needs while resident. Routing rejects a model whose declared needs exceed the detected machine.",
+      "additionalProperties": true,
+      "properties": {
+        "vramGb": { "type": "number", "minimum": 0, "description": "GPU memory needed, in gibibytes." },
+        "ramGb": { "type": "number", "minimum": 0, "description": "System memory needed, in gibibytes." },
+        "diskGb": { "type": "number", "minimum": 0, "description": "Disk space needed for weights, in gibibytes." },
+        "requiresGpu": {
+          "type": "boolean",
+          "description": "Whether a CUDA-capable GPU is mandatory rather than merely preferred. Defaults to false."
+        },
+        "allowConcurrentInstances": {
+          "type": "boolean",
+          "description": "Whether two instances may be resident at once. Defaults to false, making the model an exclusive resource."
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "description": "Model-specific size limits routing can filter on.",
+      "additionalProperties": true,
+      "properties": {
+        "contextTokens": { "type": "number", "minimum": 1, "description": "Maximum context window in tokens, for text models." },
+        "maxWidth": { "type": "number", "minimum": 1, "description": "Maximum input image width in pixels." },
+        "maxHeight": { "type": "number", "minimum": 1, "description": "Maximum input image height in pixels." },
+        "resolutions": {
+          "type": "array",
+          "description": "Resolutions the model supports, as `WIDTHxHEIGHT` strings.",
+          "items": { "type": "string", "pattern": "^[0-9]+x[0-9]+$" }
+        },
+        "maxDurationSeconds": { "type": "number", "minimum": 0, "description": "Maximum output audio/video duration in seconds." }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "description": "How to start and stop the model's process. Omitting it marks the model as external: the hub only ever talks to its endpoint and never spawns anything.",
+      "additionalProperties": true,
+      "properties": {
+        "startable": { "type": "boolean", "description": "Whether the hub may start this model. Requires `start`." },
+        "stoppable": { "type": "boolean", "description": "Whether the hub may stop it. Requires `start` or `stop` so the hub has a process to own." },
+        "start": { "$ref": "#/$defs/command" },
+        "stop": { "$ref": "#/$defs/command" },
+        "startupTimeoutMs": {
+          "type": "number",
+          "minimum": 1,
+          "description": "How long to wait for a clean start before the launch is a failure. Defaults to 120000."
+        },
+        "shutdownTimeoutMs": {
+          "type": "number",
+          "minimum": 1,
+          "description": "How long to wait for a clean stop before a forced kill. Defaults to 15000."
+        },
+        "idleTimeoutMs": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Stop the process after this many idle milliseconds. Off when omitted or 0 — unloading a model the user is about to reuse is worse than holding VRAM."
+        },
+        "awaitHealthOnStart": {
+          "type": "boolean",
+          "description": "Whether a start waits for the health check to pass. Defaults to true."
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "description": "How to check liveness. Defaults from the adapter kind: HTTP-based adapters get an HTTP probe, `cli` and `mock` get `none`.",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": { "$ref": "#/$defs/healthCheckKind" },
+        "path": { "type": "string", "description": "Path for an `http` check. Defaults to `/`." },
+        "command": { "type": "string", "description": "Command for a `command` check; subject to the launch guardrails." },
+        "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments for a `command` check." },
+        "timeoutMs": { "type": "number", "minimum": 1, "description": "Per-attempt timeout in milliseconds. Defaults to 2000." }
+      }
+    },
+    "host": {
+      "type": "object",
+      "description": "A shared process several models sit behind.",
+      "required": ["id", "name", "adapter", "runtime"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string", "description": "Unique id referenced by a model's `host`." },
+        "name": { "type": "string", "description": "Human-facing name." },
+        "adapter": { "$ref": "#/$defs/adapterKind" },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "lifecycle": { "$ref": "#/$defs/lifecycle" },
+        "resources": { "$ref": "#/$defs/resources" },
+        "health": { "$ref": "#/$defs/health" },
+        "enabled": { "type": "boolean", "description": "Whether the host's models may be selected. Defaults to true." },
+        "notes": { "type": "string" },
+        "$comment": { "type": "string" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "description": "One model. Only id, name, type, and capabilities are structurally required; `host` or `runtime` supplies the rest.",
+      "required": ["id", "name", "type", "capabilities"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "description": "Unique, stable, kebab-case id. Never reused for a different model."
+        },
+        "name": { "type": "string", "minLength": 1, "description": "Human-facing display name." },
+        "type": { "$ref": "#/$defs/modelType" },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "description": "What the model can do. This — not `type` — is what routing filters on.",
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        "inputTypes": {
+          "type": "array",
+          "description": "Artifact kinds accepted as input. Defaults from the declared capabilities; a declared value that no capability accepts is a validation error.",
+          "items": { "$ref": "#/$defs/ioType" }
+        },
+        "outputTypes": {
+          "type": "array",
+          "description": "Artifact kinds produced as output. Defaults from the declared capabilities.",
+          "items": { "$ref": "#/$defs/ioType" }
+        },
+        "version": { "type": "string", "description": "Version of this descriptor, e.g. `1.0.0` or a model release date." },
+        "host": { "type": "string", "description": "Id of the host that owns the process. Mutually exclusive with inline `runtime`." },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "adapter": { "$ref": "#/$defs/adapterKind" },
+        "adapterConfig": {
+          "type": "object",
+          "description": "Free-form adapter settings. The shape is owned by the adapter, not the catalog.",
+          "additionalProperties": true
+        },
+        "resources": { "$ref": "#/$defs/resources" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "lifecycle": { "$ref": "#/$defs/lifecycle" },
+        "health": { "$ref": "#/$defs/health" },
+        "enabled": { "type": "boolean", "description": "Whether routing may select this model. Defaults to true." },
+        "priority": {
+          "type": "number",
+          "description": "Lower is preferred when several models tie on capability. Defaults to 100."
+        },
+        "tags": {
+          "type": "array",
+          "description": "Deployment/environment tags, e.g. [\"gpu\", \"production\"]. Callers can require them.",
+          "items": { "type": "string" }
+        },
+        "notes": { "type": "string", "description": "Operator notes and provenance; never interpreted by the hub." },
+        "$comment": { "type": "string" }
+      }
+    }
+  }
+}

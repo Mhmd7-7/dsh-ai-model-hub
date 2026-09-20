@@ -1,0 +1,104 @@
+{
+  "version": "1",
+  "hosts": [],
+  "models": [
+    {
+      "id": "mock_text_model",
+      "name": "Mock Text Model",
+      "type": "text_generation",
+      "version": "1.0.0",
+      "capabilities": ["text_to_text"],
+      "adapter": "mock",
+      "runtime": {
+        "engine": "in_process_mock",
+        "adapter": "mock"
+      },
+      "adapterConfig": {
+        "fixture": "deterministic-text"
+      },
+      "resources": {
+        "vramGb": 0,
+        "ramGb": 0
+      },
+      "limits": {
+        "contextTokens": 8192
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "health": {
+        "kind": "none"
+      },
+      "priority": 100,
+      "tags": ["mock", "phase-1"],
+      "notes": "Phase 1 fixture. Proves the catalog → router → adapter → artifact path for text without any engine. Replace with a real adapter in Phase 2."
+    },
+    {
+      "id": "mock_image_model",
+      "name": "Mock Image Model",
+      "type": "image_generation",
+      "version": "1.0.0",
+      "capabilities": ["text_to_image", "image_to_image"],
+      "adapter": "mock",
+      "runtime": {
+        "engine": "in_process_mock",
+        "adapter": "mock"
+      },
+      "adapterConfig": {
+        "fixture": "deterministic-png",
+        "width": 640,
+        "height": 384,
+        "gridStep": 64
+      },
+      "resources": {
+        "vramGb": 0,
+        "ramGb": 0
+      },
+      "limits": {
+        "maxWidth": 2048,
+        "maxHeight": 2048,
+        "resolutions": ["512x512", "640x384", "1024x1024"]
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "health": {
+        "kind": "none"
+      },
+      "priority": 100,
+      "tags": ["mock", "phase-1"],
+      "notes": "Phase 1 fixture. Emits a real PNG so the artifact pipeline is genuinely exercised. Replace with a real adapter in Phase 3."
+    },
+    {
+      "id": "mock_3d_model",
+      "name": "Mock 3D Model",
+      "type": "three_d_generation",
+      "version": "1.0.0",
+      "capabilities": ["text_to_3d", "image_to_3d"],
+      "adapter": "mock",
+      "runtime": {
+        "engine": "in_process_mock",
+        "adapter": "mock"
+      },
+      "adapterConfig": {
+        "fixture": "deterministic-stl"
+      },
+      "resources": {
+        "vramGb": 0,
+        "ramGb": 0
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "health": {
+        "kind": "none"
+      },
+      "priority": 100,
+      "tags": ["mock", "phase-1"],
+      "notes": "Phase 1 fixture. Emits a valid ASCII STL box, so text → image → 3D workflows can be tested end to end. Replace with a real adapter in Phase 4."
+    }
+  ]
+}

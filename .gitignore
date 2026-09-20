@@ -1,0 +1,18 @@
+# Local npm cache
+#
+# Created because this workspace passed `--cache .npm-cache` so installs did not
+# depend on a writable global npm cache. Safe to delete; `npm install` recreates
+# it if the scripts are run with the same flag.
+.npm-cache/
+
+# Dependencies
+node_modules/
+
+# Locally produced model outputs. A deployment's real artifacts are user work —
+# this entry only keeps the default in-repo working directory out of version
+# control, which is where `defaultArtifactRoot()` points when nothing overrides it.
+artifacts/
+
+# OS noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,214 @@
+/**
+ * End-to-end smoke test for an installed profile.
+ *
+ * Runs the plugin exactly as DSH will — resolved from the profile, imported, and
+ * applied to a real cordis context — and reports what it registered. This is the
+ * check that proves the whole chain, not just that the module can be imported:
+ *
+ *   profile resolution → module import → apply() → catalog discovery →
+ *   hub construction → tool registration
+ *
+ * It is deliberately separate from `doctor.mjs` because it *does* work rather than
+ * inspect: it registers nine tools and reads a model catalog. Point it at a
+ * throwaway profile if you would rather not touch one.
+ *
+ * Usage:
+ *
+ *   node scripts/smoke.mjs --profile web
+ *
+ * Exits 0 when the plugin loaded and registered its tools, 1 otherwise.
+ *
+ * @module dsh-ai-model-hub/scripts/smoke
+ */
+
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+/**
+ * Read a `--flag value` argument.
+ * @param {string} flag - the flag name without dashes.
+ * @param {string} fallback - the default.
+ * @returns {string} the resolved value.
+ */
+function readArgument(flag, fallback) {
+  const index = process.argv.indexOf(`--${flag}`);
+  if (index >= 0 && process.argv[index + 1] !== undefined && !process.argv[index + 1].startsWith('--')) {
+    return process.argv[index + 1];
+  }
+  return fallback;
+}
+
+const profile = readArgument('profile', 'web');
+const dshHome = process.env['DSH_HOME'] ?? join(homedir(), '.dsh');
+const profileDir = join(dshHome, 'profiles', profile);
+
+console.log('dsh-ai-model-hub smoke test');
+console.log(`  profile: ${profileDir}`);
+console.log(`  cwd:     ${process.cwd()}`);
+console.log('');
+
+const profileRequire = createRequire(join(profileDir, 'package.json'));
+
+// Resolve through the profile, exactly as the loader does.
+let entryPath;
+try {
+  const manifestPath = profileRequire.resolve('dsh-ai-model-hub-plugin/package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  entryPath = join(dirname(manifestPath), manifest.main ?? 'index.ts');
+} catch (error) {
+  console.error(`FAILED: the plugin does not resolve from the profile: ${error.message}`);
+  process.exit(1);
+}
+
+const plugin = await import(pathToFileURL(entryPath).href);
+
+// A real cordis Context, with only the members the plugin touches replaced. The
+// real Context matters: `Service` registers itself through `ctx.reflect`, so a
+// plain object literal cannot host a service.
+//
+// cordis is resolved through the *profile*, not through this script's location.
+// The plugin will hold a `Context` from whichever copy the loader gives it, and
+// the service registry is keyed by that copy, so the smoke test has to use the
+// same one or it is not reproducing what DSH does.
+let Context;
+try {
+  const cordisPath = profileRequire.resolve('@deepseek-ai/cordis');
+  ({ Context } = await import(pathToFileURL(cordisPath).href));
+} catch (error) {
+  console.error(`FAILED: @deepseek-ai/cordis does not resolve from the profile: ${error.message}`);
+  process.exit(1);
+}
+
+const registered = new Map();
+const promptContexts = [];
+const logs = [];
+const disposers = [];
+
+const base = new Context();
+const extended = base.extend({
+  tools: {
+    register: (definition) => {
+      registered.set(definition.name, definition);
+      return () => registered.delete(definition.name);
+    },
+  },
+  logger: () => ({
+    debug: (message) => logs.push(`debug ${message}`),
+    info: (message) => logs.push(`info ${message}`),
+    warn: (message) => logs.push(`warn ${message}`),
+    error: (message) => logs.push(`error ${message}`),
+  }),
+  systemPrompt: {
+    context: (contribution) => {
+      promptContexts.push(contribution);
+      return () => {};
+    },
+    getContextOrder: () => 110,
+  },
+  effect: (execute) => {
+    const result = execute();
+    const disposer = typeof result === 'function' ? result : () => {};
+    disposers.push(disposer);
+    return disposer;
+  },
+});
+
+// ── Enforce the `inject` contract, the way cordis does ──────────────────────
+// cordis refuses to hand a plugin a service it did not declare, and the failure
+// is fatal to the whole profile boot:
+//
+//   cannot get property "systemPrompt" without inject
+//
+// A permissive stand-in context cannot reproduce that, which is exactly how a
+// broken `inject` list passed this script and then stopped DSH from starting.
+// This proxy restores the enforcement: a read of a service that is neither a
+// cordis builtin nor declared in the plugin's `inject` array throws here, the
+// same way it would in production.
+const injected = new Set(Array.isArray(plugin.inject) ? plugin.inject : []);
+const cordisBuiltins = new Set([
+  'root', 'baseUrl', 'events', 'logger', 'reflect', 'registry',
+  'extend', 'isolate', 'intercept', 'on', 'once', 'emit',
+  'parallel', 'serial', 'bail', 'waterfall', 'plugin', 'inject', 'effect',
+  'get', 'set', 'provide', 'accessor', 'mixin', 'start', 'stop',
+  'fiber', 'scope', 'then', 'symbols', 'constructor', 'prototype',
+]);
+const undeclaredReads = [];
+
+const ctx = new Proxy(extended, {
+  get(target, property, receiver) {
+    if (typeof property === 'string' && !cordisBuiltins.has(property) && !injected.has(property)) {
+      // Only flag reads that resolve to nothing: property access on our own test
+      // stubs and on the real Context is legitimate and unrelated to `inject`.
+      if (Reflect.get(target, property, receiver) === undefined) {
+        undeclaredReads.push(property);
+        throw new Error(`cannot get property "${property}" without inject`);
+      }
+    }
+    return Reflect.get(target, property, receiver);
+  },
+});
+
+let failure;
+try {
+  plugin.apply(ctx, {});
+} catch (error) {
+  failure = error;
+}
+
+console.log('Registered tools:');
+if (registered.size === 0) {
+  console.log('  (none)');
+} else {
+  for (const name of [...registered.keys()].sort()) console.log(`  ${name}`);
+}
+console.log('');
+
+const ready = logs.find((line) => line.includes('model hub ready'));
+if (ready) console.log(`Catalog: ${ready.replace(/^info\s*/, '')}`);
+const disabled = logs.find((line) => line.includes('model hub disabled'));
+if (disabled) console.log(`Catalog: ${disabled.replace(/^warn\s*/, '')}`);
+
+console.log(`Capability context registered: ${promptContexts.length > 0 ? 'yes' : 'no'}`);
+console.log(`Lifetime disposers registered: ${disposers.length}`);
+console.log(`Declared inject: ${JSON.stringify([...injected])}`);
+if (undeclaredReads.length > 0) {
+  console.log(`Undeclared service reads: ${[...new Set(undeclaredReads)].join(', ')}`);
+}
+console.log('');
+
+// Clean up anything the plugin started, so this script never leaves a process.
+for (const dispose of disposers) {
+  try {
+    await dispose();
+  } catch {
+    /* best effort */
+  }
+}
+
+if (undeclaredReads.length > 0) {
+  console.error(
+    `FAILED: the plugin read ${[...new Set(undeclaredReads)].map((name) => `"${name}"`).join(', ')} ` +
+      'without declaring it in `inject`.',
+  );
+  console.error('cordis aborts the entire profile boot when a plugin reads an undeclared');
+  console.error('service, so DSH would refuse to start. Add the service to `inject` in');
+  console.error('dsh-plugin/index.ts.');
+  process.exit(1);
+}
+if (failure !== undefined) {
+  console.error(`FAILED: apply() threw: ${failure.message}`);
+  process.exit(1);
+}
+if (registered.size === 0) {
+  console.error('FAILED: the plugin registered no tools.');
+  console.error('The most likely cause is that no model catalog was found. The plugin');
+  console.error('searches upward from the DSH working directory and then from its own');
+  console.error('installation directory, logs the reason, and stays disabled rather than');
+  console.error('failing the boot. Create models.json in one of those directories.');
+  process.exit(1);
+}
+
+console.log(`OK: the plugin applied and registered ${registered.size} tools.`);

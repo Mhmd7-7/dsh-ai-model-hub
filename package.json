@@ -1,0 +1,60 @@
+{
+  "name": "dsh-ai-model-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A modular local AI model ecosystem for DeepSeek Harness: capability catalog, router, runtime manager, adapters, artifacts, and a thin DSH plugin layer.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./index.ts": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./hub.ts": {
+      "types": "./src/hub.ts",
+      "default": "./src/hub.ts"
+    },
+    "./dsh-plugin": {
+      "types": "./dsh-plugin/index.ts",
+      "default": "./dsh-plugin/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-test-isolation=none tests/run.ts",
+    "test:isolated": "node --test \"tests/*.test.ts\"",
+    "demo": "node examples/vertical-slice.ts",
+    "demo:workflow": "node examples/workflow.ts",
+    "install:plugin": "node --no-deprecation scripts/install-plugin.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-llm": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-agent": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-scope": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.1.5-rc.2",
+    "@deepseek-ai/schemastery": "3.18.2",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "useUnknownInCatchVariables": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "noEmit": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "dsh-ai-model-hub": ["./src/index.ts"],
+      "dsh-ai-model-hub/index.ts": ["./src/index.ts"],
+      "dsh-ai-model-hub/hub.ts": ["./src/hub.ts"],
+      "@deepseek-ai/dsh-tools": [
+        "C:/Users/fdgrr/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tools/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-llm": [
+        "C:/Users/fdgrr/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/cordis": [
+        "C:/Users/fdgrr/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-system-prompt": [
+        "C:/Users/fdgrr/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-system-prompt/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/schemastery": [
+        "C:/Users/fdgrr/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/schemastery/lib/types/index.d.ts"
+      ]
+    }
+  },
+  "include": ["src/**/*.ts", "dsh-plugin/**/*.ts", "tests/**/*.ts", "examples/**/*.ts"],
+  "exclude": ["node_modules", ".npm-cache", "dist"]
+}

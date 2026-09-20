@@ -1,0 +1,81 @@
+{
+  "$comment": "Active configuration. Phase 1 ships mock models only. To add a real engine, copy the relevant host and model entries from examples/real-models.example.json into this file — no code changes are needed for any engine whose adapter kind is already registered. See docs/adding-a-model.md.",
+  "version": "1",
+  "hosts": [],
+  "models": [
+    {
+      "id": "mock_text_model",
+      "name": "Mock Text Model",
+      "type": "text_generation",
+      "version": "1.0.0",
+      "capabilities": ["text_to_text"],
+      "adapter": "mock",
+      "runtime": {
+        "engine": "in_process_mock",
+        "adapter": "mock"
+      },
+      "adapterConfig": {
+        "fixture": "deterministic-text"
+      },
+      "limits": {
+        "contextTokens": 8192
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "priority": 100,
+      "tags": ["mock", "phase-1"]
+    },
+    {
+      "id": "mock_image_model",
+      "name": "Mock Image Model",
+      "type": "image_generation",
+      "version": "1.0.0",
+      "capabilities": ["text_to_image", "image_to_image"],
+      "adapter": "mock",
+      "runtime": {
+        "engine": "in_process_mock",
+        "adapter": "mock"
+      },
+      "adapterConfig": {
+        "fixture": "deterministic-png",
+        "width": 640,
+        "height": 384,
+        "gridStep": 64
+      },
+      "limits": {
+        "maxWidth": 2048,
+        "maxHeight": 2048,
+        "resolutions": ["512x512", "640x384", "1024x1024"]
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "priority": 100,
+      "tags": ["mock", "phase-1"]
+    },
+    {
+      "id": "mock_3d_model",
+      "name": "Mock 3D Model",
+      "type": "three_d_generation",
+      "version": "1.0.0",
+      "capabilities": ["text_to_3d", "image_to_3d"],
+      "adapter": "mock",
+      "runtime": {
+        "engine": "in_process_mock",
+        "adapter": "mock"
+      },
+      "adapterConfig": {
+        "fixture": "deterministic-stl"
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "priority": 100,
+      "tags": ["mock", "phase-1"]
+    }
+  ]
+}

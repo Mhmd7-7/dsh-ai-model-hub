@@ -1,0 +1,41 @@
+{
+  "name": "dsh-ai-model-hub-plugin",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin exposing local AI model capabilities as capability-generic tools. The agent names a capability; the hub selects, starts, and calls a suitable model.",
+  "type": "module",
+  "main": "index.ts",
+  "types": "index.ts",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "dsh-ai-model-hub": "file:.."
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-llm": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "local-models",
+    "capability-catalog",
+    "model-router"
+  ],
+  "license": "MIT"
+}

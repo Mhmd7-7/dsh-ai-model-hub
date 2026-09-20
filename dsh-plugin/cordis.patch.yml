@@ -1,0 +1,77 @@
+# dsh-ai-model-hub — DeepSeek Harness plugin bundle patch
+#
+# This is the `dsh.bundle.patch` layer of the plugin package. When the plugin is
+# installed through the official CLI —
+#
+#   dsh plugin --profile <name> add /absolute/path/to/dsh-ai-model-hub
+#
+# — the command reconciles `dsh.profile.bundles` against installed packages and,
+# seeing this declaration, appends the package to the bundle stack. Profile boot
+# then merges THIS patch (a single `insert` of the plugin row), so no profile file
+# needs editing by hand.
+#
+# Configuration is optional. Every field has a default that makes the
+# zero-config case work: the catalog is discovered from ordered anchors (an
+# explicit configPath, then `searchRoots`, then the host process's working
+# directory, then this plugin's own installation directory), artifacts land in
+# `<cwd>/artifacts`, and — importantly — process launching is DISABLED, so the
+# hub will talk to engines you run but will never start one.
+#
+# To configure, uncomment and adjust. See docs/security.md before enabling
+# `allowProcessLaunch`, and docs/adding-a-model.md for the catalog format.
+#
+# NOTE on the two names, which are easy to conflate and fail loudly if you do:
+#   `id`   is this row's own name in the composed tree — what your profile's
+#          cordis.patch.yml uses to override or disable the row.
+#   `name` is the Node module specifier the loader imports. It MUST be this
+#          plugin package, which exports `name`/`inject`/`apply`.
+#          It must NOT be `dsh-ai-model-hub`: that is the hub *library*, which exports
+#          classes rather than a plugin, so the loader rejects it with
+#          "invalid plugin, expect function or object with an apply method,
+#          received object" and the whole profile fails to boot.
+#
+- insert:
+    - id: dsh-ai-model-hub
+      name: 'dsh-ai-model-hub-plugin'
+      # config:
+      #   # Explicit catalog path. When set it is the ONLY candidate tried, so a
+      #   # wrong path is an error rather than a silent fallback. Omitted =>
+      #   # discovery from ordered anchors: `searchRoots`, then the host process's
+      #   # working directory, then this plugin's own installation directory. At
+      #   # each level: models.json, model-catalog.json, or dsh-ai-model-hub.json,
+      #   # directly or in a config/ subdirectory.
+      #   configPath: ''
+      #
+      #   # Extra directories to start discovery from, in priority order. Use this
+      #   # to point the hub at the workspace you actually serve without pinning
+      #   # an exact file.
+      #   searchRoots: []
+      #
+      #   # Where produced artifacts are stored. Omitted => <working directory>/artifacts.
+      #   artifactRoot: ''
+      #
+      #   # Let the hub start and stop model processes. Requires the model's own
+      #   # descriptor to declare `lifecycle.startable: true` with a `start` command;
+      #   # both must agree before anything launches.
+      #   allowProcessLaunch: false
+      #
+      #   # Permit launch commands outside the built-in engine allowlist
+      #   # (python, ollama, llama-server, comfy, blender, ...). Refused engines
+      #   # include sh, bash, cmd, powershell, curl, wget, nc.
+      #   allowAnyCommand: false
+      #
+      #   # Give the agent a dynamic snapshot of which capabilities this machine can
+      #   # serve, generated from the live catalog so it cannot drift.
+      #   exposeCapabilityContext: true
+      #
+      #   # How to react to a missing or invalid catalog. 'warn' logs the problem,
+      #   # registers no tools, and still lets DeepSeek Harness boot; 'throw' fails
+      #   # the plugin load, which is what you want while editing a catalog.
+      #   onConfigError: warn
+      #
+      #   # Background probe cadence, in milliseconds. 0 disables each loop.
+      #   healthIntervalMs: 30000
+      #   idleSweepIntervalMs: 15000
+      #
+      #   # Default cooperative budget for one invoke_model call.
+      #   invocationTimeoutMs: 600000
