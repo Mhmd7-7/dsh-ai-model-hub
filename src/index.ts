@@ -70,6 +70,7 @@ export type {
 } from './adapters/types.ts';
 export { createMockAdapter, renderMockWav } from './adapters/mock.ts';
 export { createOpenAiCompatibleAdapter } from './adapters/openai.ts';
+export { createHttpJsonAdapter, extractImages, readPngSize } from './adapters/http-json.ts';
 export { MOCK_STL_VERTEX_COUNT, colorFromSeed, renderMockPng, renderMockStl } from './adapters/png.ts';
 
 // ── Router ──────────────────────────────────────────────────────────────────

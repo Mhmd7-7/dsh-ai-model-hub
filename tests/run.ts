@@ -27,3 +27,4 @@ import './integration.test.ts';
 import './plugin.test.ts';
 import './schema.test.ts';
 import './openai.test.ts';
+import './http-json.test.ts';

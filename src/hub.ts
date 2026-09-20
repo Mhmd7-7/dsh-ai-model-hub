@@ -22,6 +22,7 @@ import { silentLogger } from './adapters/types.ts';
 import type { ModelAdapter } from './adapters/types.ts';
 import { createMockAdapter } from './adapters/mock.ts';
 import { createOpenAiCompatibleAdapter } from './adapters/openai.ts';
+import { createHttpJsonAdapter } from './adapters/http-json.ts';
 import type { Capability } from './catalog/capabilities.ts';
 import { isCapability } from './catalog/capabilities.ts';
 import type { ModelCatalogConfig } from './catalog/descriptor.ts';
@@ -150,12 +151,14 @@ export class ModelHub {
     this.artifacts = store;
     this.ownsArtifacts = true;
 
-    // The shipping set: the Phase 1 fixture adapter, plus the real-engine adapter
+    // The shipping set: the Phase 1 fixture adapter, the real-engine adapter
     // that reaches every `/v1/chat/completions` server (Ollama, llama.cpp, vLLM,
-    // LM Studio, …). A deployment adds more through `extraAdapters`, or replaces
-    // the whole set with `adapters`.
+    // LM Studio, …), and the real-image adapter that reaches every
+    // `/sdapi/v1/txt2img` server (A1111, Forge, stable-diffusion.cpp). A
+    // deployment adds more through `extraAdapters`, or replaces the whole set
+    // with `adapters`.
     const defaultAdapters: readonly ModelAdapter[] =
-      options.adapters ?? [createMockAdapter(), createOpenAiCompatibleAdapter()];
+      options.adapters ?? [createMockAdapter(), createOpenAiCompatibleAdapter(), createHttpJsonAdapter()];
     this.adapters = new AdapterRegistry([...defaultAdapters, ...(options.extraAdapters ?? [])]);
 
     this.runtime = new RuntimeManager({
