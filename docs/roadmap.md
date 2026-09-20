@@ -276,3 +276,29 @@ and the disposer from plugin-scoped into per-root.
 
 Until then, `searchRoots` names the workspace explicitly and `configPath` pins a
 single catalog exactly.
+
+### Distributing the plugin without a checkout
+
+**Status: open. The plugin is installed from a checkout today, for a Node reason.**
+
+Two separate constraints tie installation to a real checkout, and both are worth
+removing.
+
+**The plugin is TypeScript.** It is loaded through Node's type stripping, and
+Node refuses to strip types for any file under `node_modules`
+(`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`). pnpm materialises every registry
+and git dependency inside the profile's `node_modules`, so
+`dsh plugin add github:Mhmd7-7/dsh-ai-model-hub` cannot load, however the specifier
+is spelled. The junction install works precisely because the link resolves to a
+directory outside `node_modules`. Lifting this means compiling `dsh-plugin/` to
+JavaScript at release time: a build step and a `lib/` artifact to keep in step
+with `src/`, in exchange for an install that behaves like any other package. The
+hub itself would keep running TypeScript directly, since only the DSH-facing layer
+needs to be a plain module.
+
+**The plugin's peer closure is not installed for it.** `dsh plugin add` forwards
+to pnpm, which warns about peer dependencies rather than installing them, so the
+installer must run `npm install` inside `dsh-plugin/` first — the reason the
+installer has three steps instead of one. A `pnpm` workspace with `hoist-pattern`
+enabled, or a published `dsh-ai-model-hub` depended on by version instead of by
+`file:..`, would remove that step and make the plugin package self-contained.

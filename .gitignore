@@ -11,7 +11,14 @@ node_modules/
 # Locally produced model outputs. A deployment's real artifacts are user work —
 # this entry only keeps the default in-repo working directory out of version
 # control, which is where `defaultArtifactRoot()` points when nothing overrides it.
-artifacts/
+#
+# The leading slash is load-bearing. Unanchored, `artifacts/` matched at every
+# depth, including `src/artifacts/` — the artifact contract and the local
+# filesystem store — so git silently ignored 28 KB of source that `src/index.ts`
+# and `src/hub.ts` import. Every clone of this repository was therefore
+# unloadable, and the failure only appeared at install time, as
+# "Cannot find module .../src/artifacts/local-store.ts". Keep it anchored.
+/artifacts/
 
 # OS noise
 .DS_Store

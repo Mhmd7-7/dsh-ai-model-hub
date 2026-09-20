@@ -1,0 +1,9 @@
+# Shell scripts keep LF endings, in the repository and in every working copy.
+#
+# `core.autocrlf=true` — the default on Windows — rewrites checked-out text files
+# to CRLF. For a shell script that is fatal rather than cosmetic: the kernel reads
+# `#!/bin/sh\r` as an interpreter path that does not exist, and every command
+# acquires a trailing CR. `install.sh` is documented as
+# `curl -fsSL .../install.sh | sh`, where the pipe serves the LF blob regardless,
+# but a clone-then-run on Windows would fail without this line.
+*.sh text eol=lf

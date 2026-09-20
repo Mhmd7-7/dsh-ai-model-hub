@@ -79,6 +79,62 @@ Both are registered by default. See
 
 ---
 
+## Install from GitHub
+
+One line, on a machine that already has Node ≥ 22.6 and DeepSeek Harness:
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/Mhmd7-7/dsh-ai-model-hub/main/install.ps1 | iex
+```
+
+**macOS / Linux**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Mhmd7-7/dsh-ai-model-hub/main/install.sh | sh
+```
+
+Either one checks the toolchain, clones the repository to
+`~/.dsh/plugins/dsh-ai-model-hub` — the directory convention DSH's own plugin
+store already uses — installs the plugin into the `web` profile, and then
+verifies the result by importing the plugin the way the loader will. Re-run it to
+update: it fast-forwards the clone and reinstalls.
+
+Then **restart DeepSeek Harness** and ask:
+
+```
+List the available AI model capabilities.
+```
+
+| What you want | Windows (PowerShell) | macOS / Linux |
+|---|---|---|
+| Another profile | `.\install.ps1 -Profile hubtest` | `./install.sh --profile hubtest` |
+| A pinned release | `.\install.ps1 -Ref v0.1.0` | `./install.sh --ref v0.1.0` |
+| Another location | `.\install.ps1 -InstallDir D:\hub` | `./install.sh --dir /opt/hub` |
+| From a fork | `.\install.ps1 -Repository <url>` | `./install.sh --repository <url>` |
+| Install without verifying | `.\install.ps1 -SkipDoctor` | `./install.sh --skip-doctor` |
+
+`irm | iex` and `curl | sh` cannot take arguments, so the piped form is
+configured through the environment instead: `DSH_PROFILE`, `DSH_MODEL_HUB_DIR`,
+`DSH_MODEL_HUB_REF` and `DSH_MODEL_HUB_REPO`, as in
+`$env:DSH_PROFILE = 'hubtest'; irm … | iex`.
+
+Run either script from inside a clone and it installs *that* clone and never
+fast-forwards it, so a working tree you are editing is never touched. To remove
+an installation:
+
+```sh
+dsh plugin --profile web remove dsh-ai-model-hub-plugin
+rm -rf ~/.dsh/plugins/dsh-ai-model-hub     # PowerShell: Remove-Item -Recurse -Force
+```
+
+Why the GitHub route has to clone instead of installing straight from a git URL
+is explained under [Why the installer has three
+steps](#why-the-installer-has-three-steps).
+
+---
+
 ## Quick start
 
 There are two halves, and you can use either without the other.
@@ -228,6 +284,40 @@ workspace that has `hoist-pattern` enabled, or to publish `dsh-ai-model-hub` and
 depend on it by version instead of by path. Both are recorded in
 [docs/roadmap.md](docs/roadmap.md).
 
+### Why not `dsh plugin add github:...`?
+
+The one-liner that works for a compiled plugin does not work here, and the
+obstacle is Node's rather than DSH's:
+
+```sh
+dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub   # fails
+```
+
+This plugin ships TypeScript and is loaded through Node's type stripping, but
+Node refuses to strip types for any file under `node_modules`:
+
+```
+ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING: Stripping types is currently
+unsupported for files under node_modules
+```
+
+pnpm materialises a registry or git dependency *inside* the profile's
+`node_modules` — a directory copy, or a link into `node_modules/.pnpm` — so the
+loader would fail on the first `.ts` import. Installing from a git URL would not
+help for a second reason either: the repository root is the hub *library* and
+declares no plugin bundle, while `dsh-plugin/` reaches the library through a
+`file:..` dependency, which only means something inside a real checkout.
+
+The junction install is what sidesteps the first problem, and it is worth being
+precise about why: the link points at a checkout *outside* `node_modules`, and
+Node resolves the module to that real path before deciding whether type stripping
+is allowed. That is the whole reason the plugin has to be installed by path.
+
+Lifting the restriction is a structural change, not a configuration one, and
+neither option is implemented: compile the plugin to JavaScript at release time
+so it can be installed like any other package, or publish both packages to a
+registry and depend on the plugin by version.
+
 ### What the agent can then do
 
 | Ask the agent | Tool it calls |
@@ -332,6 +422,9 @@ dsh-ai-model-hub/
 │   ├── config.ts                 plugin configuration schema
 │   ├── types.ts                  the DSH API bridge — where a breaking change lands
 │   └── tools/                    discovery · lifecycle · invoke
+├── install.ps1                   one-line install from GitHub (Windows/PowerShell)
+├── install.sh                    one-line install from GitHub (macOS/Linux)
+├── scripts/                      install-plugin · doctor · smoke — install and verification
 ├── config/
 │   ├── models.json               active catalog (mock models)
 │   ├── models.mock.json          Phase 1 fixtures
@@ -367,6 +460,8 @@ the entire hub keeps working and keeps passing its tests.
 - **Node ≥ 22.6** — the hub runs TypeScript directly through Node's type
   stripping, with no build step.
 - **pnpm** — only for `dsh plugin`, which forwards to it.
+- **git** — only for the [install-from-GitHub](#install-from-github) scripts,
+  which clone this repository. A manual clone needs nothing extra.
 - No runtime dependencies. The hub is dependency-free by design: a plugin whose
   `node_modules` must resolve inside a DSH profile is a plugin that breaks on the
   next release.
