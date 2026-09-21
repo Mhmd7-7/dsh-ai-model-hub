@@ -26,6 +26,7 @@ import {
   ModelCatalog,
   ModelHub,
   buildDefaultGraph,
+  buildDiffusionModelGraph,
   capabilitiesForComfyModel,
   createComfyUiDiscoverer,
   describeIntrospection,
@@ -33,6 +34,7 @@ import {
   mapComfyWeightFile,
   mergeCatalogConfig,
   parseComfyObjectInfo,
+  summarizeSignals,
 } from '../src/index.ts';
 
 /** One captured request. */
@@ -279,7 +281,10 @@ describe('comfyui discovery: capability signals', () => {
     assert.deepEqual(writersOnly.capabilities, []);
   });
 
-  it('claims 3D when a generator is actually installed', () => {
+  it('records a 3D generator as install machinery without claiming the capability', () => {
+    // A generator node proves the *install* has the machinery. It does not prove
+    // these weights can drive it — Hunyuan3D, Tripo, Meshy and Rodin each need
+    // their own model — so the signal is recorded and nothing is granted.
     const generators = [
       'Hunyuan3Dv2Conditioning',
       'TripoImageToModelNode',
@@ -288,32 +293,68 @@ describe('comfyui discovery: capability signals', () => {
     ];
     for (const generator of generators) {
       const introspection = parseComfyObjectInfo({ ...loaderNodes(['a.safetensors']), [generator]: node({}) });
+      assert.deepEqual(
+        introspection.capabilities,
+        [],
+        `${generator} is a separate model, so it must not grant a capability to this one`,
+      );
       assert.ok(
-        introspection.capabilities.includes('image_to_3d') && introspection.capabilities.includes('text_to_3d'),
-        `${generator} should grant 3D generation`,
+        introspection.signals.some((signal) => /3D generator/.test(signal)),
+        `${generator} must still be recorded so an operator can see it is installed`,
       );
     }
   });
 
-  it('claims a capability only when the node pack that proves it is installed', () => {
-    const without = capabilitiesForComfyModel(parseComfyObjectInfo(loaderNodes(['a.safetensors'])));
-    assert.deepEqual(without, ['text_to_image'], 'no 3D node pack, so no 3D claim');
-
-    const with3d = capabilitiesForComfyModel(parseComfyObjectInfo(typicalObjectInfo()));
-    assert.ok(with3d.includes('text_to_3d'), 'Hunyuan3Dv2 is a 3D generator');
-    assert.ok(with3d.includes('image_to_3d'));
-    assert.ok(with3d.includes('image_to_image'), 'VAEEncode is evidence an image can be ingested');
+  it('does not claim a capability that needs different weights, however many nodes offer it', () => {
+    // The general form of the false positive. Every capability below is served by
+    // a *separate* model in ComfyUI, so node presence is not evidence that the
+    // discovered weights can serve it — and a claimed capability routes work into
+    // a guaranteed failure. Observed live: an install holding one UNET, one text
+    // encoder and one VAE advertised text_to_3d, image_to_3d, video and audio,
+    // because ComfyUI ships generator nodes for all of them.
+    const installMachineryOnly = parseComfyObjectInfo({
+      ...loaderNodes(['a.safetensors']),
+      Hunyuan3Dv2Conditioning: node({}),
+      TripoImageToModelNode: node({}),
+      SaveGLB: node({ mesh: ['MESH', {}] }),
+      SaveWEBM: node({ images: ['IMAGE', {}] }),
+      SaveAudio: node({ audio: ['AUDIO', {}] }),
+      JoyCaption: node({ image: ['IMAGE', {}] }),
+    });
+    assert.deepEqual(
+      capabilitiesForComfyModel(installMachineryOnly),
+      ['text_to_image'],
+      'only what the discovered weights serve is claimed',
+    );
+    // The machinery is still recorded, so an operator can see the capability is
+    // one download away rather than impossible.
+    assert.ok(installMachineryOnly.signals.some((signal) => /3D generator/.test(signal)));
+    assert.ok(installMachineryOnly.signals.some((signal) => /mesh export/.test(signal)));
   });
 
-  it('recognises video and audio packs by their export nodes', () => {
-    const video = capabilitiesForComfyModel(
-      parseComfyObjectInfo({ ...loaderNodes(['a.safetensors']), SaveWEBM: node({ images: ['IMAGE', {}] }) }),
-    );
-    assert.ok(video.includes('video_generation'));
-    const audio = capabilitiesForComfyModel(
-      parseComfyObjectInfo({ ...loaderNodes(['a.safetensors']), SaveAudio: node({ audio: ['AUDIO', {}] }) }),
-    );
-    assert.ok(audio.includes('audio_generation'));
+  it('claims image_to_image, which the discovered weights do serve', () => {
+    // Unlike the rest, image-to-image is the same sampler with different
+    // conditioning: an image is encoded into the latent space the model already
+    // works in, so no extra weights are involved.
+    const withEncoder = parseComfyObjectInfo({
+      ...loaderNodes(['a.safetensors']),
+      VAEEncode: node({ pixels: ['IMAGE', {}], vae: ['VAE', {}] }),
+    });
+    assert.deepEqual(capabilitiesForComfyModel(withEncoder), ['text_to_image', 'image_to_image']);
+  });
+
+  it('summarizes signals instead of pasting every node class into the notes', () => {
+    // A real install fired 58 signals; listing them buried the lines that matter.
+    assert.equal(summarizeSignals(['3D generator (A)', '3D generator (B)', 'mesh export (C)']), '3D generator ×2, mesh export ×1');
+    assert.equal(summarizeSignals([]), '');
+  });
+
+  it('claims a capability only when the node pack that proves it is installed', () => {
+    const without = capabilitiesForComfyModel(parseComfyObjectInfo(loaderNodes(['a.safetensors'])));
+    assert.deepEqual(without, ['text_to_image'], 'no conditioning nodes, so no image_to_image');
+
+    const withEncoder = capabilitiesForComfyModel(parseComfyObjectInfo(typicalObjectInfo()));
+    assert.ok(withEncoder.includes('image_to_image'), 'VAEEncode is evidence an image can be ingested');
   });
 
   it('names the signals that fired so an operator can see why', () => {
@@ -325,11 +366,19 @@ describe('comfyui discovery: capability signals', () => {
   it('keeps the signal table to node classes, never model names', () => {
     // A guard on the constraint itself: every pattern must be about a node
     // class, so nothing here can become a model list by accident. A signal that
-    // grants nothing must be explicitly marked as provenance-only, so that
-    // "records something" and "advertises a capability" cannot be confused again.
+    // cannot be served by the discovered model must be scoped to the install, so
+    // that "the machinery exists" and "this model can do it" cannot be confused
+    // again.
     for (const signal of CAPABILITY_SIGNALS) {
       assert.ok(signal.label.length > 0);
-      assert.ok(signal.capabilities.length > 0 || signal.grants === false, `${signal.label} grants nothing but is not marked as such`);
+      const scope = signal.scope;
+      assert.ok(scope === 'model' || scope === 'install', `${signal.label} has no scope`);
+      if (scope === 'install') {
+        assert.ok(
+          signal.capabilities.length > 0 || signal.label === 'mesh export',
+          `${signal.label} is install-scoped and claims nothing`,
+        );
+      }
       assert.ok(!/safetensors|\.ckpt|\.pt\b/i.test(signal.pattern.source), 'a checkpoint filename must never appear in the signal table');
     }
   });
@@ -380,19 +429,138 @@ describe('comfyui discovery: the default graph', () => {
   });
 });
 
+describe('comfyui discovery: the diffusion-model graph', () => {
+  /** An install that holds a model as loose weight files rather than a checkpoint. */
+  function diffusionOnlyObjectInfo(): Record<string, unknown> {
+    return {
+      ...loaderNodes([], ['a-model.safetensors']),
+      CLIPLoader: node({ clip_name: fileEnum(['a-text-encoder.safetensors']), type: [['qwen_image', 'stable_diffusion'], {}] }),
+      VAELoader: node({ vae_name: fileEnum(['a-vae.safetensors']) }),
+      ...CORE_GRAPH_NODES,
+      EmptySD3LatentImage: node({ width: ['INT', {}], height: ['INT', {}], batch_size: ['INT', {}] }),
+    };
+  }
+
+  it('builds a graph for a model that is not a checkpoint at all', () => {
+    // Regression from a real install: one UNET, one text encoder, one VAE, and
+    // zero checkpoints published *nothing*, because discovery only knew the
+    // checkpoint shape — leaving a perfectly usable engine invisible.
+    const introspection = parseComfyObjectInfo(diffusionOnlyObjectInfo());
+    const selection = buildDiffusionModelGraph(introspection, 'a-model.safetensors');
+    assert.ok(selection, 'a loose-weight model with its encoder and VAE is runnable');
+    assert.equal(selection.clipName, 'a-text-encoder.safetensors');
+    assert.equal(selection.vaeName, 'a-vae.safetensors');
+    assert.equal(selection.latentClass, 'EmptySD3LatentImage', 'the SD3 latent node is preferred when present');
+
+    const nodes = selection.graph as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+    const byClass = (className: string): { class_type: string; inputs: Record<string, unknown> } => {
+      const found = Object.values(nodes).find((value) => value.class_type === className);
+      assert.ok(found, `expected a ${className} node`);
+      return found;
+    };
+    assert.equal(byClass('UNETLoader').inputs['unet_name'], 'a-model.safetensors');
+    assert.equal(byClass('CLIPLoader').inputs['clip_name'], 'a-text-encoder.safetensors');
+    assert.equal(byClass('VAELoader').inputs['vae_name'], 'a-vae.safetensors');
+    // The sampler must take its CLIP from the loader, not from a checkpoint.
+    const sampler = byClass('KSampler');
+    const positive = nodes[String((sampler.inputs['positive'] as unknown[])[0])];
+    assert.equal(positive?.class_type, 'CLIPTextEncode');
+    assert.deepEqual(positive?.inputs['clip'], [Object.keys(nodes).find((id) => nodes[id]?.class_type === 'CLIPLoader'), 0]);
+    // …and its VAE from the dedicated loader.
+    const decode = byClass('VAEDecode');
+    assert.equal(
+      (decode.inputs['vae'] as unknown[])[0],
+      Object.keys(nodes).find((id) => nodes[id]?.class_type === 'VAELoader'),
+    );
+  });
+
+  it('declines when the encoder or VAE the graph needs is not installed', () => {
+    const withoutEncoder = diffusionOnlyObjectInfo();
+    delete withoutEncoder['CLIPLoader'];
+    assert.equal(buildDiffusionModelGraph(parseComfyObjectInfo(withoutEncoder), 'm.safetensors'), undefined);
+
+    const emptyEncoder = diffusionOnlyObjectInfo();
+    emptyEncoder['CLIPLoader'] = node({ clip_name: fileEnum([]), type: [['qwen_image'], {}] });
+    assert.equal(
+      buildDiffusionModelGraph(parseComfyObjectInfo(emptyEncoder), 'm.safetensors'),
+      undefined,
+      'an empty enum means the file is not there, so the graph would be rejected',
+    );
+
+    const emptyVae = diffusionOnlyObjectInfo();
+    emptyVae['VAELoader'] = node({ vae_name: fileEnum([]) });
+    assert.equal(buildDiffusionModelGraph(parseComfyObjectInfo(emptyVae), 'm.safetensors'), undefined);
+  });
+
+  it('accepts an explicit encoder and VAE instead of the first enumerated', () => {
+    const introspection = parseComfyObjectInfo({
+      ...diffusionOnlyObjectInfo(),
+      CLIPLoader: node({ clip_name: fileEnum(['first.safetensors', 'chosen.safetensors']), type: [['a'], {}] }),
+      VAELoader: node({ vae_name: fileEnum(['first-vae.safetensors', 'chosen-vae.safetensors']) }),
+    });
+    const selection = buildDiffusionModelGraph(introspection, 'm.safetensors', {
+      clipName: 'chosen.safetensors',
+      vaeName: 'chosen-vae.safetensors',
+      clipType: 'stable_diffusion',
+    });
+    assert.equal(selection?.clipName, 'chosen.safetensors');
+    assert.equal(selection?.vaeName, 'chosen-vae.safetensors');
+    const graph = selection?.graph as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+    assert.equal(
+      Object.values(graph).find((value) => value.class_type === 'CLIPLoader')?.inputs['type'],
+      'stable_diffusion',
+    );
+  });
+
+  it('publishes the loose-weight model as a descriptor that declares its assumption', () => {
+    const introspection = parseComfyObjectInfo(diffusionOnlyObjectInfo());
+    const descriptor = mapComfyWeightFile({ filename: 'a-model.safetensors', kind: 'diffusionModel' }, comfyHost('http://127.0.0.1:8188'), introspection);
+    assert.ok(descriptor.adapterConfig?.['workflow'], 'the generated graph is attached');
+    const discovery = descriptor.adapterConfig?.['discovery'] as Record<string, unknown> | undefined;
+    assert.equal(discovery?.['textEncoder'], 'a-text-encoder.safetensors');
+    assert.equal(discovery?.['vae'], 'a-vae.safetensors');
+    // The one value no introspection reveals is named in the note, so an operator
+    // knows exactly what to check if ComfyUI rejects the graph.
+    assert.match(String(descriptor.notes), /text encoder's declared type/i);
+    // text_to_image only: this fixture has no image-conditioning node, so
+    // image_to_image is correctly not claimed even though the weights could serve it.
+    assert.deepEqual(descriptor.capabilities, ['text_to_image']);
+  });
+
+  it('does not publish a loose-weight model it cannot build a graph for', async () => {
+    const comfy = await startComfy();
+    try {
+      // A UNET with no text encoder: a descriptor would advertise a capability
+      // the adapter would then refuse, so discovery stays silent instead.
+      const info = diffusionOnlyObjectInfo();
+      delete info['CLIPLoader'];
+      comfy.setResponder((_request, response) => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(info));
+      });
+      const descriptors = await createComfyUiDiscoverer({ requestTimeoutMs: 3000 }).discover(
+        comfyHost(comfy.url),
+        new AbortController().signal,
+      );
+      assert.deepEqual(descriptors, []);
+    } finally {
+      await comfy.close();
+    }
+  });
+});
+
 describe('comfyui discovery: mapping into a descriptor', () => {
   const introspection = parseComfyObjectInfo(typicalObjectInfo());
 
   it('sets input/output types from CAPABILITY_IO for the chained case', () => {
     const descriptor = mapComfyWeightFile({ filename: 'alpha-xl.safetensors', kind: 'checkpoint' }, comfyHost('http://127.0.0.1:8188'), introspection);
+    // `text_to_image` takes text and produces an image; `image_to_image` adds
+    // `image` on the input side, which is exactly the property that lets a
+    // generated artifact chain into this model.
     assert.deepEqual(descriptor.inputTypes, ['text', 'image']);
-    assert.deepEqual(descriptor.outputTypes, ['image', 'model_3d']);
-    assert.equal(descriptor.type, 'three_d_generation');
-    // The two properties a chained workflow checks: a text_to_image output is
-    // an `image`, and this model accepts one; a 3D consumer wants `model_3d`,
-    // and this model produces one.
+    assert.deepEqual(descriptor.outputTypes, ['image']);
+    assert.equal(descriptor.type, 'image_editing');
     assert.ok(descriptor.inputTypes?.includes('image'));
-    assert.ok(descriptor.outputTypes?.includes('model_3d'));
   });
 
   it('attaches the generated graph so the model can be invoked without a template', () => {
@@ -520,8 +688,18 @@ describe('comfyui discovery: catalog integration', () => {
       });
       const ids = hub.catalog.listModelIds();
       assert.deepEqual(ids, ['static_text', 'comfyui-alpha-xl.safetensors', 'comfyui-beta-15.ckpt']);
-      assert.equal(hub.catalog.findModelsByCapability('image_to_3d').length, 2);
-      assert.equal(hub.catalog.findModelsByCapability('text_to_3d').length, 2);
+      // The discovered models serve text-to-image and image-to-image — the two
+      // capabilities their own weights drive — and nothing else, because every
+      // other capability in this install needs a separate model.
+      assert.equal(hub.catalog.findModelsByCapability('text_to_image').length, 2);
+      assert.equal(hub.catalog.findModelsByCapability('image_to_image').length, 2);
+      for (const capability of ['text_to_3d', 'image_to_3d', 'video_generation', 'audio_generation'] as const) {
+        assert.equal(
+          hub.catalog.findModelsByCapability(capability).length,
+          0,
+          `${capability} must not be claimed from node presence alone`,
+        );
+      }
       // The adapter can actually run the generated graph.
       const model = hub.catalog.requireModel('comfyui-alpha-xl.safetensors');
       assert.equal(hub.adapters.require('comfyui').supports(model).ok, true);
@@ -531,7 +709,10 @@ describe('comfyui discovery: catalog integration', () => {
     }
   });
 
-  it('keeps a checkpoint the install cannot run as a routable-but-unsupported model', async () => {
+  it('does not publish a checkpoint it cannot build a graph for', async () => {
+    // Publishing it would advertise a model the adapter then refuses — a routing
+    // candidate that always fails. Absence is the honest answer, and
+    // `refresh_model_discovery` names the machinery that is installed.
     const comfy = await startComfy();
     try {
       comfy.setResponder((_request, response) => {
@@ -543,10 +724,11 @@ describe('comfyui discovery: catalog integration', () => {
         discoveryTimeoutMs: 3000,
         log: () => {},
       });
-      const model = hub.catalog.requireModel('comfyui-plain.safetensors');
-      const support = hub.adapters.require('comfyui').supports(model);
-      assert.equal(support.ok, false);
-      assert.match(support.ok === false ? support.reason : '', /workflow template/);
+      assert.deepEqual(
+        hub.catalog.listModelIds(),
+        ['static_text'],
+        'a checkpoint with no runnable graph is not published as a model',
+      );
       await hub.dispose();
     } finally {
       await comfy.close();

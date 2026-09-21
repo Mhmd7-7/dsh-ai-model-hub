@@ -211,14 +211,21 @@ export {
   COMFYUI_ENGINES,
   WEIGHT_FIELDS,
   buildDefaultGraph,
+  buildDiffusionModelGraph,
   capabilitiesForComfyModel,
   createComfyUiDiscoverer,
   describeIntrospection,
   estimateComfyVram,
   mapComfyWeightFile,
   parseComfyObjectInfo,
+  summarizeSignals,
 } from './discovery/comfyui.ts';
-export type { ComfyIntrospection, ComfyWeightFile, WeightKind } from './discovery/comfyui.ts';
+export type {
+  ComfyIntrospection,
+  ComfyWeightFile,
+  DiffusionGraphSelection,
+  WeightKind,
+} from './discovery/comfyui.ts';
 
 // ── Configuration loading ───────────────────────────────────────────────────
 export {

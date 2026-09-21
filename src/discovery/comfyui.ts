@@ -72,6 +72,7 @@ export const WEIGHT_FIELDS = {
   diffusionModel: 'unet_name',
   lora: 'lora_name',
   vae: 'vae_name',
+  textEncoder: 'clip_name',
 } as const;
 
 /** One kind of weight file discovered in the node graph. */
@@ -84,13 +85,16 @@ interface CapabilitySignal {
   /** The capabilities the node's presence proves, when {@link grants} is true. */
   readonly capabilities: readonly Capability[];
   /**
-   * Whether this node's presence is evidence the capability can actually be
-   * *served*, as opposed to merely that its output could be written out.
+   * Whether a capability found this way can be served by the model discovery is
+   * describing, or merely by the install as a whole.
    *
-   * A writer (`SaveGLB`) and a generator (`Hunyuan3D`) are different claims, and
-   * only the second justifies advertising a capability.
+   * `'model'` means the generated graph runs the discovered weights themselves —
+   * `text_to_image` and `image_to_image` are the whole list, because in ComfyUI
+   * both are the same sampler with different conditioning. `'install'` means
+   * serving it needs *other* weights that may not be installed at all, so node
+   * presence alone is not evidence and nothing is granted.
    */
-  readonly grants: boolean;
+  readonly scope: 'model' | 'install';
   /** What to call this in a diagnostic. */
   readonly label: string;
 }
@@ -104,69 +108,68 @@ interface CapabilitySignal {
  * `SaveGLB` writes a GLB file"), while model names are user data that changes
  * with every download.
  *
- * **`grants` is the difference between an output kind and a capability, and
- * conflating the two produced a false positive in the field.** An install that
- * contains `SaveGLB` can *write* a mesh; it cannot necessarily *make* one. In
- * ComfyUI's own node set the mesh writers are core, while every image-to-model
- * generator is either an optional model pack or a cloud API node — so a signal
- * keyed on the writer advertised `image_to_3d` on a machine that had no way to
- * serve it. Capabilities that describe *producing* something therefore require a
- * node that generates it; writers are recorded for provenance but grant nothing.
- *
- * A capability whose machinery is absent must not be claimed, because claiming it
- * routes work into a guaranteed failure. The converse holds too: a capability
- * whose generator *is* present can be claimed for every discovered checkpoint,
- * because in ComfyUI the graph, not the checkpoint, decides the output kind.
+ * **`scope` is the correction of a false positive found twice in the field.** A
+ * signal answers "does this install contain the machinery?"; a descriptor answers
+ * "can *this model* serve this?" — and those are different questions. Holding one
+ * UNET, one text encoder, and one VAE, an install reported `text_to_3d`,
+ * `image_to_3d`, `video_generation`, and `audio_generation` because ComfyUI ships
+ * generator nodes for all of them, even though every one needs a separate model
+ * that was not installed. Claiming a capability routes work into a guaranteed
+ * failure, which is worse than omitting it, so only what the discovered weights
+ * can serve is granted. The rest is still recorded as a signal, because "the
+ * machinery is installed but the weights are not" is exactly what an operator
+ * needs to see when a capability they expect is missing.
  *
  * It is deliberately small and extensible: adding a node pack means adding one
  * row, and nothing else in the codebase changes.
  */
 export const CAPABILITY_SIGNALS: readonly CapabilitySignal[] = [
-  // 3D *generators*. A local model pack (Hunyuan3D, Stable3D, SV3D, …) or a
-  // generation node (Tripo, Meshy, Rodin, …). These are what make "text/image →
-  // mesh" a real capability rather than an aspiration.
+  // 3D generation: always a separate model pack (Hunyuan3D, Stable3D, SV3D) or a
+  // cloud API node (Tripo, Meshy, Rodin). The discovered checkpoint does not
+  // power it.
   {
     pattern: /hunyuan3d|triposg|triposplat|tripo.*model|meshy.*model|rodin3d|stable3d|sv3d|moge|image.*to.*3d|image.*to.*model/i,
     capabilities: ['text_to_3d', 'image_to_3d'],
-    grants: true,
+    scope: 'install',
     label: '3D generator',
   },
-  // 3D *export* nodes. Recorded because an operator reading `list_models` should
-  // see that this install can write meshes — but writing is not generating, so
-  // these grant nothing.
+  // Mesh *writers*. Core, and they write a mesh they were handed — which is not
+  // generation either, so they grant nothing at all.
   {
     pattern: /saveglb|saveobj|saveg?ltf|save3d|exportmesh|exportglb|exportobj|meshexport|mesh.*to.*file|save_?mesh/i,
     capabilities: [],
-    grants: false,
+    scope: 'install',
     label: 'mesh export',
   },
-  // Video export nodes.
+  // Video export: in practice a dedicated video model, not the discovered one.
   {
     pattern: /savewebm|savevideo|videocombine|vhs_|saveanimated/i,
     capabilities: ['video_generation'],
-    grants: true,
+    scope: 'install',
     label: 'video export',
   },
-  // Audio export nodes.
+  // Audio export: likewise a dedicated audio model.
   {
     pattern: /saveaudio|saveflac|savewav|audioencode/i,
     capabilities: ['audio_generation'],
-    grants: true,
+    scope: 'install',
     label: 'audio export',
   },
-  // Image-to-image is proven by a node that consumes an image and produces
-  // latents — an encoder, or a depth/pose/edge preprocessor feeding a sampler.
+  // Image-to-image is the *same sampler with different conditioning*, so the
+  // discovered weights do serve it: an image is encoded into the latent space the
+  // model already works in. This is why it is the one extra capability granted.
   {
     pattern: /vaeencode|encode.*image|depthanything|midas|canny|openpose|lineart|zoedepth|preprocessor/i,
     capabilities: ['image_to_image'],
-    grants: true,
+    scope: 'model',
     label: 'image conditioning',
   },
-  // Vision-language nodes are evidence the install can describe an image.
+  // Captioning is its own model (a vision-language checkpoint), not the
+  // discovered one.
   {
     pattern: /joycaption|florence|blip|llavacaption|imagecaption|wd14|interrogat/i,
     capabilities: ['image_understanding'],
-    grants: true,
+    scope: 'install',
     label: 'image captioning',
   },
 ];
@@ -191,6 +194,23 @@ const VRAM_ESTIMATE_PATTERNS: readonly { readonly pattern: RegExp; readonly vram
 
 /** The estimate used when no pattern matches. */
 const DEFAULT_VRAM_GB = 6;
+
+/**
+ * The `type` declared to `CLIPLoader` for a generated diffusion-model graph.
+ *
+ * **This is the one value a generated graph cannot derive from the engine.** A
+ * text encoder's architecture is not discoverable from `/object_info`; ComfyUI
+ * makes the operator choose, and the choice is per-model. `qwen_image` is the
+ * default because it is what the CLIP loader's own enum lists first on the
+ * install this was developed against, and because getting it wrong fails loudly
+ * with ComfyUI naming the valid values. The generated descriptor says which value
+ * was used, and the operator edits it in `adapterConfig.workflow` if their model
+ * wants another.
+ */
+const DEFAULT_CLIP_TYPE = 'qwen_image';
+
+/** The weight precision requested from `UNETLoader`; the engine's own default. */
+const DEFAULT_WEIGHT_DTYPE = 'default';
 
 /** One weight file discovered in the node graph. */
 export interface ComfyWeightFile {
@@ -255,9 +275,9 @@ export function parseComfyObjectInfo(raw: unknown): ComfyIntrospection {
     for (const signal of CAPABILITY_SIGNALS) {
       if (!signal.pattern.test(className)) continue;
       signals.push(`${signal.label} (${className})`);
-      // A signal that does not grant records provenance only: it says what this
-      // install can write out, not what it can produce.
-      if (!signal.grants) continue;
+      // A signal scoped to the install records provenance only: it says the
+      // machinery exists, not that these weights can drive it.
+      if (signal.scope !== 'model') continue;
       for (const capability of signal.capabilities) {
         if (!capabilities.includes(capability)) capabilities.push(capability);
       }
@@ -416,6 +436,146 @@ const GRAPH_ROLES = {
 } as const;
 
 /**
+ * The node classes a diffusion-model graph needs, by the role they play.
+ *
+ * Deliberately separate from {@link GRAPH_ROLES}: a checkpoint loader supplies
+ * model, CLIP, and VAE from one file, while a diffusion-model directory supplies
+ * them from three, and the two shapes need different loaders.
+ */
+const DIFFUSION_GRAPH_ROLES = {
+  latent: 'EmptyLatentImage',
+  /** Preferred over {@link DIFFUSION_GRAPH_ROLES.latent} when present. */
+  sd3Latent: 'EmptySD3LatentImage',
+  sampler: 'KSampler',
+  decode: 'VAEDecode',
+  save: 'SaveImage',
+  clipLoader: 'CLIPLoader',
+  vaeLoader: 'VAELoader',
+} as const;
+
+/** What {@link buildDiffusionModelGraph} selected and wired up. */
+export interface DiffusionGraphSelection {
+  /** The generated API-format graph. */
+  readonly graph: Record<string, unknown>;
+  /** The CLIP/text-encoder filename that was wired in. */
+  readonly clipName: string;
+  /** The VAE filename that was wired in. */
+  readonly vaeName: string;
+  /** The latent node class that was used. */
+  readonly latentClass: string;
+}
+
+/**
+ * Build a minimal graph for a model that exists as loose weight files rather
+ * than a single checkpoint.
+ *
+ * ComfyUI has two ways to hold a model, and they are not interchangeable:
+ *
+ * - a **checkpoint** — one file the `CheckpointLoaderSimple` splits into model,
+ *   CLIP, and VAE; and
+ * - a **diffusion-model directory** — an `unet_name` file plus a separate
+ *   `clip_name` text encoder and a separate `vae_name`, each loaded by its own
+ *   node.
+ *
+ * Publishing only the first shape meant a perfectly usable install published
+ * *nothing*: observed live, a ComfyUI holding one UNET, one text encoder, and
+ * one VAE produced zero models, because the UNET is not a checkpoint. So this
+ * builds the second shape when, and only when, every node it needs exists and
+ * the CLIP and VAE enumerations are non-empty — an empty enum would produce a
+ * graph that ComfyUI rejects, which is exactly what discovery must avoid.
+ *
+ * **The text-encoder `type` and the latent class are the two unguessable
+ * choices.** No introspection reveals which architecture a UNET wants; ComfyUI
+ * itself makes the operator pick. So `type` is taken from the CLIP loader's own
+ * enum where the server offers a sensible default, and everything chosen here is
+ * reported back to the caller to put in the descriptor's notes, with the
+ * descriptor left editable.
+ *
+ * As with the checkpoint shape, anything beyond this — LoRAs, controlnets,
+ * upscalers, second passes — is not guessed at.
+ *
+ * @param introspection - what the node graph revealed.
+ * @param model - the diffusion-model (UNET) filename to load.
+ * @param options - the CLIP and VAE files to use; each falls back to the first
+ *   the engine enumerates, so a single-model install needs no configuration.
+ * @returns the graph and what it selected, or `undefined` when this install
+ *   cannot run the shape.
+ */
+export function buildDiffusionModelGraph(
+  introspection: ComfyIntrospection,
+  model: string,
+  options: { readonly clipName?: string; readonly vaeName?: string; readonly clipType?: string } = {},
+): DiffusionGraphSelection | undefined {
+  const classes = new Set(introspection.nodeClasses);
+  const required = [
+    DIFFUSION_GRAPH_ROLES.sampler,
+    DIFFUSION_GRAPH_ROLES.decode,
+    DIFFUSION_GRAPH_ROLES.save,
+    DIFFUSION_GRAPH_ROLES.clipLoader,
+    DIFFUSION_GRAPH_ROLES.vaeLoader,
+    'CLIPTextEncode',
+  ].filter((className) => !classes.has(className));
+  const latentClass = classes.has(DIFFUSION_GRAPH_ROLES.sd3Latent)
+    ? DIFFUSION_GRAPH_ROLES.sd3Latent
+    : classes.has(DIFFUSION_GRAPH_ROLES.latent)
+      ? DIFFUSION_GRAPH_ROLES.latent
+      : undefined;
+  if (required.length > 0 || latentClass === undefined) return undefined;
+
+  const clipName = options.clipName ?? firstFileOfKind(introspection, 'textEncoder');
+  const vaeName = options.vaeName ?? firstFileOfKind(introspection, 'vae');
+  // An enum with nothing in it means the file is not installed, so the graph
+  // would reference a name the server cannot load.
+  if (clipName === undefined || vaeName === undefined) return undefined;
+
+  const settings = DEFAULT_GRAPH_SETTINGS;
+  const clipType = options.clipType ?? DEFAULT_CLIP_TYPE;
+  return {
+    graph: {
+      '1': { class_type: 'UNETLoader', inputs: { unet_name: model, weight_dtype: DEFAULT_WEIGHT_DTYPE } },
+      '2': { class_type: DIFFUSION_GRAPH_ROLES.clipLoader, inputs: { clip_name: clipName, type: clipType } },
+      '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: '' } },
+      '4': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 0], text: '' } },
+      '5': { class_type: DIFFUSION_GRAPH_ROLES.vaeLoader, inputs: { vae_name: vaeName } },
+      '6': {
+        class_type: latentClass,
+        inputs: { width: settings.width, height: settings.height, batch_size: 1 },
+      },
+      '7': {
+        class_type: DIFFUSION_GRAPH_ROLES.sampler,
+        inputs: {
+          model: ['1', 0],
+          positive: ['3', 0],
+          negative: ['4', 0],
+          latent_image: ['6', 0],
+          seed: 0,
+          steps: settings.steps,
+          cfg: settings.cfg,
+          sampler_name: settings.sampler,
+          scheduler: settings.scheduler,
+          denoise: 1,
+        },
+      },
+      '8': { class_type: DIFFUSION_GRAPH_ROLES.decode, inputs: { samples: ['7', 0], vae: ['5', 0] } },
+      '9': { class_type: DIFFUSION_GRAPH_ROLES.save, inputs: { images: ['8', 0], filename_prefix: settings.filenamePrefix } },
+    },
+    clipName,
+    vaeName,
+    latentClass,
+  };
+}
+
+/**
+ * The first filename of a kind the engine enumerated.
+ * @param introspection - what the node graph revealed.
+ * @param kind - the weight kind to look for.
+ * @returns the filename, or `undefined` when the enum was empty.
+ */
+function firstFileOfKind(introspection: ComfyIntrospection, kind: WeightKind): string | undefined {
+  return introspection.files.find((file) => file.kind === kind)?.filename;
+}
+
+/**
  * Build a minimal API-format graph for a checkpoint, when this install has every
  * node it needs.
  *
@@ -434,9 +594,10 @@ const GRAPH_ROLES = {
  * template" error at routing time — and existence is exactly the kind of thing
  * `/object_info` can answer.
  *
- * This is intentionally the *only* graph shape discovery attempts. Anything
- * requiring a LoRA chain, a controlnet, an upscaler, or a second pass varies too
- * much between models to guess at, and guessing wrong is worse than saying so.
+ * This is intentionally one of only *two* graph shapes discovery attempts — see
+ * {@link buildDiffusionModelGraph} for the other. Anything requiring a LoRA
+ * chain, a controlnet, an upscaler, or a second pass varies too much between
+ * models to guess at, and guessing wrong is worse than saying so.
  *
  * @param introspection - what the node graph revealed.
  * @param checkpoint - the checkpoint filename to wire into the loader.
@@ -501,9 +662,19 @@ export function mapComfyWeightFile(
 ): ModelDescriptor {
   const capabilities = capabilitiesForComfyModel(introspection);
   const { inputTypes, outputTypes } = ioForCapabilities(capabilities);
-  const id = slugifyModelId(file.filename, host.runtime.engine || COMFYUI_ENGINE, `checkpoint-${stableDigest(file.filename)}`);
+  const id = slugifyModelId(file.filename, host.runtime.engine || COMFYUI_ENGINE, `model-${stableDigest(file.filename)}`);
   const vramGb = estimateComfyVram(file.filename);
-  const graph = file.kind === 'checkpoint' ? buildDefaultGraph(introspection, file.filename) : undefined;
+
+  // The two shapes a model can take here, each with its own loader path. A
+  // checkpoint carries its own CLIP and VAE; a diffusion model does not, so the
+  // encoder and VAE are chosen from what the engine enumerates and reported in
+  // the descriptor's notes.
+  const selection =
+    file.kind === 'checkpoint'
+      ? checkpointSelection(buildDefaultGraph(introspection, file.filename))
+      : file.kind === 'diffusionModel'
+        ? diffusionSelection(buildDiffusionModelGraph(introspection, file.filename))
+        : undefined;
 
   return {
     id,
@@ -518,16 +689,97 @@ export function mapComfyWeightFile(
     inputTypes,
     outputTypes,
     adapterConfig: {
-      ...(graph === undefined ? {} : { workflow: graph }),
+      ...(selection === undefined ? {} : { workflow: selection.graph }),
       discovery: {
         weightKind: file.kind,
+        ...(selection?.clipName === undefined ? {} : { textEncoder: selection.clipName }),
+        ...(selection?.vaeName === undefined ? {} : { vae: selection.vaeName }),
+        ...(selection?.clipType === undefined ? {} : { clipType: selection.clipType }),
         ...(introspection.signals.length === 0 ? {} : { capabilitySignals: [...introspection.signals] }),
       },
     },
     resources: { vramGb, ramGb: vramGb, requiresGpu: true },
     priority: DISCOVERED_PRIORITY,
     tags: [...DISCOVERED_TAGS],
-    notes: describeComfyModel(file, introspection, graph !== undefined, vramGb),
+    notes: describeComfyModel(file, introspection, selection, vramGb),
+  };
+}
+
+/** What a generated graph wired up, for the descriptor's notes and provenance. */
+interface GraphSelection {
+  readonly graph: Record<string, unknown>;
+  readonly clipName?: string;
+  readonly vaeName?: string;
+  readonly clipType?: string;
+  /** Set for the diffusion-model shape, where the encoder choice is not implied. */
+  readonly assumption?: string;
+}
+
+/**
+ * Summarize capability signals by kind rather than listing every node class.
+ *
+ * A real install produced 58 firing signals, and pasting them into a descriptor's
+ * `notes` — which reaches `list_models` and an agent's context — buried the two
+ * lines that matter. The full list stays in `adapterConfig.discovery`, where it is
+ * machine-readable and free; the note gets a count per label.
+ *
+ * @param signals - the signals that fired, as `label (NodeClass)`.
+ * @returns a short summary such as `3D generator ×18, image conditioning ×20`.
+ */
+export function summarizeSignals(signals: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const signal of signals) {
+    const label = signal.replace(/\s*\([^)]*\)$/, '').trim();
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts].map(([label, count]) => `${label} ×${count}`).join(', ');
+}
+
+/** The labels of signals that fired but granted no capability to this model. */
+function installScopedLabels(introspection: ComfyIntrospection): string[] {
+  const granted = new Set<string>();
+  for (const signal of CAPABILITY_SIGNALS) {
+    if (signal.scope === 'model') for (const capability of signal.capabilities) granted.add(capability);
+  }
+  const labels = new Set<string>();
+  for (const signal of introspection.signals) {
+    const label = signal.replace(/\s*\([^)]*\)$/, '').trim();
+    const definition = CAPABILITY_SIGNALS.find((candidate) => candidate.label === label);
+    if (definition === undefined || definition.scope === 'model') continue;
+    if (definition.capabilities.every((capability) => !introspection.capabilities.includes(capability))) {
+      labels.add(label);
+    }
+  }
+  return [...labels];
+}
+
+/**
+ * Narrow a checkpoint graph into a {@link GraphSelection}.
+ * @param graph - the graph, or `undefined` when the shape could not be built.
+ * @returns the selection, or `undefined`.
+ */
+function checkpointSelection(graph: Record<string, unknown> | undefined): GraphSelection | undefined {
+  return graph === undefined ? undefined : { graph };
+}
+
+/**
+ * Narrow a diffusion-model graph into a {@link GraphSelection}, recording the
+ * two choices that could not be derived from the engine.
+ * @param selection - what {@link buildDiffusionModelGraph} produced.
+ * @returns the selection, or `undefined`.
+ */
+function diffusionSelection(selection: DiffusionGraphSelection | undefined): GraphSelection | undefined {
+  if (selection === undefined) return undefined;
+  return {
+    graph: selection.graph,
+    clipName: selection.clipName,
+    vaeName: selection.vaeName,
+    clipType: DEFAULT_CLIP_TYPE,
+    assumption:
+      `A separate text encoder (${selection.clipName}) and VAE (${selection.vaeName}) were wired in, because this ` +
+      `model is stored as loose weight files rather than a checkpoint. The text encoder's declared type is ` +
+      `"${DEFAULT_CLIP_TYPE}": that is the one value no engine introspection reveals, so check it against your model ` +
+      `and change it in adapterConfig.workflow if ComfyUI rejects the graph.`,
   };
 }
 
@@ -535,26 +787,39 @@ export function mapComfyWeightFile(
  * A provenance note assembled from what the engine reported.
  * @param file - the weight file.
  * @param introspection - what the node graph revealed.
- * @param hasGraph - whether a default graph was synthesized.
+ * @param selection - what a generated graph wired up, or `undefined` when none was.
  * @param vramGb - the estimate that was applied.
  * @returns the note.
  */
 function describeComfyModel(
   file: ComfyWeightFile,
   introspection: ComfyIntrospection,
-  hasGraph: boolean,
+  selection: GraphSelection | undefined,
   vramGb: number,
 ): string {
   const facts: string[] = [
     `Discovered from ComfyUI's /object_info (${file.kind} file); not listed in models.json.`,
   ];
-  if (introspection.signals.length > 0) facts.push(`Capability signals: ${introspection.signals.join(', ')}.`);
-  if (hasGraph) {
-    facts.push('A default one-checkpoint graph was generated, so this model needs no template to start from.');
-  } else {
+  if (selection === undefined) {
     facts.push(
-      'No workflow template is attached and this install could not run the default one-checkpoint graph, ' +
-        'so ComfyUI will report that it needs a template until one is added to adapterConfig.workflowPath.',
+      'No workflow template is attached and this install could not run either graph shape discovery knows ' +
+        '(one checkpoint, or one diffusion model with a text encoder and a VAE), so ComfyUI will report that it ' +
+        'needs a template until one is added to adapterConfig.workflowPath.',
+    );
+  } else if (selection.assumption !== undefined) {
+    facts.push(selection.assumption);
+  } else {
+    facts.push('A default one-checkpoint graph was generated, so this model needs no template to start from.');
+  }
+  const summary = summarizeSignals(introspection.signals);
+  if (summary.length > 0) facts.push(`Installed node machinery: ${summary}.`);
+  const withheld = installScopedLabels(introspection);
+  if (withheld.length > 0) {
+    // The single most useful line on the note: it tells an operator that the
+    // capability they are looking for is one download away, instead of implying
+    // the engine cannot do it.
+    facts.push(
+      `Not served by this model, because it needs separate weights that are not installed: ${withheld.join(', ')}.`,
     );
   }
   facts.push(`VRAM estimate ${vramGb} GiB, inferred from the filename; treat as approximate.`);
@@ -587,16 +852,18 @@ export function createComfyUiDiscoverer(options: { readonly requestTimeoutMs?: n
 
       const introspection = parseComfyObjectInfo(read.value);
 
-      // One descriptor per *checkpoint*. A LoRA or a bare UNET is not a model
-      // this hub can route to on its own — the ComfyUI adapter takes a graph,
-      // and these enumerated files are what a graph would reference. They are
-      // deliberately not published as models: doing so would advertise a
-      // capability with no way to serve it.
+      // One descriptor per *routeable model*: a checkpoint, or a diffusion model
+      // the generated graph can actually load. A LoRA is not published — it is a
+      // modifier, not a model, and there is no descriptor shape for "apply this
+      // to that checkpoint" yet. A diffusion model is published only when a graph
+      // for it could be built, so the catalog never advertises something the
+      // adapter would then refuse.
       const seen = new Set<string>();
       const descriptors: ModelDescriptor[] = [];
       for (const file of introspection.files) {
-        if (file.kind !== 'checkpoint') continue;
+        if (file.kind !== 'checkpoint' && file.kind !== 'diffusionModel') continue;
         const descriptor = mapComfyWeightFile(file, host, introspection);
+        if (descriptor.adapterConfig?.['workflow'] === undefined) continue;
         if (seen.has(descriptor.id)) continue;
         seen.add(descriptor.id);
         descriptors.push(descriptor);
