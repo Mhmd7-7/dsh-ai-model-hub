@@ -543,6 +543,59 @@ describe('discovery: end to end through the hub catalog', () => {
     }
   });
 
+  it('gives a model discovered after construction a full runtime status', async () => {
+    // Regression. The runtime manager seeds its per-model state when it is
+    // constructed; discovery adds a model later. Before `syncCatalog()`, a
+    // discovered model had no state entry, so `getModelStatus` threw — and since
+    // `listModels()` reads a status for every catalog model, one discovered model
+    // broke the model listing, the settings page's inventory, and
+    // `explain_routing` at once.
+    const engine = await startOllama();
+    try {
+      engine.setResponder(responderFor({ models: [{ name: 'late:1b', size: GIB }] }, { 'late:1b': {} }));
+      const hub = ModelHub.fromConfig(staticCatalog([], engine.url), {
+        discoverModels: true,
+        discoveryTimeoutMs: 2000,
+        manageTimers: false,
+        log: () => {},
+      });
+      // The constructor's pre-warm is in flight; await it rather than sleeping.
+      await hub.refreshDiscovery();
+
+      const id = slugifyModelId('late:1b', 'ollama');
+      assert.ok(hub.catalog.listModelIds().includes(id), 'the discovered model is in the catalog');
+
+      // The three surfaces that broke, all of which read a status per model.
+      const views = hub.listModels();
+      assert.equal(views.length, 2);
+      const discoveredView = views.find((view) => view.model.id === id);
+      assert.ok(discoveredView, 'every catalog model must have a status view');
+      assert.equal(discoveredView.status.modelId, id);
+      assert.ok(
+        ['stopped', 'available', 'starting', 'unhealthy', 'unsupported', 'error', 'disabled'].includes(
+          discoveredView.status.availability,
+        ),
+        `unexpected availability ${discoveredView.status.availability}`,
+      );
+      assert.doesNotThrow(() => hub.getModelStatus(id));
+      assert.doesNotThrow(() => hub.catalog.listCapabilities());
+
+      // A static model's state must survive a discovery pass untouched.
+      assert.equal(hub.getModelStatus('static_text').modelId, 'static_text');
+
+      // Discovery is off the moment the engine is gone, and the model leaves with
+      // it — while the static one and its runtime state remain.
+      engine.setResponder(responderFor({ models: [] }, {}));
+      await hub.refreshDiscovery({ force: true });
+      assert.ok(!hub.catalog.listModelIds().includes(id), 'a model the engine no longer reports stops being routable');
+      assert.deepEqual(hub.listModels().map((view) => view.model.id), ['static_text']);
+
+      await hub.dispose();
+    } finally {
+      await engine.close();
+    }
+  });
+
   it('keeps working when the engine is unreachable', async () => {
     const engine = await startOllama();
     const url = engine.url;

@@ -106,7 +106,34 @@ export class RuntimeManager {
     this.healthIntervalMs = options.healthIntervalMs ?? 30_000;
     this.idleSweepIntervalMs = options.idleSweepIntervalMs ?? 15_000;
 
+    this.syncCatalog();
+  }
+
+  /**
+   * Bring the runtime's per-model state into agreement with the catalog.
+   *
+   * Called from the constructor and again whenever the catalog gains or loses
+   * models. That second case is not hypothetical: runtime model discovery
+   * republishes the catalog after the hub is already constructed, so a model can
+   * appear that this manager has never seen. Without a state entry for it,
+   * `getModelStatus` throws — and because `ModelHub.listModels()` reads a status
+   * for every catalog model, one discovered model would break the whole listing,
+   * the settings page, and `explain_routing` at once.
+   *
+   * Everything here is idempotent and additive:
+   *
+   * - A model with no state gets the same initial state and the same one-time
+   *   adapter/resource validation the constructor performs.
+   * - A model that already has state is left completely alone, so a running
+   *   process, a health report, or an in-flight invocation is never disturbed by
+   *   a discovery pass.
+   * - State for a model that has left the catalog is kept if the hub owns a
+   *   process for it, so the process is still stoppable and still gets shut down
+   *   on dispose; otherwise it is dropped.
+   */
+  syncCatalog(): void {
     for (const model of this.catalog.listModels()) {
+      if (this.states.has(model.id)) continue;
       this.states.set(model.id, {
         // A model the hub *could* start rests at `not_running`: nothing is known
         // to be alive yet. A model it can never start is `external` from the
@@ -124,36 +151,56 @@ export class RuntimeManager {
         reason: model.enabled ? undefined : 'disabled in configuration',
         transition: Promise.resolve(),
       });
+      this.validateModel(model.id);
     }
 
-    // Validate adapter support once, so a configuration mistake is visible at
-    // startup rather than at first use.
-    for (const model of this.catalog.listModels()) {
-      if (!model.enabled) continue;
-      const adapter = this.adapters.get(model.adapter);
-      const state = this.states.get(model.id);
-      if (state === undefined) continue;
-      if (adapter === undefined) {
-        state.availability = 'error';
-        state.reason = `no adapter registered for kind "${model.adapter}"`;
-        this.log(`runtime: model ${model.id} has no adapter for kind ${model.adapter}`, { modelId: model.id });
-        continue;
-      }
-      const support = adapter.supports(model);
-      if (!support.ok) {
-        state.availability = 'unsupported';
-        state.reason = support.reason;
-        this.log(`runtime: model ${model.id} is not supported by its adapter: ${support.reason}`, {
-          modelId: model.id,
-        });
-        continue;
-      }
-      const resources = this.catalog.checkResources(model);
-      if (!resources.supported) {
-        state.availability = 'unsupported';
-        state.reason = resources.reason;
-        this.log(`runtime: model ${model.id} exceeds this machine: ${resources.reason}`, { modelId: model.id });
-      }
+    // A model that has left the catalog stops being routable immediately —
+    // `requireModel` in the catalog already refuses it — but a process the hub
+    // owns must stay stoppable, so its state is retained until it is gone.
+    const present = new Set(this.catalog.listModelIds());
+    for (const [modelId, state] of [...this.states]) {
+      if (present.has(modelId)) continue;
+      if (state.process !== undefined) continue;
+      this.states.delete(modelId);
+    }
+  }
+
+  /**
+   * Check one model's adapter support and resource fit once, recording the
+   * verdict as its initial availability.
+   *
+   * Separate from {@link syncCatalog} only so the constructor path and the
+   * discovery path cannot disagree about what a healthy starting state is.
+   *
+   * @param modelId - the model to validate; it must already have a state entry.
+   */
+  private validateModel(modelId: string): void {
+    const model = this.catalog.getModel(modelId);
+    if (model === undefined || !model.enabled) return;
+    const state = this.states.get(modelId);
+    if (state === undefined) return;
+
+    const adapter = this.adapters.get(model.adapter);
+    if (adapter === undefined) {
+      state.availability = 'error';
+      state.reason = `no adapter registered for kind "${model.adapter}"`;
+      this.log(`runtime: model ${model.id} has no adapter for kind ${model.adapter}`, { modelId: model.id });
+      return;
+    }
+    const support = adapter.supports(model);
+    if (!support.ok) {
+      state.availability = 'unsupported';
+      state.reason = support.reason;
+      this.log(`runtime: model ${model.id} is not supported by its adapter: ${support.reason}`, {
+        modelId: model.id,
+      });
+      return;
+    }
+    const resources = this.catalog.checkResources(model);
+    if (!resources.supported) {
+      state.availability = 'unsupported';
+      state.reason = resources.reason;
+      this.log(`runtime: model ${model.id} exceeds this machine: ${resources.reason}`, { modelId: model.id });
     }
   }
 
