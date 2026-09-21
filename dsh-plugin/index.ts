@@ -264,6 +264,14 @@ function buildHub(
     ...(config.artifactRoot.length === 0 ? {} : { artifactRoot: config.artifactRoot }),
     healthIntervalMs: config.healthIntervalMs,
     idleSweepIntervalMs: config.idleSweepIntervalMs,
+    // Runtime discovery is opt-in. Off, no engine is contacted for
+    // introspection and the catalog is exactly the document on disk; on, the
+    // catalog grows in the background with what each engine reports it has.
+    // Either way the static entries win an id collision — see
+    // `src/discovery/types.ts`.
+    discoverModels: config.discoverModels,
+    discoveryTtlMs: config.discoveryTtlMs,
+    discoveryTimeoutMs: config.discoveryTimeoutMs,
     executionPolicy: {
       // Spreading the shipped policy and widening only `allowAnyCommand` keeps
       // the credential scrub list and argument bounds in force.

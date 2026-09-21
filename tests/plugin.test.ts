@@ -111,7 +111,7 @@ function runContext(overrides: Partial<ToolRunContext> = {}): ToolRunContext {
  *
  * Used instead of a fixed sleep where the code under test releases a resource
  * asynchronously and the exact delay is an implementation detail rather than a
- * contract — asserting on it would make the test flaky without testing anything
+ * contract â€” asserting on it would make the test flaky without testing anything
  * more.
  *
  * @param predicate - the condition to wait for.
@@ -190,8 +190,8 @@ async function mount(
 /**
  * The three in-process models this file's tests mount, as a catalog document.
  *
- * A test double, not a shipped catalog: it is the only way to drive every tool —
- * including `image_to_3d` — without an engine installed. The repository ships no
+ * A test double, not a shipped catalog: it is the only way to drive every tool â€”
+ * including `image_to_3d` â€” without an engine installed. The repository ships no
  * mock catalog, and `config/models.json` holds real engines only.
  *
  * @returns the catalog document.
@@ -249,7 +249,7 @@ describe('plugin exports', () => {
     // That happened once: the plugin registered a runtime context through
     // `ctx.systemPrompt` while declaring only `['tools']`, and DeepSeek Harness
     // stopped starting. A permissive test context cannot reproduce cordis's
-    // enforcement, so this check is static instead — it reads the plugin source
+    // enforcement, so this check is static instead â€” it reads the plugin source
     // and requires every `ctx.<name>` access to be either a declared injection or
     // a cordis builtin.
     const cordisBuiltins = new Set([
@@ -295,7 +295,7 @@ describe('plugin exports', () => {
       [],
       `the plugin reads ${undeclared.map((s) => `ctx.${s}`).join(', ')} without declaring ` +
         `${undeclared.length === 1 ? 'it' : 'them'} in \`inject\`. ` +
-        'cordis aborts the whole profile boot with "cannot get property … without inject".',
+        'cordis aborts the whole profile boot with "cannot get property â€¦ without inject".',
     );
 
     // And the reverse: every declared service must actually be used, so the list
@@ -319,6 +319,7 @@ describe('registered tools', () => {
           'list_artifacts',
           'list_capabilities',
           'list_models',
+          'refresh_model_discovery',
           'start_model',
           'stop_model',
         ],
@@ -599,8 +600,8 @@ describe('invoke_model', () => {
       });
 
       // A cancellation must not be retried on another model, and the in-flight
-      // counter must not leak. The adapter is still sleeping — a same-process
-      // promise cannot be hard-killed — so its `finally` releases the counter at
+      // counter must not leak. The adapter is still sleeping â€” a same-process
+      // promise cannot be hard-killed â€” so its `finally` releases the counter at
       // some point after the rejection. Poll briefly rather than guessing a delay.
       const released = await waitFor(
         () => hub.getModelStatus('mock_image_model').activeInvocations === 0,
@@ -823,7 +824,7 @@ describe('apply() end to end', () => {
     apply(ctx, resolvePluginConfig({ configPath: catalogPath, exposeCapabilityContext: true }));
 
     try {
-      assert.equal(captured.definitions.size, 9);
+      assert.equal(captured.definitions.size, 10);
       assert.ok(captured.logLines.some((line) => line.includes('model hub ready')));
       assert.equal(captured.promptContexts.length, 1, 'the capability context should be registered');
 
@@ -907,13 +908,13 @@ describe('apply() end to end', () => {
       apply(ctx, resolvePluginConfig({ configPath: 'config/examples/real-models.example.json' })),
     );
     // The example catalog is valid, so tools must be registered from it.
-    assert.equal(captured.definitions.size, 9);
+    assert.equal(captured.definitions.size, 10);
   });
 
   it('finds its own shipped catalog when the host working directory has none', async () => {
     // Regression, and the reason anchors exist at all. Discovery used to anchor
     // only to process.cwd(), which for a long-running `dsh web` is wherever its
-    // launcher happened to be — unrelated to where the catalog lives. The plugin
+    // launcher happened to be â€” unrelated to where the catalog lives. The plugin
     // then found nothing, warned, registered no tools, and the agent silently had
     // no model capability while every component looked healthy. The plugin's own
     // installation directory is now an anchor, which is what makes a hub
@@ -928,7 +929,7 @@ describe('apply() end to end', () => {
 
       assert.equal(
         captured.definitions.size,
-        9,
+        10,
         `the shipped catalog should have been found; log was: ${captured.logLines.join(' | ')}`,
       );
       assert.ok(captured.logLines.some((line) => line.includes('model hub ready')));

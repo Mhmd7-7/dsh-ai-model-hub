@@ -46,8 +46,19 @@ calls answer everything:
 | `get_model_status` | Per-model availability, lifecycle, health, and last error |
 | `check_model_health` | Probe now — use after a failure or while an engine warms up |
 | `list_artifacts` | Recover an artifact id from an earlier step in the conversation |
+| `refresh_model_discovery` | Re-read every engine for models installed since the last check |
 | `start_model` | Start an engine that is not running, and wait for it to be healthy |
 | `stop_model` | Reclaim VRAM after a heavy workflow, or recover a wedged model |
+
+### When a model you expect is missing
+
+A model the machine already has — a freshly pulled Ollama model, a new ComfyUI
+checkpoint — may not be in the catalog yet, either because the deployment
+configures models by hand or because the discovery cache has not expired.
+`refresh_model_discovery` re-reads every configured engine and republishes the
+catalog; it reports what each engine contributed and warns about any it could not
+reach. Run it before concluding a capability is unavailable, and say plainly if
+it reports that runtime discovery is disabled in this deployment.
 
 ## Invoking
 

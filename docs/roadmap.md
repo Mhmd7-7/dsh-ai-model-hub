@@ -22,8 +22,8 @@ Delivered:
   ASCII STL, and a playable WAV. It exists to validate the architecture and is
   never referenced by `config/models.json`
 - Durable artifact store with a tamper-resistant path resolver
-- DSH plugin exposing nine capability tools and a dynamic capability snapshot
-- 198 tests: unit, integration, adapter, and plugin — all runnable without an
+- DSH plugin exposing ten capability tools and a dynamic capability snapshot
+- 353 tests: unit, integration, adapter, discovery, and plugin — all runnable without an
   engine (the eight spawn-based ones need a shell that permits piped child stdio)
 - A vertical slice that runs the real code paths, not doubles
 
@@ -248,9 +248,74 @@ tests against the real code paths.
 
 ---
 
+## Phase 7 — runtime model discovery ✅ shipped (ComfyUI auto-graph generation is a follow-up)
+
+**Goal:** stop requiring a JSON edit before a model the machine already has can be
+used.
+
+A *host* — "ComfyUI is at `http://127.0.0.1:8188`" — is the only thing configured.
+Everything about what an engine can currently do is read out of the engine's own
+introspection API at runtime and synthesized into `ModelDescriptor` entries, so a
+freshly pulled Ollama model, a checkpoint dropped into ComfyUI's models
+directory, or a LoRA someone installed is usable without touching
+`config/models.json`.
+
+### What shipped
+
+- `src/discovery/types.ts` — `HostDiscoverer`, a `DiscoveryRegistry` keyed by
+  engine (mirroring `AdapterRegistry`), a per-host TTL cache, and the merge step.
+- `src/discovery/ollama.ts` — `/api/tags` + `/api/show`: every installed model,
+  with capabilities inferred from whether the engine reports a vision projector,
+  `contextTokens` read from `model_info`, and resources estimated from the
+  reported weight size.
+- `src/discovery/a1111.ts` — `/sdapi/v1/sd-models`, `/samplers`, and `/options`:
+  every checkpoint, plus the loaded one promoted by priority so routing prefers
+  it (a checkpoint switch is expensive; only the loaded one serves without one).
+- `src/discovery/comfyui.ts` — `/object_info`: checkpoint filenames read out of
+  the loader nodes' own enumerations, capabilities from an explicit
+  node-class → capability table (`CAPABILITY_SIGNALS`), and a **minimal default
+  graph** generated for the common one-checkpoint shape.
+- Wired behind `ModelHubOptions.discoverModels` (default **false**) and the plugin
+  setting of the same name; `ModelHub.fromConfigAndDiscovery` merges *before* the
+  catalog is constructed; `ModelHub.refreshDiscovery` and the
+  `refresh_model_discovery` tool are the manual refresh path.
+- Four load-bearing properties, each with tests:
+  1. No model identifier appears anywhere in discovery code.
+  2. Output is raw descriptors, resolved only by `resolveDescriptor` — no router,
+     runtime, or adapter change.
+  3. An unreachable engine is a warning and an empty result, never a crash.
+  4. On an id collision the **static** entry wins, by merge order and by a filter
+     that runs before the catalog ever sees the list — not by priority, and not
+     by relying on `ModelCatalog`'s duplicate-skipping.
+
+### What remains
+
+1. **ComfyUI auto-graph generation beyond the common case.** The shipped version
+   synthesizes a graph only when `/object_info` contains exactly the six node
+   classes a minimal `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`
+   pipeline needs, and otherwise leaves `adapterConfig.workflow` absent so the
+   adapter reports "needs a workflow template". LoRA chains, controlnets,
+   upscalers, second passes, and UNET+CLIP+VAE triples each need their own
+   template, and guessing one is worse than saying so. The natural next step is a
+   small library of *shapes* (not models) selected by which loader nodes exist.
+2. **File sizes for better resource estimates.** Neither `/object_info` nor the
+   A1111 listing reports a size, so ComfyUI and A1111 VRAM figures are filename
+   heuristics. A companion listing (or a HEAD request per file) would replace the
+   guess with a measurement; the Ollama path already has real numbers.
+3. **Discovering LoRAs and UNETs as *modifiers*.** They are enumerated today but
+   deliberately not published as models: a LoRA is not something this hub can
+   route to on its own. Modelling "apply this LoRA to that checkpoint" needs a
+   descriptor shape that does not exist yet.
+4. **Per-host opt-in and per-engine budgets.** Discovery is all-or-nothing today.
+   A deployment may want discovery on Ollama (cheap, local) but off for an engine
+   on a slow remote endpoint.
+5. **Pushing updates rather than polling.** The TTL cache re-reads on demand; a
+   long-lived session would benefit from re-reading when a capability is missing
+   rather than only when asked.
+
 ## Beyond Phase 6
 
-Directions the architecture already accommodates:
+### Directions the architecture already accommodates
 
 | Direction | Why it fits |
 |---|---|

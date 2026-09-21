@@ -34,6 +34,8 @@ export function registerDiscoveryTools(
 ): void {
   const hub = service.hub;
 
+  registerRefreshDiscoveryTool(ctx, service);
+
   ctx.tools.register(
     defineTool({
       name: 'list_models',
@@ -497,3 +499,101 @@ export function registerRoutingTool(
 }
 
 export { formatAvailability, formatModel };
+
+/**
+ * Register the runtime-discovery refresh tool.
+ *
+ * Kept separate from the read-only discovery tools because it is the one tool
+ * here with a side effect: it re-reads every configured engine and republishes
+ * the catalog. That is exactly what an operator wants right after pulling an
+ * Ollama model or dropping a checkpoint into ComfyUI — without it, the answer is
+ * "wait out the cache TTL and ask again".
+ *
+ * A hub with runtime discovery disabled answers candidly rather than pretending
+ * to work: the tool reports that discovery is off and names the setting.
+ *
+ * @param ctx - the context whose `tools` registry receives it.
+ * @param service - the hub service to refresh.
+ */
+export function registerRefreshDiscoveryTool(ctx: Context, service: ModelHubService): void {
+  const hub = service.hub;
+
+  ctx.tools.register(
+    defineTool({
+      name: 'refresh_model_discovery',
+      description:
+        'Re-read every configured model engine and republish the catalog, so models installed since the last check ' +
+        '(a freshly pulled Ollama model, a new checkpoint in ComfyUI) become usable immediately instead of after the ' +
+        'discovery cache expires. ' +
+        'Engines that are unreachable are reported as warnings and contribute no models; nothing is started or invoked. ' +
+        'Use this when you have been told a model was just installed, or when a capability you expect is missing.',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            enabled: { type: 'boolean', required: true },
+            hosts: { type: 'array', required: true, items: { type: 'string' } },
+            discovered: { type: 'integer', required: true },
+            added: { type: 'array', required: true, items: { type: 'string' } },
+            removed: { type: 'array', required: true, items: { type: 'string' } },
+            totalModels: { type: 'integer', required: true },
+            warnings: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  host: { type: 'string', required: true },
+                  engine: { type: 'string', required: true },
+                  message: { type: 'string', required: true },
+                },
+              },
+            },
+          },
+        },
+        render: (_args, value) => {
+          if (!value.enabled) {
+            return textBlock(
+              'Runtime model discovery is disabled in this deployment, so the catalog is exactly the configured ' +
+                'models.json and there is nothing to refresh. Enable it with the plugin setting `discoverModels: true`.',
+            );
+          }
+          const lines = [`Discovery read ${value.hosts.length} engine(s) and found ${value.discovered} model(s).`];
+          if (value.added.length > 0) lines.push(`Newly usable: ${value.added.join(', ')}`);
+          if (value.removed.length > 0) lines.push(`No longer reported: ${value.removed.join(', ')}`);
+          if (value.added.length === 0 && value.removed.length === 0) {
+            lines.push('The catalog is unchanged.');
+          }
+          lines.push(`The catalog now holds ${value.totalModels} model(s).`);
+          for (const warning of value.warnings) {
+            lines.push(`Warning from ${warning.host} (${warning.engine}): ${warning.message}`);
+          }
+          return textBlock(lines.join('\n'));
+        },
+      },
+      execute: async () => {
+        const before = hub.catalog.listModelIds();
+        const beforeSet = new Set(before);
+        const result = await hub.refreshDiscovery({ force: true });
+        const after = hub.catalog.listModelIds();
+        const afterSet = new Set(after);
+        return {
+          enabled: hub.discovery !== undefined,
+          hosts: [...result.hostIds],
+          discovered: result.descriptors.length,
+          added: after.filter((id) => !beforeSet.has(id)),
+          removed: before.filter((id) => !afterSet.has(id)),
+          totalModels: after.length,
+          warnings: result.warnings.map((warning) => ({
+            host: warning.hostId,
+            engine: warning.engine,
+            message: warning.message,
+          })),
+        };
+      },
+    }),
+  );
+}

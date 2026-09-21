@@ -147,6 +147,79 @@ export {
 } from './util/validate.ts';
 export type { JsonValue, ValidationIssue } from './util/validate.ts';
 
+// ── Runtime discovery ───────────────────────────────────────────────────────
+export {
+  DEFAULT_DISCOVERY_TIMEOUT_MS,
+  DEFAULT_DISCOVERY_TTL_MS,
+  DISCOVERED_PRIORITY,
+  DiscoveryRegistry,
+  ioForCapabilities,
+  mergeCatalogConfig,
+  staticModelIds,
+} from './discovery/types.ts';
+export type {
+  DiscoveryOptions,
+  DiscoveryResult,
+  DiscoveryWarning,
+  HostDiscoverer,
+} from './discovery/types.ts';
+export {
+  bytesToGib,
+  fetchJson,
+  hasKeyMatching,
+  isRecordLike,
+  readArray,
+  readNumber,
+  readNumberBySuffix,
+  readString,
+  slugifyModelId,
+  stableDigest,
+} from './discovery/http.ts';
+export type { JsonReadResult } from './discovery/http.ts';
+export {
+  OLLAMA_ENGINE,
+  capabilitiesForOllamaModel,
+  createOllamaDiscoverer,
+  joinUrl,
+  mapOllamaModel,
+  mapWithConcurrency,
+  parseOllamaShow,
+  parseOllamaTags,
+} from './discovery/ollama.ts';
+export type {
+  OllamaCandidate,
+  OllamaDetailSource,
+  OllamaModelDetails,
+  OllamaModelSummary,
+} from './discovery/ollama.ts';
+export {
+  A1111_CAPABILITIES,
+  A1111_ENGINE,
+  A1111_ENGINES,
+  LOADED_PRIORITY,
+  createA1111Discoverer,
+  estimateA1111Vram,
+  mapA1111Model,
+  parseA1111Models,
+  parseA1111Options,
+  parseA1111Samplers,
+} from './discovery/a1111.ts';
+export type { A1111EngineFacts, A1111ModelSummary } from './discovery/a1111.ts';
+export {
+  CAPABILITY_SIGNALS,
+  COMFYUI_ENGINE,
+  COMFYUI_ENGINES,
+  WEIGHT_FIELDS,
+  buildDefaultGraph,
+  capabilitiesForComfyModel,
+  createComfyUiDiscoverer,
+  describeIntrospection,
+  estimateComfyVram,
+  mapComfyWeightFile,
+  parseComfyObjectInfo,
+} from './discovery/comfyui.ts';
+export type { ComfyIntrospection, ComfyWeightFile, WeightKind } from './discovery/comfyui.ts';
+
 // ── Configuration loading ───────────────────────────────────────────────────
 export {
   findConfigDirectory,

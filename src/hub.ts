@@ -30,6 +30,11 @@ import type { ModelCatalogConfig } from './catalog/descriptor.ts';
 import { parseModelCatalogConfig } from './catalog/descriptor.ts';
 import type { CapabilityView } from './catalog/registry.ts';
 import { ModelCatalog } from './catalog/registry.ts';
+import { createComfyUiDiscoverer } from './discovery/comfyui.ts';
+import { createA1111Discoverer } from './discovery/a1111.ts';
+import { createOllamaDiscoverer } from './discovery/ollama.ts';
+import { DiscoveryRegistry, mergeCatalogConfig } from './discovery/types.ts';
+import type { DiscoveryResult, HostDiscoverer } from './discovery/types.ts';
 import type { MachineProfile } from './types.ts';
 import type { AvailabilityState, InvocationRequest, InvocationResult, ModelRuntimeStatus, ModelView, RoutingDecision } from './types.ts';
 import { ModelHubError, toHubError } from './errors.ts';
@@ -90,6 +95,46 @@ export interface ModelHubOptions {
    * production usage; tests and one-shot CLI runs set false.
    */
   readonly manageTimers?: boolean;
+  /**
+   * Whether to augment the catalog with models discovered from the configured
+   * engines at runtime.
+   *
+   * **Off by default, and deliberately so.** With it off, discovery does not run
+   * at all: no HTTP request is made to any engine, and the catalog is exactly the
+   * document on disk. Turning it on adds descriptors for what each engine
+   * reports it currently has — a pulled Ollama model, a checkpoint dropped into
+   * ComfyUI's models directory — without a JSON edit.
+   *
+   * Static configuration always wins: a discovered descriptor whose id a static
+   * entry already claims is dropped by {@link mergeModelsWithConfig} before the
+   * catalog is built, and every static entry precedes every discovered one. See
+   * `src/discovery/types.ts` for why that ordering is enforced by the merge
+   * rather than by the catalog.
+   *
+   * When enabled, discovery is kicked off in the background at construction —
+   * the constructor itself is synchronous and cannot await an engine — and the
+   * catalog is rebuilt once the first pass lands. {@link ModelHub.refreshDiscovery}
+   * forces a pass for a caller that will not wait out the cache TTL.
+   */
+  readonly discoverModels?: boolean;
+  /** Discoverers to use instead of the built-in engine set. */
+  readonly discoverers?: readonly HostDiscoverer[];
+  /** Extra discoverers appended to the built-in set. */
+  readonly extraDiscoverers?: readonly HostDiscoverer[];
+  /**
+   * A registry to use instead of building one.
+   *
+   * Supplied by {@link ModelHub.fromConfigAndDiscovery}, which has already run
+   * the first pass to merge its results into `config.models`. A caller that
+   * passes one owns it; providing both this and {@link discoverers} is a
+   * programming error rather than a merge, because there is no sensible
+   * precedence between "the registry I built" and "the discoverers I named".
+   */
+  readonly discoveryRegistry?: DiscoveryRegistry;
+  /** How long one discovery pass stays cached, in milliseconds. Defaults to 60000. */
+  readonly discoveryTtlMs?: number;
+  /** Budget for one engine's discovery pass, in milliseconds. Defaults to 5000. */
+  readonly discoveryTimeoutMs?: number;
 }
 
 /** Optional per-call controls for {@link ModelHub.invokeModel}. */
@@ -138,6 +183,33 @@ export class ModelHub {
   /** The execution policy in force, for diagnostics. */
   readonly executionPolicy: ExecutionPolicy;
 
+  /**
+   * The engine→discoverer map, or `undefined` when runtime discovery is off.
+   *
+   * `undefined` is the honest representation of "off", not an empty registry:
+   * with discovery disabled the hub never constructs one, so no code path can
+   * accidentally reach an engine.
+   */
+  readonly discovery: DiscoveryRegistry | undefined;
+
+  /**
+   * The catalog document exactly as it was supplied, *before* any discovered
+   * model was merged in.
+   *
+   * Kept because a refresh must re-merge from the static half rather than append
+   * to the merged half: otherwise a checkpoint deleted from disk would live on in
+   * the catalog forever, and repeated refreshes would grow it without bound.
+   */
+  private readonly staticConfig: ModelCatalogConfig;
+
+  /**
+   * The in-flight or most recent discovery pass.
+   *
+   * Held so concurrent refreshes share one round of network traffic and so a
+   * caller can await the pre-warm the constructor started.
+   */
+  private discoveryPass: Promise<DiscoveryResult> | undefined;
+
   private readonly listeners = new Set<HubEventListener>();
   private readonly log: (message: string, fields?: Readonly<Record<string, unknown>>) => void;
   private readonly ownsArtifacts: boolean;
@@ -156,6 +228,23 @@ export class ModelHub {
     this.log = options.log ?? ((): void => {});
     this.routingPolicy = options.routingPolicy ?? DEFAULT_ROUTING_POLICY;
     this.executionPolicy = options.executionPolicy ?? DEFAULT_EXECUTION_POLICY;
+    this.staticConfig = options.config;
+
+    // Discovery is built before the catalog so the very first pass can be
+    // started below, but its results are *not* folded in here: the constructor
+    // cannot await an engine. `mergeModelsWithConfig` is exported so a caller
+    // that can await (a CLI, a script, a test) can merge first and construct the
+    // catalog with the discovered models already in `config.models` — which is
+    // the path `ModelHub.fromConfigAndDiscovery` takes.
+    this.discovery =
+      options.discoveryRegistry ??
+      (options.discoverModels === true
+        ? new DiscoveryRegistry([...(options.discoverers ?? defaultDiscoverers()), ...(options.extraDiscoverers ?? [])], {
+            ...(options.discoveryTtlMs === undefined ? {} : { ttlMs: options.discoveryTtlMs }),
+            ...(options.discoveryTimeoutMs === undefined ? {} : { timeoutMs: options.discoveryTimeoutMs }),
+            log: (message, fields) => this.log(message, fields),
+          })
+        : undefined);
 
     this.catalog = new ModelCatalog(options.config, {
       ...(options.machine === undefined ? {} : { machine: options.machine }),
@@ -194,6 +283,18 @@ export class ModelHub {
     });
 
     if (options.manageTimers !== false) this.runtime.start();
+
+    // Pre-warm discovery in the background. The constructor is synchronous by
+    // contract — a plugin's `apply` cannot await it — so the catalog starts with
+    // the static models and grows a moment later. A caller that needs discovered
+    // models present before the first invocation should either await
+    // `refreshDiscovery()` or use `ModelHub.fromConfigAndDiscovery`, which merges
+    // before the catalog exists at all.
+    if (this.discovery !== undefined) {
+      void this.refreshDiscovery().catch((error: unknown) => {
+        this.log(`hub: discovery pre-warm failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
   }
 
   /**
@@ -239,6 +340,52 @@ export class ModelHub {
   }
 
   /**
+   * Build a hub whose catalog already contains what the configured engines
+   * report — discovered models merged in *before* the catalog exists.
+   *
+   * This is the "merge step before `new ModelCatalog(config)`" path, in its
+   * strongest form: a caller that can await gets a hub whose very first routing
+   * decision can select a discovered model, with no background pass to race. The
+   * plugin cannot use it, because `apply` is synchronous; a CLI, a script, or a
+   * test can and should.
+   *
+   * @param raw - parsed JSON, typically from `config/models.json`.
+   * @param options - everything except `config`; `discoverModels` is implied.
+   * @returns the hub, plus the discovery result for diagnostics.
+   * @throws ModelHubError with `INVALID_DESCRIPTOR` when the document is malformed.
+   */
+  static async fromConfigAndDiscovery(
+    raw: unknown,
+    options: Omit<ModelHubOptions, 'config'> = {},
+  ): Promise<{ readonly hub: ModelHub; readonly discovery: DiscoveryResult }> {
+    const parsed = parseModelCatalogConfig(raw, 'models.json');
+    if (!parsed.ok) {
+      throw new ModelHubError('INVALID_DESCRIPTOR', parsed.message, {
+        issues: parsed.issues.map((issue) => ({ path: issue.path, message: issue.message })) as unknown as Record<string, unknown>[],
+      });
+    }
+    const registry = new DiscoveryRegistry(
+      [...(options.discoverers ?? defaultDiscoverers()), ...(options.extraDiscoverers ?? [])],
+      {
+        ...(options.discoveryTtlMs === undefined ? {} : { ttlMs: options.discoveryTtlMs }),
+        ...(options.discoveryTimeoutMs === undefined ? {} : { timeoutMs: options.discoveryTimeoutMs }),
+        ...(options.log === undefined ? {} : { log: (message, fields) => options.log?.(message, fields) }),
+      },
+    );
+    const discovery = await registry.generate(parsed.config.hosts ?? []);
+    const hub = new ModelHub({
+      ...options,
+      config: mergeCatalogConfig(parsed.config, discovery.descriptors),
+      // The merged catalog is already in `config`, and the registry has already
+      // run its first pass. Handing the registry over rather than re-creating it
+      // keeps its cache warm for a later `refreshDiscovery()` and stops a second
+      // pass from refetching what this one just read.
+      discoveryRegistry: registry,
+    });
+    return { hub, discovery };
+  }
+
+  /**
    * Add a listener for hub events.
    * @param listener - the listener.
    * @returns a disposer that removes it.
@@ -270,6 +417,71 @@ export class ModelHub {
   }
 
   // ───────────────────────────── discovery ─────────────────────────────
+
+  /**
+   * Re-read every configured engine and republish the catalog.
+   *
+   * This is the manual refresh path: an operator who just pulled an Ollama model
+   * calls it instead of waiting out the cache TTL. It is safe to call
+   * concurrently — passes are deduplicated per host — and it is a no-op that
+   * reports `cached: true` when runtime discovery is disabled or when nothing is
+   * stale and `force` is not set.
+   *
+   * The merged model list is always `static models + this pass's discovered
+   * models`, so a checkpoint that has been deleted stops being routable rather
+   * than lingering. Hosts and the machine profile are untouched.
+   *
+   * @param options - `force` bypasses the cache even when a pass is fresh.
+   * @returns the discovery result, including per-host warnings.
+   */
+  async refreshDiscovery(options: { readonly force?: boolean } = {}): Promise<DiscoveryResult> {
+    const registry = this.discovery;
+    if (registry === undefined) {
+      return { descriptors: [], warnings: [], cached: true, durationMs: 0, hostIds: [] };
+    }
+
+    const pass = (async (): Promise<DiscoveryResult> => {
+      const result = await registry.generate(this.staticConfig.hosts ?? [], options.force === true ? { refresh: true } : {});
+      if (result.cached) return result;
+
+      for (const warning of result.warnings) {
+        this.log(`hub: discovery warning: ${warning.hostId} (${warning.engine}): ${warning.message}`, {
+          hostId: warning.hostId,
+        });
+      }
+
+      const before = new Set(this.catalog.listModelIds());
+      this.catalog.replaceModels(mergeCatalogConfig(this.staticConfig, result.descriptors).models);
+      const after = new Set(this.catalog.listModelIds());
+
+      const added = [...after].filter((id) => !before.has(id));
+      const removed = [...before].filter((id) => !after.has(id));
+      if (added.length > 0 || removed.length > 0) {
+        this.log(
+          `hub: discovery updated the catalog (${added.length} added, ${removed.length} removed)`,
+          { added, removed, hosts: result.hostIds },
+        );
+      }
+      return result;
+    })();
+
+    this.discoveryPass = pass;
+    try {
+      return await pass;
+    } finally {
+      if (this.discoveryPass === pass) this.discoveryPass = undefined;
+    }
+  }
+
+  /**
+   * The most recent discovery pass, when one is in flight or just finished.
+   *
+   * Exposed so a caller can await the background pre-warm the constructor
+   * started without guessing at a delay.
+   */
+  get pendingDiscovery(): Promise<DiscoveryResult> | undefined {
+    return this.discoveryPass;
+  }
 
   /**
    * Every configured model with its live status.
@@ -778,6 +990,21 @@ export function defaultArtifactRoot(): string {
   const fromEnv = process.env['AIMH_ARTIFACT_ROOT'];
   if (fromEnv !== undefined && fromEnv.trim().length > 0) return fromEnv;
   return `${process.cwd()}/artifacts`;
+}
+
+/**
+ * The discoverers a hub gets when runtime discovery is enabled and the caller
+ * names none.
+ *
+ * This is the exact analogue of the default adapter set in the constructor: one
+ * entry per engine family the hub knows how to introspect, and nothing about any
+ * particular model. Listing them here means a new engine becomes usable by
+ * adding one file, exactly as a new adapter kind does.
+ *
+ * @returns the built-in discoverers.
+ */
+function defaultDiscoverers(): readonly HostDiscoverer[] {
+  return [createOllamaDiscoverer(), createComfyUiDiscoverer(), createA1111Discoverer()];
 }
 
 /** Re-export so callers can construct a hub with a silent logger without another import. */

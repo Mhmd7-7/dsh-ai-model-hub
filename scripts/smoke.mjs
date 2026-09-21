@@ -15,7 +15,7 @@
  * the file a link install loads anyway.
  *
  * It is deliberately separate from `doctor.mjs` because it *does* work rather than
- * inspect: it registers nine tools, reads a model catalog, and offers the bundled
+ * inspect: it registers ten tools, reads a model catalog, and offers the bundled
  * skill. Point it at a throwaway profile if you would rather not touch one.
  *
  * Usage:

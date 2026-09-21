@@ -80,3 +80,19 @@
       #
       #   # Default cooperative budget for one invoke_model call.
       #   invocationTimeoutMs: 600000
+      #
+      #   # Runtime model discovery. OFF by default: the catalog is then exactly the
+      #   # document on disk. Set true and the hub also asks every configured host
+      #   # what it currently has — a pulled Ollama model, a checkpoint dropped into
+      #   # ComfyUI's models directory — and adds those to the catalog with no JSON
+      #   # edit. Static entries always win an id collision, and an engine that is
+      #   # down is a warning rather than a failed boot.
+      #   discoverModels: false
+      #
+      #   # How long a discovery pass stays cached. The refresh_model_discovery tool
+      #   # bypasses it, which is the path for "I just pulled a new model".
+      #   discoveryTtlMs: 60000
+      #
+      #   # Budget for one engine's discovery pass. Raise it if ComfyUI's
+      #   # /object_info is slow on your machine.
+      #   discoveryTimeoutMs: 5000

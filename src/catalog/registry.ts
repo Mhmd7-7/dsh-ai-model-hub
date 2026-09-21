@@ -65,7 +65,31 @@ export class ModelCatalog {
 
     for (const host of config.hosts ?? []) this.hosts.set(host.id, host);
 
-    for (const descriptor of config.models) {
+    this.build(config.models);
+
+    this.log(
+      `catalog: ${this.models.size} model(s), ${this.byCapability.size} capability(ies) from ${this.hosts.size} host(s)`,
+    );
+  }
+
+  /**
+   * Resolve a model list into the lookup tables, replacing whatever was there.
+   *
+   * The hosts and the machine profile survive: a rebuild is what runtime
+   * discovery uses to fold newly found models in, and neither "which endpoints
+   * exist" nor "what this machine has" changes when a checkpoint does. Behavior
+   * on a bad descriptor is identical to the constructor's — a per-model
+   * diagnostic and a skip, never a throw — because a discovered model that fails
+   * validation must cost one model, not the catalog.
+   *
+   * @param descriptors - the models to publish, in publication order.
+   */
+  private build(descriptors: readonly ModelDescriptor[]): void {
+    this.diagnostics.length = 0;
+    this.models.clear();
+    this.byCapability.clear();
+
+    for (const descriptor of descriptors) {
       let resolved: ResolvedModel;
       try {
         resolved = resolveDescriptor(descriptor, descriptor.host === undefined ? undefined : this.hosts.get(descriptor.host));
@@ -92,10 +116,28 @@ export class ModelCatalog {
     for (const [capability, ids] of this.byCapability) {
       ids.sort((left, right) => this.compareForRouting(left, right, capability));
     }
+  }
 
-    this.log(
-      `catalog: ${this.models.size} model(s), ${this.byCapability.size} capability(ies) from ${this.hosts.size} host(s)`,
-    );
+  /**
+   * Publish a different model list on the same hosts.
+   *
+   * This is the seam runtime discovery uses: a discovery pass produces
+   * descriptors, they are merged with the static ones *before* they get here,
+   * and the merged list replaces the catalog's contents in one step. Every
+   * consumer — the router, the runtime manager, the plugin tools — holds this
+   * same object and therefore sees the change without being rebuilt.
+   *
+   * It does not touch host definitions or the machine profile, and it does not
+   * stop any process: a model that disappears from the list simply stops being
+   * routable.
+   *
+   * @param descriptors - the complete model list to publish, static entries first.
+   * @returns how many models are now registered.
+   */
+  replaceModels(descriptors: readonly ModelDescriptor[]): number {
+    this.build(descriptors);
+    this.log(`catalog: rebuilt with ${this.models.size} model(s), ${this.byCapability.size} capability(ies)`);
+    return this.models.size;
   }
 
   /**

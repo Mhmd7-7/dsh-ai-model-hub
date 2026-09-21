@@ -32,3 +32,6 @@ import './schema.test.ts';
 import './openai.test.ts';
 import './http-json.test.ts';
 import './comfyui.test.ts';
+import './discovery-ollama.test.ts';
+import './discovery-a1111.test.ts';
+import './discovery-comfyui.test.ts';

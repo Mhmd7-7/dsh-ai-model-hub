@@ -115,6 +115,40 @@ export interface PluginConfig {
    * deadline beyond the model's own.
    */
   invocationTimeoutMs?: number;
+  /**
+   * Whether to augment the catalog with models discovered from the configured
+   * engines at runtime.
+   *
+   * False (the default) means the catalog is exactly the document on disk and no
+   * engine is ever contacted for introspection. True means the hub asks every
+   * configured host what it currently has — a pulled Ollama model, a checkpoint
+   * dropped into ComfyUI's models directory — and republishes the catalog with
+   * those added, so no JSON edit is needed before the agent can use them.
+   *
+   * Static configuration always wins: a discovered model whose id a
+   * `models.json` entry already claims is dropped before the catalog is built,
+   * and every static entry precedes every discovered one. See
+   * `src/discovery/types.ts`.
+   *
+   * Discovery is fail-soft by design: an engine that is down is a warning and no
+   * models from that host, never a failed boot.
+   */
+  discoverModels?: boolean;
+  /**
+   * How long a discovery pass stays cached, in milliseconds. Defaults to 60000.
+   *
+   * list_models and invoke_model calls in quick succession must not re-hit every
+   * engine. The `refresh_model_discovery` tool bypasses this, which is the path
+   * for "I just pulled a new model and do not want to wait".
+   */
+  discoveryTtlMs?: number;
+  /**
+   * Budget for one engine's discovery pass, in milliseconds. Defaults to 5000.
+   *
+   * ComfyUI answers `/object_info` slowly on a cold start, so a deployment whose
+   * discovery times out should raise this rather than disable discovery.
+   */
+  discoveryTimeoutMs?: number;
 }
 
 /** Schemastery schema for {@link PluginConfig}. */
@@ -130,6 +164,9 @@ export const Config = z.object({
   healthIntervalMs: z.number().step(1).min(0).default(30_000),
   idleSweepIntervalMs: z.number().step(1).min(0).default(15_000),
   invocationTimeoutMs: z.number().step(1).min(0).default(600_000),
+  discoverModels: z.boolean().default(false),
+  discoveryTtlMs: z.number().step(1).min(0).default(60_000),
+  discoveryTimeoutMs: z.number().step(1).min(1).default(5_000),
 });
 
 /** Apply defaults for direct callers that bypass Loader validation. */
@@ -146,6 +183,9 @@ export function resolvePluginConfig(config: Partial<PluginConfig> | undefined): 
     healthIntervalMs: config?.healthIntervalMs ?? 30_000,
     idleSweepIntervalMs: config?.idleSweepIntervalMs ?? 15_000,
     invocationTimeoutMs: config?.invocationTimeoutMs ?? 600_000,
+    discoverModels: config?.discoverModels ?? false,
+    discoveryTtlMs: config?.discoveryTtlMs ?? 60_000,
+    discoveryTimeoutMs: config?.discoveryTimeoutMs ?? 5_000,
   };
 }
 

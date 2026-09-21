@@ -29,7 +29,7 @@ dsh-plugin/  ──imports──▶  @deepseek-ai/*        (DSH: a 0.1.x-rc line
 `src/` imports nothing from DeepSeek Harness. That is not tidiness — it is the
 survivability requirement. DSH is pre-1.0 and will change. Because the hub's
 entire logic sits behind a facade the plugin merely *binds to*, a breaking DSH
-change is confined to `dsh-plugin/`, and the hub's 182 tests keep running
+change is confined to `dsh-plugin/`, and the hub's library tests keep running
 without DSH installed at all.
 
 This is verified rather than asserted: it is the reason `npm test` needs no DSH
@@ -90,6 +90,48 @@ const mesh  = await hub.invokeModel({ capability: 'image_to_3d', inputs: [image.
 
 The router satisfies the second call by checking that some model declares
 `image` among its `inputTypes`. Neither model knows what a PNG or a GLB is.
+
+### 4. Host ↔ Model — runtime discovery
+
+A **host** is the only thing an operator configures: "ComfyUI is at
+`http://127.0.0.1:8188`". Everything about what that engine can do *right now* —
+which checkpoints are on disk, which of them can see, which node packs are
+installed — is answered by the engine itself and synthesized into
+`ModelDescriptor` entries:
+
+```
+   host.runtime.engine
+        │  ("comfyui", "ollama", "a1111", …)
+        ▼
+   ┌──────────────┐    ┌────────────────────┐    ┌───────────────┐
+   │  Discoverer  │───▶│ parse → map        │───▶│ merge         │───▶ ModelCatalog
+   │  /object_info│    │ (pure, testable)   │    │ static first  │
+   └──────────────┘    └────────────────────┘    └───────────────┘
+```
+
+Three rules keep it from becoming a second, weaker catalog:
+
+- **Discovery produces descriptors, never `ResolvedModel`.**
+  `resolveDescriptor()` remains the only thing that turns a descriptor into a
+  resolved model, so inheritance, defaults, and validation cannot diverge between
+  a hand-written entry and a discovered one. The router, runtime manager, and
+  adapters are unchanged by discovery — it only changes where descriptors come
+  from.
+- **No model identifier appears in discovery code.** Discoverers know an
+  engine's *response shape* and apply general heuristics. Capabilities are
+  decided by shape (does `/api/show` report a projector? does `/object_info`
+  contain a mesh export node?) rather than by matching a name, because a name
+  list is wrong the moment someone installs something new.
+- **The merge enforces precedence, not the catalog.**
+  `mergeCatalogConfig(static, discovered)` returns
+  `[...static, ...discovered.filter(id not already claimed)]`. `ModelCatalog`'s
+  constructor silently skips a later duplicate and logs a diagnostic; relying on
+  that would turn a deliberate rule into a logged accident, and would report a
+  conflict that was designed away as a load error.
+
+Discovery is off by default, fail-soft (an unreachable engine is a warning and no
+models from that host), cached per host for a TTL, and refreshable on demand —
+which is the answer to "I just pulled a model and do not want to wait".
 
 ## Data flow: "Create a futuristic city image"
 
@@ -159,10 +201,15 @@ primary choice. A cancellation is the caller's decision and is never retried.
 | You want to… | You change | Code required |
 |---|---|---|
 | Add a model on a supported engine | a JSON entry | none |
+| Let a supported engine report its own models | a flag: `discoverModels: true` | none |
 | Add a new kind of engine | one adapter + one `AdapterKind` value | ~1 file |
+| Let a new engine report its own models | one discoverer | ~1 file |
 | Add a capability | the vocabulary + an adapter handler | ~2 files |
 
-At no level do you touch the router, the DSH plugin, or DeepSeek Harness.
+At no level do you touch the router, the DSH plugin, or DeepSeek Harness. The
+discovery row is deliberately parallel to the adapter row: a new engine family is
+one adapter *and*, if it can introspect itself, one discoverer — and neither
+touches anything above it.
 
 ## The DSH coupling surface
 

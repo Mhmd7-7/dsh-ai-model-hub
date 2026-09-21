@@ -1,15 +1,54 @@
 # Adding a model
 
 There are three levels of change. Most requests are level 1, which needs **no
-code at all**.
+code at all** — and in many cases not even an edit, if the engine can report its
+own models.
 
 | Level | You want to… | You touch | Code |
 |---|---|---|---|
+| 0 | Use a model the engine already has | `discoverModels: true` | none |
 | 1 | Add a model on an already-supported engine | `config/models.json` | none |
 | 2 | Add a new *kind* of engine | one adapter file + one `AdapterKind` value | ~1 file |
 | 3 | Add a new capability | the vocabulary + adapter handlers | ~2 files |
 
 The router, the DSH plugin, and DeepSeek Harness are never touched at any level.
+
+---
+
+## Level 0 — let the engine report its own models
+
+If the machine can already see the model, you may not need a JSON entry at all.
+Set `discoverModels: true` on the plugin (or `discoverModels: true` on
+`ModelHub`), and the hub asks every configured host what it currently has:
+
+| Engine | Where it is asked | What comes back |
+|---|---|---|
+| Ollama | `/api/tags`, then `/api/show` per model | every pulled model, with vision detected and the declared context window |
+| ComfyUI | `/object_info` | every checkpoint file, with capabilities from the installed node packs |
+| A1111 / Forge | `/sdapi/v1/sd-models`, `/samplers`, `/options` | every checkpoint, with the loaded one preferred |
+
+Some properties worth knowing before you switch it on:
+
+- **It is off by default**, and off means no engine is ever contacted for
+  introspection. Turning it on cannot change the catalog's *static* half.
+- **A hand-written entry always wins.** A discovered model whose id a
+  `models.json` entry already claims is dropped before the catalog is built, so
+  `config/models.json` remains the place to pin a specific checkpoint, set exact
+  resources, attach a tuned workflow, or set a priority.
+- **An engine that is down is a warning, not a failure.** Discovery reports it,
+  contributes no models from that host, and the hub boots normally.
+- **Models appear as they are installed.** The result is cached per host for
+  `discoveryTtlMs` (60 s by default); the `refresh_model_discovery` tool bypasses
+  the cache, which is the path right after an `ollama pull`.
+- **Estimates are estimates.** A discovered model's `resources` come from a
+  reported file size where the engine provides one and from a filename heuristic
+  (does it say `xl`, `sdxl`, `flux`?) where it does not. They are good enough to
+  filter a small card out of the running; they are not a specification.
+
+Discovered models appear in `list_models` alongside static ones, with a note
+recording that they were discovered and where from. If you want to know exactly
+what discovery decided and why, run `refresh_model_discovery` — it reports what
+each engine contributed, what was added or removed, and every warning.
 
 ---
 
@@ -311,6 +350,72 @@ Then a model uses it with `"adapter": "my_engine"`.
 Nothing else. The router picks up the new capability automatically because it
 reads the vocabulary rather than enumerating it, and the agent learns about it
 from the generated capability snapshot.
+
+---
+
+## Level 2½ — a discoverer for an engine
+
+Optional, and only worth it if the engine can introspect itself. One file, the
+same size as an adapter, and it changes nothing above it.
+
+```ts
+// src/discovery/my-engine.ts
+import type { ModelDescriptor, ModelHost } from '../catalog/descriptor.ts'
+import type { HostDiscoverer } from './types.ts'
+import { DISCOVERED_PRIORITY, ioForCapabilities } from './types.ts'
+import { fetchJson, slugifyModelId } from './http.ts'
+
+export function createMyEngineDiscoverer(): HostDiscoverer {
+  return {
+    engine: 'my_engine',          // matches host.runtime.engine
+    aliases: ['my-engine'],       // other labels the same engine goes by
+    async discover(host: ModelHost, signal: AbortSignal): Promise<ModelDescriptor[]> {
+      const read = await fetchJson(`${host.runtime.endpoint}/models`, signal, 4000)
+      if (!read.ok) throw new Error(`could not list models: ${read.reason}`)
+
+      // 1. parse: the engine's response → your own candidate records.
+      //    Keep this and the mapping below as separate, pure functions so both
+      //    are testable against a canned payload with no server.
+      const capabilities = ['text_to_image'] as const
+
+      // 2. map: candidates → descriptors. Never a ResolvedModel.
+      return (read.value as { files: string[] }).files.map((name) => ({
+        id: slugifyModelId(name, host.runtime.engine),   // deterministic
+        name,
+        type: 'image_generation',
+        host: host.id,
+        capabilities: [...capabilities],
+        ...ioForCapabilities(capabilities),              // explicit, from CAPABILITY_IO
+        adapterConfig: { model: name },
+        resources: { vramGb: 6, ramGb: 6, requiresGpu: true },
+        priority: DISCOVERED_PRIORITY,                   // below the catalog default
+        tags: ['local', 'discovered'],
+      }))
+    },
+  }
+}
+```
+
+Four rules, all of which are tested for the shipped discoverers:
+
+1. **No model identifier in the file.** Match response *shapes*, and decide
+   capabilities from structural evidence. A list of known checkpoints is wrong
+   the moment someone installs one.
+2. **Return descriptors, not resolved models.** `resolveDescriptor()` is the only
+   thing that produces a `ResolvedModel`, and it still lives in
+   `catalog/registry.ts`. Routing, runtime, and adapters stay untouched.
+3. **Never throw for an unreachable engine or a surprising response.** Throw
+   *only* to report "this host could not be read", which the registry turns into
+   a warning and an empty result for that host. A malformed body should yield
+   fewer models, not an exception.
+4. **Set `inputTypes`/`outputTypes` explicitly** from `ioForCapabilities()`. They
+   drive chained-workflow compatibility: a discoverer that infers capabilities
+   but leaves these to the catalog's defaulting can silently break
+   `text_to_image → image_to_3d` even when each capability looks right.
+
+Register it in `defaultDiscoverers()` in `src/hub.ts` and export it from
+`src/index.ts`, then test it against a real in-process HTTP server returning
+canned JSON — the pattern in `tests/discovery-*.test.ts`.
 
 ---
 

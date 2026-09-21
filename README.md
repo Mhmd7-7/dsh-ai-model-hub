@@ -232,7 +232,7 @@ proof rather than a checklist:
 Registered tools:
   check_model_health   explain_routing    get_model_status   invoke_model
   list_artifacts       list_capabilities  list_models        start_model
-  stop_model
+  stop_model           refresh_model_discovery
 Catalog: model hub ready: 2 model(s), 2 capability(ies) from …/config/models.json
 ```
 
@@ -407,6 +407,41 @@ a saved `{client_id, prompt}` payload the adapter accepts directly.
 A wrong model name is a loud failure — the engine answers 404 and the invocation
 fails — never fixture text: there are no mock models in any shipped catalog. See
 [docs/adding-a-model.md](docs/adding-a-model.md).
+
+#### Let the engines list their own models
+
+Editing JSON is not the only way. Set `discoverModels: true` on the plugin and
+the hub also asks each configured host what it currently holds — a pulled Ollama
+model, a checkpoint dropped into ComfyUI's models directory, a LoRA someone
+installed — and adds those to the catalog with no edit at all:
+
+```yaml
+- insert:
+    - id: dsh-ai-model-hub
+      name: 'dsh-ai-model-hub'
+      config:
+        discoverModels: true
+```
+
+It is **off by default**, and off means no engine is ever contacted for
+introspection. With it on:
+
+- `config/models.json` still wins. A discovered model whose id a hand-written
+  entry claims is dropped before the catalog is built, so the file stays the
+  place to pin a checkpoint, set exact resources, attach a tuned workflow, or fix
+  a priority.
+- An engine that is down is a warning in the log, never a failed boot.
+- Results are cached per host for `discoveryTtlMs` (60 s). The
+  `refresh_model_discovery` tool bypasses the cache — that is the path right
+  after `ollama pull`.
+- Resource figures for discovered models are estimates (from a reported file
+  size where the engine gives one, from the filename otherwise), good enough to
+  keep an oversized model off a small card and not a specification.
+
+Discovery never bypasses `resolveDescriptor()`: it produces descriptors in the
+same shape as a `models.json` entry, and the router, runtime manager, and
+adapters are unchanged by it. See
+[docs/architecture.md](docs/architecture.md#4-host--model--runtime-discovery).
 
 Nothing is launched by default: `allowProcessLaunch` is `false`, so the hub talks
 to engines you run but will not start any. See
