@@ -109,7 +109,14 @@
       },
       "lifecycle": {
         "startable": false,
-        "stoppable": false
+        "stoppable": false,
+        "start": {
+          "command": "C:/ComfyUI/venv/Scripts/python.exe",
+          "args": ["main.py", "--listen", "127.0.0.1", "--port", "8188"],
+          "cwd": "C:/ComfyUI/src"
+        },
+        "startupTimeoutMs": 300000,
+        "awaitHealthOnStart": true
       },
       "resources": {
         "vramGb": 8,

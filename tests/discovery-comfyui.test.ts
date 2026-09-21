@@ -145,6 +145,9 @@ function typicalObjectInfo(overrides: Record<string, unknown> = {}): Record<stri
     ...CORE_GRAPH_NODES,
     VAEEncode: node({ pixels: ['IMAGE', {}], vae: ['VAE', {}] }),
     SaveGLB: node({ mesh: ['MESH', {}], filename_prefix: ['STRING', {}] }),
+    // A real 3D *generator*, which is what makes the 3D capabilities genuine.
+    // `SaveGLB` alone only proves a mesh could be written out.
+    Hunyuan3Dv2Conditioning: node({}),
     ...overrides,
   };
 }
@@ -227,6 +230,18 @@ describe('comfyui discovery: reading the node graph', () => {
     assert.deepEqual(introspection.files.map((file) => file.filename), ['good.safetensors']);
   });
 
+  it('never invents a model from a type marker in an enum slot', () => {
+    // A dynamically-typed input is declared as `["COMBO", {...}]`. Reading that
+    // as a filename publishes a model named after a type, which corresponds to no
+    // file on disk — observed live as a phantom `comfyui-combo` checkpoint.
+    const introspection = parseComfyObjectInfo({
+      LTXVAudioVAELoader: node({ ckpt_name: fileEnum(['COMBO']) }),
+      SomeLoader: node({ unet_name: fileEnum(['COMBO', 'real-model.safetensors']) }),
+      ScalarLoader: node({ lora_name: fileEnum(['INT', 'FLOAT', 'STRING', 'actual-lora.safetensors']) }),
+    });
+    assert.deepEqual(introspection.files.map((file) => file.filename), ['real-model.safetensors', 'actual-lora.safetensors']);
+  });
+
   it('tolerates a spec that is only the option list', () => {
     const introspection = parseComfyObjectInfo({ Bare: node({ ckpt_name: ['bare.safetensors'] }) });
     assert.deepEqual(introspection.files.map((file) => file.filename), ['bare.safetensors']);
@@ -239,12 +254,53 @@ describe('comfyui discovery: capability signals', () => {
     assert.equal(capabilities[0], 'text_to_image');
   });
 
+  it('does not turn a mesh writer into a generation capability', () => {
+    // The false positive this guards against, found on a real install:
+    // ComfyUI's mesh *writers* are core (SaveGLB, Save3DAdvanced, MeshToFile3D),
+    // but every image-to-model *generator* is an optional pack or a cloud API
+    // node. Keyed on the writer, discovery advertised image_to_3d on a machine
+    // with no way to serve it — and because a claimed capability routes work into
+    // a guaranteed failure, that is worse than omitting it.
+    const writersOnly = parseComfyObjectInfo({
+      ...loaderNodes(['a.safetensors']),
+      SaveGLB: node({ mesh: ['MESH', {}] }),
+      Save3DAdvanced: node({ mesh: ['MESH', {}] }),
+      MeshToFile3D: node({ mesh: ['MESH', {}] }),
+      DecimateMesh: node({ mesh: ['MESH', {}] }),
+      Load3D: node({ model_file: ['STRING', {}] }),
+    });
+    assert.deepEqual(
+      capabilitiesForComfyModel(writersOnly),
+      ['text_to_image'],
+      'writing a mesh is not generating one',
+    );
+    // The writers are still recorded, so an operator can see why nothing is claimed.
+    assert.ok(writersOnly.signals.some((signal) => /mesh export/.test(signal)));
+    assert.deepEqual(writersOnly.capabilities, []);
+  });
+
+  it('claims 3D when a generator is actually installed', () => {
+    const generators = [
+      'Hunyuan3Dv2Conditioning',
+      'TripoImageToModelNode',
+      'MeshyImageToModelNode',
+      'Rodin3D_Gen25_Image',
+    ];
+    for (const generator of generators) {
+      const introspection = parseComfyObjectInfo({ ...loaderNodes(['a.safetensors']), [generator]: node({}) });
+      assert.ok(
+        introspection.capabilities.includes('image_to_3d') && introspection.capabilities.includes('text_to_3d'),
+        `${generator} should grant 3D generation`,
+      );
+    }
+  });
+
   it('claims a capability only when the node pack that proves it is installed', () => {
     const without = capabilitiesForComfyModel(parseComfyObjectInfo(loaderNodes(['a.safetensors'])));
     assert.deepEqual(without, ['text_to_image'], 'no 3D node pack, so no 3D claim');
 
     const with3d = capabilitiesForComfyModel(parseComfyObjectInfo(typicalObjectInfo()));
-    assert.ok(with3d.includes('text_to_3d'), 'SaveGLB is evidence a mesh can be produced');
+    assert.ok(with3d.includes('text_to_3d'), 'Hunyuan3Dv2 is a 3D generator');
     assert.ok(with3d.includes('image_to_3d'));
     assert.ok(with3d.includes('image_to_image'), 'VAEEncode is evidence an image can be ingested');
   });
@@ -268,10 +324,12 @@ describe('comfyui discovery: capability signals', () => {
 
   it('keeps the signal table to node classes, never model names', () => {
     // A guard on the constraint itself: every pattern must be about a node
-    // class, so nothing here can become a model list by accident.
+    // class, so nothing here can become a model list by accident. A signal that
+    // grants nothing must be explicitly marked as provenance-only, so that
+    // "records something" and "advertises a capability" cannot be confused again.
     for (const signal of CAPABILITY_SIGNALS) {
       assert.ok(signal.label.length > 0);
-      assert.ok(signal.capabilities.length > 0);
+      assert.ok(signal.capabilities.length > 0 || signal.grants === false, `${signal.label} grants nothing but is not marked as such`);
       assert.ok(!/safetensors|\.ckpt|\.pt\b/i.test(signal.pattern.source), 'a checkpoint filename must never appear in the signal table');
     }
   });

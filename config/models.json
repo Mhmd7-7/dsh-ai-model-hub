@@ -52,7 +52,7 @@
         "vramGb": 0,
         "ramGb": 0
       },
-      "notes": "External process. Start ComfyUI yourself, then the hub can queue graphs against it."
+      "notes": "External process: start ComfyUI yourself, then the hub queues graphs against it. The shipped catalog never launches an engine — a test enforces that — so if you want `start_model` to launch this one, set startable/stoppable to true and add a `start` command here (or override this row in your profile's cordis.patch.yml). On this machine the working command is: C:/ComfyUI/venv/Scripts/python.exe main.py --listen 127.0.0.1 --port 8188, with cwd C:/ComfyUI/src. Allow five minutes for a cold start, and set the deployment's allowProcessLaunch: true."
     }
   ],
   "models": [
