@@ -56,6 +56,8 @@ export const ADAPTER_KINDS = [
   'openai_compatible',
   /** A ComfyUI server: queue a node graph on `/prompt`, poll `/history`, fetch `/view`. */
   'comfyui',
+  /** A local 3D-generation server: a Gradio queue API or a JSON HTTP route producing a mesh. */
+  'three_d',
   /** A command-line program invoked per request with a staged input directory. */
   'cli',
 ] as const;
@@ -269,6 +271,18 @@ export interface ModelHost {
   readonly adapter: AdapterKind;
   /** Endpoint, launch command, and engine label. */
   readonly runtime: RuntimeSpec;
+  /**
+   * Adapter settings shared by every model on this host.
+   *
+   * Per-model absence is the normal case and means "this host's settings apply".
+   * Discovery needs it because some facts belong to the *engine*, not to any one
+   * model — a 3D server reports which weights it loaded once, at launch, and a
+   * host that declares them lets the hub publish per-model descriptors from a
+   * single process. A model that states its own `adapterConfig` overrides this
+   * wholesale rather than merging into it, so the precedence is the same
+   * all-or-nothing rule the rest of the descriptor inheritance follows.
+   */
+  readonly adapterConfig?: AdapterConfig;
   /** Default lifecycle for every model on the host. */
   readonly lifecycle?: LifecycleSpec;
   /** Resource envelope reserved while any model on this host is running. */
@@ -380,12 +394,15 @@ export function parseHost(
     name: string;
     adapter: AdapterKind;
     runtime: RuntimeSpec;
+    adapterConfig?: AdapterConfig;
     lifecycle?: LifecycleSpec;
     resources?: ResourceSpec;
     health?: HealthCheckSpec;
     enabled?: boolean;
     notes?: string;
   } = { id, name, adapter, runtime };
+  const hostAdapterConfig = readOptionalRecord(raw, 'adapterConfig', path, collector);
+  if (hostAdapterConfig !== undefined) host.adapterConfig = hostAdapterConfig;
   const lifecycle = parseLifecycleSpec(raw['lifecycle'], `${path}.lifecycle`, collector);
   if (lifecycle !== undefined) host.lifecycle = lifecycle;
   const resources = parseResourceSpec(raw['resources'], `${path}.resources`, collector);
@@ -562,7 +579,12 @@ function parseRuntimeSpec(
   const args = readOptionalStringArray(raw, 'args', path, collector);
   const env = readOptionalRecord(raw, 'env', path, collector);
 
-  if (adapter === 'http_json' || adapter === 'openai_compatible' || adapter === 'comfyui') {
+  if (
+    adapter === 'http_json' ||
+    adapter === 'openai_compatible' ||
+    adapter === 'comfyui' ||
+    adapter === 'three_d'
+  ) {
     if (endpoint === undefined && raw['endpoint'] === undefined) {
       collector.add(`${path}.endpoint`, `is required for the ${adapter} adapter`);
     }
@@ -1014,7 +1036,11 @@ export function resolveDescriptor(
     outputTypes,
     version: descriptor.version ?? DEFAULTS.version,
     adapter,
-    adapterConfig: descriptor.adapterConfig ?? {},
+    // A descriptor that states any adapter settings replaces the host's wholesale:
+    // half-inheriting them would make an adapter's configuration depend on which
+    // keys it happened to read, which is exactly the kind of hidden coupling the
+    // descriptor/host split exists to remove.
+    adapterConfig: descriptor.adapterConfig ?? host?.adapterConfig ?? {},
     runtime,
     resources,
     limits: descriptor.limits ?? {},
@@ -1085,6 +1111,14 @@ function defaultHealthFor(adapter: AdapterKind): HealthCheckSpec {
     case 'comfyui':
       // ComfyUI answers `/system_stats` cheaply and without touching a model.
       return { kind: 'http', path: '/system_stats', timeoutMs: DEFAULTS.healthTimeoutMs };
+    case 'three_d':
+      // `none` here means "ask the adapter", not "assume healthy" — see the
+      // runtime manager's `runHealthCheck`. That is deliberate: a 3D engine's
+      // liveness proof is its Gradio API-description document, and which route
+      // that lives on depends on the Gradio version and on any mount prefix, so
+      // the adapter probes it. A descriptor that states `health.path` explicitly
+      // overrides this and gets a plain HTTP check instead.
+      return { kind: 'none' };
     case 'cli':
     case 'mock':
       return { kind: 'none' };

@@ -52,6 +52,17 @@ export interface AdapterInvocation {
   readonly inputs: readonly Artifact[];
   /** Capability-specific settings from the caller. */
   readonly options: Readonly<Record<string, unknown>>;
+  /**
+   * The caller's budget for this whole invocation, in milliseconds.
+   *
+   * Forwarded from {@link InvocationRequest.timeoutMs} as its own field rather
+   * than folded into {@link options}, because it is a property of the *call* and
+   * not of the capability: an adapter that can abandon work in flight — by
+   * cancelling an HTTP request, or killing a command — uses this to do so, and a
+   * setting buried in an options bag cannot be honoured that way. Omitted means
+   * the adapter's own declared budget applies.
+   */
+  readonly timeoutMs?: number;
   /** The store to write produced artifacts into. */
   readonly artifacts: ArtifactStore;
   /** Cancellation. Adapters must stop work and settle promptly when this fires. */

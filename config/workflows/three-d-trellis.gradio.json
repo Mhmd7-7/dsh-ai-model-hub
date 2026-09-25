@@ -1,0 +1,40 @@
+{
+  "$comment": "Step declaration for the `three_d` adapter, in the shape TRELLIS's official Gradio app exposes. It is a protocol declaration, not a captured graph: `apiName` is the name Gradio shows in the app's API docs, `bind` maps the engine's argument names to where this hub gets their values, and `resultFormat` marks the step whose output is the mesh. Copy it, point a catalog entry's `adapterConfig.stepsPath` at your copy, and edit the apiNames and argument order to match what your engine's own /gradio_api/config lists. Every other local image-to-3D demo (Hunyuan3D, Stable Fast 3D, TripoSR) has the same two-call shape and needs only the same edit.",
+  "protocol": "gradio",
+  "steps": [
+    {
+      "$comment": "Call 1: image in, an opaque in-memory state out plus a turntable preview video. `extraArgs` are the app's own defaults and are positional, so keep them in the app's order. The `$param:<name>` bindings let a caller override any of them through invoke_model's `options`, which is how the agent can ask for more sampling steps without this file changing.",
+      "apiName": "image_to_3d",
+      "bind": {
+        "image": "$input",
+        "multiimages": [],
+        "is_multiimage": false,
+        "seed": "$param:seed",
+        "ss_guidance_strength": "$param:ss_guidance_strength",
+        "ss_sampling_steps": "$param:ss_sampling_steps",
+        "slat_guidance_strength": "$param:slat_guidance_strength",
+        "slat_sampling_steps": "$param:slat_sampling_steps",
+        "multiimage_algo": "stochastic"
+      }
+    },
+    {
+      "$comment": "Call 2: the state from call 1 in, a GLB path out. `$0.0` is 'the first output of step 0' — the state, not the preview video. This is the step that declares resultFormat, which is what makes it the primary one: the adapter reads the mesh from here and everything else is a companion.",
+      "apiName": "extract_glb",
+      "bind": {
+        "state": "$0.0",
+        "mesh_simplify": "$param:mesh_simplify",
+        "texture_size": "$param:texture_size"
+      },
+      "resultFormat": "glb"
+    }
+  ],
+  "generationParameters": {
+    "seed": 0,
+    "ss_guidance_strength": 7.5,
+    "ss_sampling_steps": 12,
+    "slat_guidance_strength": 3,
+    "slat_sampling_steps": 12,
+    "mesh_simplify": 0.95,
+    "texture_size": 1024
+  }
+}

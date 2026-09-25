@@ -39,13 +39,21 @@ interface ArtifactIndex {
   readonly artifacts: Artifact[];
 }
 
-/** Extension used when the MIME type is unknown. */
+/**
+ * Extension used when the MIME type is unknown.
+ *
+ * A 3D mesh with no declared container falls back to `.glb`: it is what every
+ * current image-to-3D engine emits by preference and what a viewer can open
+ * without a companion material file. A producer that knows better passes
+ * `extension` or `mimeType` and never reaches this table — see
+ * `artifacts/formats.ts` for the sniffing that backs it up.
+ */
 const FALLBACK_EXTENSION: Readonly<Record<IoType, string>> = {
   text: '.txt',
   image: '.png',
   audio: '.wav',
   video: '.json',
-  model_3d: '.stl',
+  model_3d: '.glb',
   json: '.json',
   file: '.bin',
 };
@@ -68,7 +76,7 @@ const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   '.obj': 'model/obj',
   '.glb': 'model/gltf-binary',
   '.gltf': 'model/gltf+json',
-  '.ply': 'application/octet-stream',
+  '.ply': 'model/ply',
 };
 
 /**

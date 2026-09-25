@@ -21,6 +21,7 @@
 
 import './catalog.test.ts';
 import './artifacts.test.ts';
+import './machine.test.ts';
 import './router.test.ts';
 import './runtime.test.ts';
 import './integration.test.ts';
@@ -32,6 +33,7 @@ import './schema.test.ts';
 import './openai.test.ts';
 import './http-json.test.ts';
 import './comfyui.test.ts';
+import './three-d.test.ts';
 import './discovery-ollama.test.ts';
 import './discovery-a1111.test.ts';
 import './discovery-comfyui.test.ts';
