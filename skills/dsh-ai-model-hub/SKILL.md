@@ -48,7 +48,7 @@ calls answer everything:
 | `list_artifacts` | Recover an artifact id from an earlier step in the conversation |
 | `refresh_model_discovery` | Re-read every engine for models installed since the last check |
 | `start_model` | Start an engine that is not running, and wait for it to be healthy |
-| `stop_model` | Reclaim VRAM after a heavy workflow, or recover a wedged model |
+| `stop_model` | Release VRAM once the work is done — stop engines you cold-started, never the user's |
 
 ### When a model you expect is missing
 
@@ -95,11 +95,16 @@ Pass ids, never file paths. If an id is lost, `list_artifacts` recovers it. Sett
 `inputs: [{ id, type: 'image' }]` asserts the expected kind and fails loudly on a
 mismatch instead of silently feeding the wrong thing.
 
-## If the engine is not running, start it — do not refuse the task
+## If the engine is not running, start it — and finish the job
 
-An engine being down is the ordinary case, not a failure: Ollama's app may be closed,
-ComfyUI may not have been started since the last reboot. Handle it in four steps, in
-this order:
+**An engine being down is never the end of a request.** When the user asks for a
+capability and the engine that serves it is not running, the job is not to report that
+the engine is down — it is to bring the engine up and carry the request through to a
+finished artifact. Start it, wait for health, invoke, and do not stop until you hold an
+artifact or can name a concrete blocker that no available action removes.
+
+Ollama's app may be closed, ComfyUI may not have been started since the last reboot, a
+server may have died since an earlier call. Handle it in four steps, in this order:
 
 1. **Find what serves the capability.** `list_models({ capability: 'text_to_image' })`.
    Two models for one capability is normal — the router picks by priority and health.
@@ -119,9 +124,11 @@ when the deployment permits it. Reach for `start_model` explicitly to surface a
 startup failure separately from an invocation failure, or to preload an engine before
 a multi-step chain.
 
-Two things are never the answer: launching the engine yourself with a shell command,
-and telling the user the capability is unavailable because the engine is merely
-stopped.
+Two things are never the answer: telling the user the capability is unavailable because
+the engine is merely stopped, and reaching for a shell command while the hub can start
+the engine itself. But the hub cannot always do it, and the two subsections below cover
+exactly those cases: when the catalog carries no launch command, and when starting the
+engine by hand is the only way to keep the request alive.
 
 ### When a model is refused for resources
 
@@ -158,13 +165,81 @@ it. Two switches must agree before anything launches, and both are data:
 2. **The deployment** opts in through the plugin row's config:
    `allowProcessLaunch: true`.
 
-Only a live server needs `lifecycle`; a model that answers in-process needs none, and
-no shipped catalog declares one. The executable is
-matched by basename against the built-in allowlist of local inference runtimes
+Only a live server needs `lifecycle`; a model that answers in-process needs none. The
+shipped catalog declares one for the ComfyUI host, because this deployment opted into
+launching it. The executable is matched by basename against the built-in allowlist of
+local inference runtimes
 (`python`, `python.exe`, `ollama`, `comfyui`, `llama-server`, `blender`, …), so
 `C:/ComfyUI/venv/Scripts/python.exe` and `ollama` need nothing extra. A launcher
 outside that list needs `allowAnyCommand: true` — an explicit operator decision, so
 read `docs/security.md` before asking for it.
+
+### When `start_model` answers LIFECYCLE_UNSUPPORTED
+
+`start_model` has a second refusal that reads as final but is not:
+
+```
+model "comfyui_z_image_turbo" is not startable (no launch command configured).
+Start its engine yourself and it will be detected as available.
+```
+
+Nothing has forbidden launching here — unlike `UNSAFE_OPERATION`, no operator switch is
+off. The catalog simply never said *how* to launch this engine, so `start_model` has no
+command to run and `invoke_model` cannot cold-start it either; both fail on a cold
+engine. The fix is data, and it is the durable one:
+
+1. **Find the engine's real install and its own launch command.** Install logs,
+   `README`s, and the tree itself state it — a ComfyUI install with its own `venv` and
+   `src/main.py` launches as
+   `& '<root>\venv\Scripts\python.exe' '<root>\src\main.py'`.
+2. **Add a `lifecycle` block to the host entry in the active catalog** — the path pinned
+   by `configPath`, not a copy under `node_modules` — with `startable: true` and that
+   `start` command.
+3. **Confirm `allowProcessLaunch: true`** in the plugin row's config, so the descriptor
+   and the deployment agree.
+4. **Re-run `invoke_model`.** A startable model is cold-started by `invoke_model`
+   itself, so the request that just failed now completes without further help.
+
+The catalog is read at boot, so an edit may not take effect until the plugin reloads.
+Until it does, use the fallback below so the user's request still finishes.
+
+### When starting the engine yourself is the only way to finish
+
+If the catalog cannot be fixed and reloaded in time, bringing the engine up by hand is
+the recovery path that keeps the request alive — the exception to the rule against
+shell-launching, not a replacement for it. Two things matter:
+
+- **Start it detached from the agent's process supervision.** An engine running as a
+  sandboxed child of the agent can execute the whole job correctly and still fail at the
+  last step, reporting `PermissionError` on its own output file while the directory is
+  plainly writable. Launch it as an independent process (on Windows, a detached
+  `Start-Process`, not a job the agent tracks) and let the hub reach it over HTTP.
+- **Confirm health, then invoke.** The hub picks up an already-running engine on its next
+  probe; `check_model_health` confirms it, and the original request proceeds unchanged.
+
+Then go back and fix the catalog, so the next request cold-starts on its own.
+
+### Stop the engine when the job is done
+
+A cold-started engine keeps holding VRAM after the artifact is delivered, which is a real
+cost on a small GPU and the reason a later request can be refused for headroom. Once the
+work a request needed is finished and the artifact is in hand, shut the engine down again.
+
+- **Stop only what you started.** If the engine was already healthy before the request,
+  it is the user's process — leave it running. The `coldStart` field on the invocation
+  result, or the health check you took before starting it, tells you which case you are
+  in.
+- **Stop at the end of the chain, not between steps.** A pipeline such as
+  `text_to_image` → `image_to_3d` needs the engine for every step; stopping early forces
+  a costly reload and can fail the remaining steps.
+- **Use `stop_model`, and respect its refusal.** Shutdown needs `lifecycle.stoppable:
+  true` on the descriptor, the same way startup needs `startable: true`. If `stop_model`
+  refuses, say so plainly — do not kill the process yourself.
+- **If you launched the engine by hand as the fallback above, stop it by hand**, since
+  the hub does not own that process. Track the PID you started so you can.
+
+If the user is likely to ask for more from the same engine, say that you are leaving it
+warm rather than stopping it silently.
 
 ## Adding or changing a model: data, not code
 

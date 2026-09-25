@@ -1,5 +1,5 @@
 {
-  "$comment": "Active catalog. It contains real engines only — there are no mock entries and nothing here is synthetic. Adding a model means editing this file: copy the host and model entries you run from config/examples/real-models.example.json, adjust them, and restart DSH. No code changes are needed for any engine whose adapter kind is already registered. See docs/adding-a-model.md. The two hosts below are declared startable:false deliberately — the hub talks to the endpoints you already run and never launches anything until you opt in.",
+  "$comment": "Active catalog. It contains real engines only — there are no mock entries and nothing here is synthetic. Adding a model means editing this file: copy the host and model entries you run from config/examples/real-models.example.json, adjust them, and restart DSH. No code changes are needed for any engine whose adapter kind is already registered. See docs/adding-a-model.md. This machine opted into hub-managed process launching (the profile patch sets allowProcessLaunch: true), so the comfyui host declares a lifecycle and can be cold-started and stopped on demand; the ollama host stays startable:false, because its service is managed outside the hub.",
   "version": "1",
   "hosts": [
     {
@@ -45,14 +45,21 @@
         "timeoutMs": 3000
       },
       "lifecycle": {
-        "startable": false,
-        "stoppable": false
+        "startable": true,
+        "stoppable": true,
+        "startupTimeoutMs": 300000,
+        "awaitHealthOnStart": true,
+        "start": {
+          "command": "C:/ComfyUI/venv/Scripts/python.exe",
+          "args": ["main.py", "--lowvram"],
+          "cwd": "C:/ComfyUI/src"
+        }
       },
       "resources": {
         "vramGb": 0,
         "ramGb": 0
       },
-      "notes": "External process: start ComfyUI yourself, then the hub queues graphs against it. The shipped catalog never launches an engine — a test enforces that — so if you want `start_model` to launch this one, set startable/stoppable to true and add a `start` command here (or override this row in your profile's cordis.patch.yml). On this machine the working command is: C:/ComfyUI/venv/Scripts/python.exe main.py --listen 127.0.0.1 --port 8188, with cwd C:/ComfyUI/src. Allow five minutes for a cold start, and set the deployment's allowProcessLaunch: true."
+      "notes": "Startable on this machine: `invoke_model` cold-starts ComfyUI when it is down, `start_model` starts it explicitly, and `stop_model` releases its VRAM afterwards. The command is this install's own launcher — C:/ComfyUI/venv/Scripts/python.exe running src/main.py from C:/ComfyUI/src, which is where the venv's relative paths and the install log expect it to run from. `--lowvram` is required here, not a preference: the GPU has 8 GB and the Z-Image Turbo graph stages about 5.9 GB, which the default mode OOMs on. `startupTimeoutMs: 300000` is deliberate — loading the checkpoint and the text encoder genuinely takes minutes on this hardware, so a shorter budget would abort a start that was going to succeed. `awaitHealthOnStart: true` is what keeps `start_model` and a cold `invoke_model` from returning before /system_stats answers. Set startable/stoppable back to false (or override this row in your profile's cordis.patch.yml) if the engine should be managed by hand, and remember the deployment must also set allowProcessLaunch: true — a startable descriptor alone launches nothing."
     }
   ],
   "models": [

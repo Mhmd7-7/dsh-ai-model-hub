@@ -197,12 +197,23 @@ function settingsFor(invocation: AdapterInvocation): ComfySettings {
  * Accepts both shapes found in the wild: a bare graph, and the
  * `{ client_id, prompt }` envelope ComfyUI's own API examples use.
  *
- * @param path - the workflow file path, absolute or relative to the cwd.
+ * A relative path is resolved against `catalogDir` — the directory of the catalog
+ * that wrote the path — and only against the working directory when the hub was
+ * built from an in-memory catalog and no catalog directory exists. Resolving
+ * against `process.cwd()` here was a real bug: a host process is launched from
+ * wherever its launcher stood, so the shipped entry
+ * `config/workflows/z-image-turbo.api.json` resolved to
+ * `<host-cwd>/config/workflows/...` and failed with `ENOENT` while the template
+ * sat next to its own catalog.
+ *
+ * @param path - the workflow file path, absolute or relative to the catalog.
+ * @param catalogDir - the catalog's directory, when the hub was built from a file.
  * @returns the graph.
  * @throws ModelHubError when the file cannot be read or holds no graph.
  */
-async function loadWorkflowFile(path: string): Promise<ComfyGraph> {
-  const absolute = isAbsolute(path) ? path : resolve(process.cwd(), path);
+async function loadWorkflowFile(path: string, catalogDir: string | undefined): Promise<ComfyGraph> {
+  const base = catalogDir ?? process.cwd();
+  const absolute = isAbsolute(path) ? path : resolve(base, path);
   let text: string;
   try {
     text = await readFile(absolute, 'utf8');
@@ -490,7 +501,9 @@ export function createComfyUiAdapter(): ModelAdapter {
 
       const template =
         settings.workflow ??
-        (settings.workflowPath === undefined ? undefined : await loadWorkflowFile(settings.workflowPath));
+        (settings.workflowPath === undefined
+          ? undefined
+          : await loadWorkflowFile(settings.workflowPath, invocation.catalogDir));
       if (template === undefined) {
         throw new ModelHubError(
           'INVOCATION_FAILED',

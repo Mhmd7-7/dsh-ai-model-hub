@@ -63,6 +63,22 @@ export interface AdapterInvocation {
    * the adapter's own declared budget applies.
    */
   readonly timeoutMs?: number;
+  /**
+   * The directory of the catalog file this model was declared in, when the hub
+   * was built from a file.
+   *
+   * A path written in a catalog is relative to the catalog, not to the process
+   * that happens to be running: `adapterConfig.workflowPath` names a template
+   * that ships beside the catalog declaring it. An adapter that resolves such a
+   * path against `process.cwd()` resolves it against whatever directory a
+   * long-lived host was launched from — which has nothing to do with where the
+   * deployment keeps its files — and fails with an `ENOENT` for a file that is
+   * plainly there. Use this directory instead.
+   *
+   * Absent when the catalog was supplied in memory rather than read from disk;
+   * an adapter may then fall back to the working directory.
+   */
+  readonly catalogDir?: string;
   /** The store to write produced artifacts into. */
   readonly artifacts: ArtifactStore;
   /** Cancellation. Adapters must stop work and settle promptly when this fires. */

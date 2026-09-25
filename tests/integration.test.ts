@@ -516,10 +516,31 @@ describe('configuration loading', () => {
       loaded.config.models.some((model) => model.id === 'comfyui_z_image_turbo'),
       'the starter catalog should keep a real image model',
     );
-    // Every host is external: the hub talks to endpoints, it never launches one
-    // unless an operator opts in.
+    // The ComfyUI host declares a lifecycle on this machine, because the hub is
+    // what starts it and stops it: the operator opted in through the profile
+    // patch's `allowProcessLaunch`, and the descriptor says how. Pin the facts the
+    // deployment depends on, since each one is a failure mode on this hardware —
+    // a missing `--lowvram`, or a startup budget too short for a checkpoint load,
+    // would look like an engine that simply does not work.
+    const comfyui = (loaded.config.hosts ?? []).find((host) => host.id === 'comfyui');
+    assert.equal(comfyui?.lifecycle?.startable, true, 'the comfyui host must be cold-startable');
+    assert.equal(comfyui?.lifecycle?.stoppable, true, 'a cold-started engine must also be stoppable');
+    assert.match(comfyui?.lifecycle?.start?.command ?? '', /python(\.exe)?$/);
+    assert.deepEqual(comfyui?.lifecycle?.start?.args, ['main.py', '--lowvram']);
+    assert.equal(comfyui?.lifecycle?.start?.cwd, 'C:/ComfyUI/src');
+    assert.equal(comfyui?.lifecycle?.startupTimeoutMs, 300_000);
+    assert.equal(comfyui?.lifecycle?.awaitHealthOnStart, true);
+
+    // Ollama stays external: its service is managed outside the hub, and a
+    // catalog entry that claimed otherwise would spawn a second server.
+    const ollama = (loaded.config.hosts ?? []).find((host) => host.id === 'ollama');
+    assert.notEqual(ollama?.lifecycle?.startable, true, 'ollama must stay startable:false');
+
+    // Whatever else a deployment declares: a `startable` flag without a command is
+    // collapsed to false at resolution time, so the catalog must never say it.
     for (const host of loaded.config.hosts ?? []) {
-      assert.notEqual(host.lifecycle?.startable, true, `${host.id} must not be startable by default`);
+      if (host.lifecycle?.startable !== true) continue;
+      assert.notEqual(host.lifecycle.start, undefined, `${host.id} is startable but declares no start command`);
     }
   });
 

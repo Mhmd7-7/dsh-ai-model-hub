@@ -268,6 +268,9 @@ export function loadHubFromDisk(
 ): { hub: ModelHub; configPath: string; config: ModelCatalogConfig } {
   const { load, ...hubOptions } = options;
   const loaded = loadCatalogConfig(load ?? {});
-  const hub = new Hub({ ...hubOptions, config: loaded.config });
+  // The catalog's own path travels with it: a relative path written in a catalog
+  // (`adapterConfig.workflowPath`) is relative to the catalog, and this is the one
+  // place that knows where it was read from.
+  const hub = new Hub({ ...hubOptions, config: loaded.config, catalogPath: loaded.path });
   return { hub, configPath: loaded.path, config: loaded.config };
 }

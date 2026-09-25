@@ -15,6 +15,8 @@
  * @module dsh-ai-model-hub/hub
  */
 
+import { dirname } from 'node:path';
+
 import type { Artifact, ArtifactStore } from './artifacts/types.ts';
 import { LocalArtifactStore } from './artifacts/local-store.ts';
 import { AdapterRegistry } from './adapters/types.ts';
@@ -178,6 +180,24 @@ export interface ModelHubOptions {
   readonly discoveryTtlMs?: number;
   /** Budget for one engine's discovery pass, in milliseconds. Defaults to 5000. */
   readonly discoveryTimeoutMs?: number;
+  /**
+   * The catalog file this hub was built from, when it was built from one.
+   *
+   * It exists because a catalog is a document whose relative paths are relative
+   * to *itself*: `adapterConfig.workflowPath` names a file next to the catalog
+   * that declares it, and nothing about the process's working directory says
+   * where that is. A long-lived host is launched once, from wherever its launcher
+   * happened to be, and then serves catalogs in directories it has never stood
+   * in — so a configured relative path resolved against `process.cwd()` points
+   * somewhere unrelated and fails with a bare `ENOENT`. The hub knows the exact
+   * path it loaded, so it hands the directory to adapters as
+   * {@link AdapterInvocation.catalogDir}.
+   *
+   * Omitted when the catalog came from an in-memory document
+   * ({@link ModelHub.fromConfig}), in which case an adapter falls back to its
+   * previous behaviour.
+   */
+  readonly catalogPath?: string;
 }
 
 /** Optional per-call controls for {@link ModelHub.invokeModel}. */
@@ -258,6 +278,14 @@ export class ModelHub {
   private readonly ownsArtifacts: boolean;
   private readonly probeOptions: MachineProbeOptions | undefined;
   private readonly resourceTtlMs: number;
+  /**
+   * The directory the catalog was read from, when it was read from a file.
+   *
+   * Held resolved, because every use is "resolve a catalog-relative path against
+   * this", and the adapters that need it should not each re-derive it from
+   * {@link ModelHubOptions.catalogPath}.
+   */
+  private readonly catalogDir: string | undefined;
   private disposed = false;
 
   /**
@@ -289,6 +317,7 @@ export class ModelHub {
     this.staticConfig = options.config;
     this.probeOptions = resolveProbeOptions(options);
     this.resourceTtlMs = options.resourceTtlMs ?? DEFAULT_RESOURCE_TTL_MS;
+    this.catalogDir = options.catalogPath === undefined ? undefined : dirname(options.catalogPath);
 
     // Discovery is built before the catalog so the very first pass can be
     // started below, but its results are *not* folded in here: the constructor
@@ -1069,6 +1098,11 @@ export class ModelHub {
         // capability setting: an adapter uses it to abort its own in-flight work,
         // which an option bag cannot express.
         ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+        // Where the catalog lives, so an adapter can resolve a path the catalog
+        // wrote relative to itself. Not `process.cwd()`: a long-lived host's
+        // working directory is wherever its launcher stood, not where the
+        // deployment keeps its files.
+        ...(this.catalogDir === undefined ? {} : { catalogDir: this.catalogDir }),
         artifacts,
         signal: request.signal ?? new AbortController().signal,
         log: this.runtime.adapterLogger(modelId),

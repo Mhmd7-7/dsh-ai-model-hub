@@ -13,13 +13,14 @@
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
 import type { IncomingHttpHeaders, ServerResponse } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import type { ModelHub, ResolvedModel } from '../src/index.ts';
-import { ModelHub as Hub, renderMockPng } from '../src/index.ts';
+import { ModelHub as Hub, loadHubFromDisk, renderMockPng } from '../src/index.ts';
 import { readPngDimensions } from '../src/adapters/comfyui.ts';
 
 /** One captured request. */
@@ -564,6 +565,127 @@ describe('comfyui adapter: workflow templates from disk', () => {
         },
       );
     } finally {
+      await comfy.close();
+    }
+  });
+});
+
+describe('comfyui adapter: relative workflow paths belong to the catalog', () => {
+  /** The relative path a catalog writes, in the shape the shipped catalog uses. */
+  const RELATIVE_WORKFLOW = 'config/workflows/catalog-relative.api.json';
+
+  /** Where a `process.cwd()`-relative resolution would have looked. */
+  function cwdCandidate(): string {
+    return join(process.cwd(), 'config', 'workflows', 'catalog-relative.api.json');
+  }
+
+  /**
+   * Write a catalog plus the workflow template it names into a directory that is
+   * deliberately not the working directory, and return the catalog's path.
+   *
+   * @param root - the directory to write into.
+   * @param endpoint - the ComfyUI endpoint the model names.
+   * @param withTemplate - whether the template the catalog names actually exists.
+   * @returns the catalog file path.
+   */
+  async function writeCatalog(root: string, endpoint: string, withTemplate: boolean): Promise<string> {
+    const workflows = join(root, 'config', 'workflows');
+    await mkdir(workflows, { recursive: true });
+    if (withTemplate) {
+      await writeFile(join(workflows, 'catalog-relative.api.json'), JSON.stringify(templateGraph()), 'utf8');
+    }
+    const catalogPath = join(root, 'models.json');
+    await writeFile(
+      catalogPath,
+      JSON.stringify({
+        version: '1',
+        models: [
+          {
+            id: 'comfy_from_catalog',
+            name: 'ComfyUI from a catalog',
+            type: 'image_generation',
+            capabilities: ['text_to_image'],
+            adapter: 'comfyui',
+            runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint, path: '/prompt' },
+            adapterConfig: { workflowPath: RELATIVE_WORKFLOW, pollIntervalMs: 50 },
+            limits: { maxWidth: 512, maxHeight: 512 },
+            priority: 10,
+          },
+        ],
+      }),
+      'utf8',
+    );
+    return catalogPath;
+  }
+
+  it('resolves it against the catalog directory, not the working directory', async () => {
+    // Regression. The adapter resolved a relative `workflowPath` against
+    // `process.cwd()`, which for a long-lived host is wherever its launcher
+    // happened to be — here the DSH install directory — not the directory that
+    // holds the catalog and its templates. The shipped entry
+    // `config/workflows/z-image-turbo.api.json` therefore failed with `ENOENT`
+    // while the template sat next to its own catalog.
+    const comfy = await startComfy();
+    const root = await mkdtemp(join(tmpdir(), 'aimh-comfy-catalog-'));
+    roots.push(root);
+    try {
+      // The test only proves anything while the working directory does *not*
+      // hold the file: that is exactly the state a host process is in.
+      assert.equal(
+        existsSync(cwdCandidate()),
+        false,
+        'the working directory must not hold the template, or cwd-relative resolution would pass too',
+      );
+
+      const catalogPath = await writeCatalog(root, comfy.url, true);
+      const { hub } = loadHubFromDisk({
+        artifactRoot: root,
+        manageTimers: false,
+        log: () => {},
+        load: { configPath: catalogPath },
+      });
+
+      const result = await hub.invokeModel({ capability: 'text_to_image', prompt: 'a cat' });
+
+      assert.equal(result.modelId, 'comfy_from_catalog');
+      assert.equal(result.outputs.length, 1);
+      // The template was found beside its catalog and used, so the prompt reached
+      // the graph the fake engine received.
+      assert.equal(queuedGraph(comfy)['42']?.inputs?.['text'], 'a cat');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await comfy.close();
+    }
+  });
+
+  it('names the catalog-relative absolute path when the template is missing', async () => {
+    const comfy = await startComfy();
+    const root = await mkdtemp(join(tmpdir(), 'aimh-comfy-catalog-'));
+    roots.push(root);
+    try {
+      const catalogPath = await writeCatalog(root, comfy.url, false);
+      const { hub } = loadHubFromDisk({
+        artifactRoot: root,
+        manageTimers: false,
+        log: () => {},
+        load: { configPath: catalogPath },
+      });
+
+      await assert.rejects(
+        () => hub.invokeModel({ capability: 'text_to_image', prompt: 'a cat' }),
+        (error: Error) => {
+          assert.match(error.message, /could not be read/);
+          // The path in the message is the one beside the catalog, so a missing
+          // template is diagnosable without guessing which directory was used.
+          assert.ok(
+            error.message.includes(join(root, 'config', 'workflows', 'catalog-relative.api.json')),
+            `expected the catalog-relative path in: ${error.message}`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
       await comfy.close();
     }
   });

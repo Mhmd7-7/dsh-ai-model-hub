@@ -122,7 +122,7 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
       ...(config.configPath.length === 0 ? {} : { configPath: config.configPath }),
       anchors: catalogAnchors(config),
     });
-    hub = buildHub(loaded.config, config, log);
+    hub = buildHub(loaded.config, config, log, loaded.path);
     catalogPath = loaded.path;
     catalogHosts = loaded.config.hosts ?? [];
     log.info(
@@ -234,12 +234,16 @@ function catalogAnchors(config: ResolvedPluginConfig): string[] {
  * @param catalogConfig - the validated catalog document.
  * @param config - resolved plugin configuration.
  * @param log - the plugin's logger.
+ * @param catalogPath - the file the catalog was read from, so an adapter can
+ *   resolve a path the catalog wrote relative to itself rather than against the
+ *   host process's working directory.
  * @returns the hub.
  */
 function buildHub(
   catalogConfig: ModelCatalogConfig,
   config: ResolvedPluginConfig,
   log: { info: (message: string) => void; warn: (message: string) => void },
+  catalogPath: string,
 ): ModelHub {
   const effectiveConfig: ModelCatalogConfig = config.allowProcessLaunch
     ? catalogConfig
@@ -261,6 +265,9 @@ function buildHub(
 
   return new ModelHub({
     config: effectiveConfig,
+    // Where this catalog lives. A catalog's relative paths are relative to the
+    // catalog, and a long-lived host's working directory says nothing about that.
+    catalogPath,
     ...(config.artifactRoot.length === 0 ? {} : { artifactRoot: config.artifactRoot }),
     healthIntervalMs: config.healthIntervalMs,
     idleSweepIntervalMs: config.idleSweepIntervalMs,
