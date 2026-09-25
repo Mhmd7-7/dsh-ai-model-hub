@@ -96,6 +96,25 @@ export interface AdapterOutput {
 }
 
 /**
+ * What a health probe needs beyond the model itself.
+ *
+ * A probe is not an invocation, so it carries no {@link AdapterInvocation}; what
+ * it does need is any fact about the deployment that an invocation would have
+ * supplied. Today that is the catalog directory, because an adapter that loads a
+ * file the catalog named — `three_d`'s `stepsPath` — must resolve it the same way
+ * while probing as while generating. Otherwise a model with a perfectly good
+ * step declaration reports unhealthy, and the cold-start gate refuses work the
+ * engine could have served.
+ */
+export interface AdapterHealthContext {
+  /**
+   * The directory of the catalog file the model was declared in, when the hub was
+   * built from one. See {@link AdapterInvocation.catalogDir}.
+   */
+  readonly catalogDir?: string;
+}
+
+/**
  * One engine integration.
  *
  * Adapters are stateless with respect to a model: everything they need arrives
@@ -128,9 +147,11 @@ export interface ModelAdapter {
    *
    * @param model - the resolved model.
    * @param signal - cancellation for the probe itself.
+   * @param context - deployment facts an invocation would otherwise carry, so a
+   *   probe resolves a catalog-relative file exactly as an invocation does.
    * @returns the probe outcome.
    */
-  health(model: ResolvedModel, signal: AbortSignal): Promise<HealthReport>;
+  health(model: ResolvedModel, signal: AbortSignal, context?: AdapterHealthContext): Promise<HealthReport>;
 
   /**
    * Serve one request.

@@ -73,11 +73,16 @@ export type { ThreeDFormat, ThreeDFormatInfo, ThreeDSniffResult } from './artifa
 // ── Adapters ────────────────────────────────────────────────────────────────
 export { AdapterRegistry, lineLogger, silentLogger } from './adapters/types.ts';
 export type {
+  AdapterHealthContext,
   AdapterInvocation,
   AdapterLogger,
   AdapterOutput,
   ModelAdapter,
 } from './adapters/types.ts';
+// The one rule for the paths a catalog writes, shared by every adapter that reads
+// a file the catalog named — `comfyui`'s `workflowPath`, `three_d`'s `stepsPath`.
+export { describeAdapterPath, resolveAdapterPath } from './adapters/paths.ts';
+export type { AdapterPathOrigin, ResolvedAdapterPath } from './adapters/paths.ts';
 export { createMockAdapter, renderMockWav } from './adapters/mock.ts';
 export { createOpenAiCompatibleAdapter } from './adapters/openai.ts';
 export { createHttpJsonAdapter, extractImages, readPngSize } from './adapters/http-json.ts';

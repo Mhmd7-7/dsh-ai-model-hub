@@ -571,8 +571,8 @@ describe('comfyui adapter: workflow templates from disk', () => {
 });
 
 describe('comfyui adapter: relative workflow paths belong to the catalog', () => {
-  /** The relative path a catalog writes, in the shape the shipped catalog uses. */
-  const RELATIVE_WORKFLOW = 'config/workflows/catalog-relative.api.json';
+  /** The relative path a catalog at the package root writes. */
+  const ROOT_RELATIVE_WORKFLOW = 'config/workflows/catalog-relative.api.json';
 
   /** Where a `process.cwd()`-relative resolution would have looked. */
   function cwdCandidate(): string {
@@ -583,18 +583,33 @@ describe('comfyui adapter: relative workflow paths belong to the catalog', () =>
    * Write a catalog plus the workflow template it names into a directory that is
    * deliberately not the working directory, and return the catalog's path.
    *
+   * `nested` mirrors the shipped layout — catalog at `<root>/config/models.json`,
+   * template at `<root>/config/workflows/…`, path written as `workflows/…` —
+   * which is the arrangement the doubled-`config/` bug needed and which the
+   * original fixture, one level higher, could not catch.
+   *
    * @param root - the directory to write into.
    * @param endpoint - the ComfyUI endpoint the model names.
    * @param withTemplate - whether the template the catalog names actually exists.
+   * @param nested - whether to place the catalog inside a `config/` directory.
    * @returns the catalog file path.
    */
-  async function writeCatalog(root: string, endpoint: string, withTemplate: boolean): Promise<string> {
+  async function writeCatalog(
+    root: string,
+    endpoint: string,
+    withTemplate: boolean,
+    nested = false,
+  ): Promise<string> {
+    const configDir = nested ? join(root, 'config') : root;
+    // The template always lives in `<root>/config/workflows/`; what `nested`
+    // changes is where the *catalog* sits, and therefore how the catalog has to
+    // spell the path to it.
     const workflows = join(root, 'config', 'workflows');
     await mkdir(workflows, { recursive: true });
     if (withTemplate) {
       await writeFile(join(workflows, 'catalog-relative.api.json'), JSON.stringify(templateGraph()), 'utf8');
     }
-    const catalogPath = join(root, 'models.json');
+    const catalogPath = join(configDir, 'models.json');
     await writeFile(
       catalogPath,
       JSON.stringify({
@@ -607,7 +622,10 @@ describe('comfyui adapter: relative workflow paths belong to the catalog', () =>
             capabilities: ['text_to_image'],
             adapter: 'comfyui',
             runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint, path: '/prompt' },
-            adapterConfig: { workflowPath: RELATIVE_WORKFLOW, pollIntervalMs: 50 },
+            adapterConfig: {
+              workflowPath: nested ? 'workflows/catalog-relative.api.json' : ROOT_RELATIVE_WORKFLOW,
+              pollIntervalMs: 50,
+            },
             limits: { maxWidth: 512, maxHeight: 512 },
             priority: 10,
           },
@@ -622,9 +640,8 @@ describe('comfyui adapter: relative workflow paths belong to the catalog', () =>
     // Regression. The adapter resolved a relative `workflowPath` against
     // `process.cwd()`, which for a long-lived host is wherever its launcher
     // happened to be — here the DSH install directory — not the directory that
-    // holds the catalog and its templates. The shipped entry
-    // `config/workflows/z-image-turbo.api.json` therefore failed with `ENOENT`
-    // while the template sat next to its own catalog.
+    // holds the catalog and its templates. The template therefore could not be
+    // read while it sat beside its own catalog.
     const comfy = await startComfy();
     const root = await mkdtemp(join(tmpdir(), 'aimh-comfy-catalog-'));
     roots.push(root);
@@ -658,12 +675,48 @@ describe('comfyui adapter: relative workflow paths belong to the catalog', () =>
     }
   });
 
-  it('names the catalog-relative absolute path when the template is missing', async () => {
+  it('resolves the shipped layout, where the catalog itself sits in config/', async () => {
+    // The real arrangement, and the one the doubled-`config/` bug lived in: the
+    // catalog is `<pkg>/config/models.json`, so the template beside it is reached
+    // as `workflows/…`, NOT as `config/workflows/…` — that composes to
+    // `<pkg>/config/config/workflows/…`, which has never existed. This case fails
+    // the moment code and data disagree about the base, which is exactly what the
+    // original fixture (catalog at the temp root) could not detect.
+    const comfy = await startComfy();
+    const root = await mkdtemp(join(tmpdir(), 'aimh-comfy-shipped-'));
+    roots.push(root);
+    try {
+      assert.equal(
+        existsSync(join(process.cwd(), 'config', 'workflows', 'catalog-relative.api.json')),
+        false,
+        'the working directory must not hold the template',
+      );
+
+      const catalogPath = await writeCatalog(root, comfy.url, true, true);
+      assert.equal(catalogPath, join(root, 'config', 'models.json'));
+      const { hub } = loadHubFromDisk({
+        artifactRoot: root,
+        manageTimers: false,
+        log: () => {},
+        load: { configPath: catalogPath },
+      });
+
+      const result = await hub.invokeModel({ capability: 'text_to_image', prompt: 'a cat' });
+
+      assert.equal(result.outputs.length, 1);
+      assert.equal(queuedGraph(comfy)['42']?.inputs?.['text'], 'a cat');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await comfy.close();
+    }
+  });
+
+  it('names the catalog-relative absolute path and its base when the template is missing', async () => {
     const comfy = await startComfy();
     const root = await mkdtemp(join(tmpdir(), 'aimh-comfy-catalog-'));
     roots.push(root);
     try {
-      const catalogPath = await writeCatalog(root, comfy.url, false);
+      const catalogPath = await writeCatalog(root, comfy.url, false, true);
       const { hub } = loadHubFromDisk({
         artifactRoot: root,
         manageTimers: false,
@@ -675,11 +728,16 @@ describe('comfyui adapter: relative workflow paths belong to the catalog', () =>
         () => hub.invokeModel({ capability: 'text_to_image', prompt: 'a cat' }),
         (error: Error) => {
           assert.match(error.message, /could not be read/);
-          // The path in the message is the one beside the catalog, so a missing
-          // template is diagnosable without guessing which directory was used.
+          // Both halves of the diagnosis are in the message: the absolute path
+          // that was tried, and the base it was resolved against. A doubled
+          // `config/config/` is then visible without a debugger.
           assert.ok(
             error.message.includes(join(root, 'config', 'workflows', 'catalog-relative.api.json')),
             `expected the catalog-relative path in: ${error.message}`,
+          );
+          assert.ok(
+            error.message.includes(`resolved against the catalog directory "${join(root, 'config')}"`),
+            `expected the base directory in: ${error.message}`,
           );
           return true;
         },

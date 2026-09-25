@@ -88,7 +88,7 @@
       "notes": "Rename this to the checkpoint you run, or add one entry per checkpoint — several models may share the `ollama` host."
     },
     {
-      "$comment": "The template in config/workflows/ was captured from a real run. Z-Image Turbo is step-distilled: 8 steps at cfg 1.0 is its intended operating point.",
+      "$comment": "The template in config/workflows/ was captured from a real run. Z-Image Turbo is step-distilled: 8 steps at cfg 1.0 is its intended operating point. A relative `workflowPath` is relative to the catalog that writes it, and this catalog lives in `config/` — so `workflows/z-image-turbo.api.json` means `config/workflows/z-image-turbo.api.json`. Writing `config/workflows/…` here would compose to `config/config/workflows/…`, which has never existed.",
       "id": "comfyui_z_image_turbo",
       "name": "Z-Image Turbo (ComfyUI)",
       "type": "image_generation",
@@ -96,7 +96,7 @@
       "host": "comfyui",
       "capabilities": ["text_to_image"],
       "adapterConfig": {
-        "workflowPath": "config/workflows/z-image-turbo.api.json",
+        "workflowPath": "workflows/z-image-turbo.api.json",
         "steps": 8,
         "cfg": 1,
         "sampler": "res_multistep",

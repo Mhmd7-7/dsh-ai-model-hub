@@ -10,9 +10,10 @@
  */
 
 import { strict as assert } from 'node:assert';
+import { existsSync } from 'node:fs';
 import { readFile, rm, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import type { AdapterInvocation, AdapterOutput, ModelAdapter, ModelHubOptions } from '../src/index.ts';
@@ -25,6 +26,7 @@ import {
   loadCatalogConfig,
   loadCatalogFromAnchors,
   probeMachine,
+  resolveAdapterPath,
 } from '../src/index.ts';
 import type { HubEvent } from '../src/index.ts';
 
@@ -551,6 +553,54 @@ describe('configuration loading', () => {
     const ollama = loaded.config.models.find((model) => model.id === 'ollama_llama3_8b');
     assert.equal(ollama?.host, 'ollama');
     assert.equal(ollama?.capabilities[0], 'text_to_text');
+  });
+
+  it('writes every shipped file path so that it resolves from the catalog that names it', () => {
+    // The check that would have caught the doubled `config/`. Both shipped
+    // catalogs name templates (`workflowPath` for ComfyUI, `stepsPath` for 3D),
+    // and a relative path is only correct relative to *its own* catalog: a
+    // catalog in `config/` that writes `config/workflows/…` composes to
+    // `config/config/workflows/…`, which has never existed, and the deployment
+    // discovers that on its first invocation rather than here. Resolving each
+    // shipped path with the same helper the adapters use, against the directory
+    // the catalog was actually loaded from, turns that into a test failure.
+    const shipped = ['config/models.json', 'config/examples/real-models.example.json'];
+    let seen = 0;
+
+    for (const relative of shipped) {
+      const loaded = loadCatalogConfig({ configPath: relative });
+      const catalogDir = dirname(loaded.path);
+
+      const paths: { readonly where: string; readonly value: string }[] = [];
+      for (const model of loaded.config.models) {
+        for (const key of ['workflowPath', 'stepsPath'] as const) {
+          const value = model.adapterConfig?.[key];
+          if (typeof value === 'string' && value.length > 0) {
+            paths.push({ where: `${model.id}.adapterConfig.${key}`, value });
+          }
+        }
+      }
+      for (const host of loaded.config.hosts ?? []) {
+        const value = host.adapterConfig?.['stepsPath'];
+        if (typeof value === 'string' && value.length > 0) {
+          paths.push({ where: `host ${host.id}.adapterConfig.stepsPath`, value });
+        }
+      }
+
+      for (const { where, value } of paths) {
+        seen += 1;
+        const resolved = resolveAdapterPath(value, catalogDir);
+        assert.ok(
+          existsSync(resolved.absolute),
+          `${relative}: ${where} is "${value}", which resolves to "${resolved.absolute}" — that file does not ` +
+            'exist. A relative path in a catalog is relative to that catalog, not to the package root.',
+        );
+      }
+    }
+
+    // A guard on the guard: if the shipped catalogs ever stop naming templates, the
+    // loop above would pass vacuously and this test would stop protecting anything.
+    assert.ok(seen >= 3, `expected the shipped catalogs to name template files, found ${seen}`);
   });
 
   it('discovers the catalog by walking up from a nested directory', () => {

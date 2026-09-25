@@ -23,7 +23,7 @@
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
 import type { IncomingHttpHeaders, ServerResponse } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +33,7 @@ import type { MachineProfile, ModelHub } from '../src/index.ts';
 import {
   ModelHub as Hub,
   isLosslessJson,
+  loadHubFromDisk,
   mergeCatalogConfig,
   sniffThreeDFormat,
   threeDFormatOf,
@@ -118,6 +119,15 @@ const PNG_1X1 = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/AF/9UeOAAAAAElFTkSuQmCC',
   'base64',
 );
+
+/**
+ * The shipped TRELLIS step declaration, named absolutely.
+ *
+ * A path written in a catalog is relative to that catalog; this constant is the
+ * file's location in the repository, which is what a fixture with an in-memory
+ * catalog can hand to the adapter.
+ */
+const SHIPPED_TRELLIS_STEPS = join(process.cwd(), 'config', 'workflows', 'three-d-trellis.gradio.json');
 
 /** A test double for a local 3D engine. */
 interface FakeEngine {
@@ -869,6 +879,141 @@ describe('three_d configuration validation', () => {
   });
 });
 
+describe('three_d adapter: a step declaration belongs to the catalog that names it', () => {
+  /** A two-call Gradio protocol, the shape the shipped TRELLIS file uses. */
+  function stepsDocument(): string {
+    return JSON.stringify({
+      protocol: 'gradio',
+      steps: [
+        { apiName: 'image_to_3d', bind: { image: '$input' } },
+        { apiName: 'extract_glb', bind: { state: '$0.0' }, resultFormat: 'glb' },
+      ],
+    });
+  }
+
+  /**
+   * Write a catalog plus the step declaration it names, in the shipped layout.
+   *
+   * @param root - the directory to write into.
+   * @param endpoint - the engine's base URL.
+   * @param withDeclaration - whether the named file actually exists.
+   * @returns the catalog file path.
+   */
+  async function writeCatalog(root: string, endpoint: string, withDeclaration: boolean): Promise<string> {
+    const workflows = join(root, 'config', 'workflows');
+    await mkdir(workflows, { recursive: true });
+    if (withDeclaration) await writeFile(join(workflows, 'steps.gradio.json'), stepsDocument(), 'utf8');
+    const catalogPath = join(root, 'config', 'models.json');
+    await writeFile(
+      catalogPath,
+      JSON.stringify({
+        version: '1',
+        models: [
+          threeDModelWith(endpoint, {
+            protocol: 'gradio',
+            // Relative to the catalog, which sits in `config/` — the shipped
+            // spelling. `config/workflows/…` here would compose to
+            // `config/config/workflows/…`.
+            stepsPath: 'workflows/steps.gradio.json',
+            requestTimeoutMs: 5_000,
+            timeoutMs: 10_000,
+          }),
+        ],
+      }),
+      'utf8',
+    );
+    return catalogPath;
+  }
+
+  it('resolves it beside a catalog that sits in config/, for the probe and the invocation', async () => {
+    // The 3D half of the shared rule. This adapter used to resolve a bare
+    // `resolve(raw)` against `process.cwd()`, so the documented
+    // `config/workflows/…` spelling worked only for a host launched from the
+    // package root — and the health probe resolved it differently from the
+    // invocation that followed.
+    const engine = await startEngine();
+    const root = await mkdtemp(join(tmpdir(), 'aimh-3d-catalog-'));
+    roots.push(root);
+    try {
+      const catalogPath = await writeCatalog(root, engine.url, true);
+      const { hub } = loadHubFromDisk({
+        artifactRoot: root,
+        manageTimers: false,
+        machine: machine({}),
+        probeResources: false,
+        log: () => {},
+        load: { configPath: catalogPath },
+      });
+      try {
+        // The probe is the path that has no invocation to carry the catalog
+        // directory, so it is the one that used to report a configured model
+        // unhealthy.
+        const model = hub.catalog.requireModel('test_three_d');
+        const report = await hub.adapters.require('three_d').health(model, new AbortController().signal, {
+          catalogDir: join(root, 'config'),
+        });
+        assert.equal(report.healthy, true, report.detail);
+
+        const image = await hub.artifacts.put({
+          type: 'image',
+          bytes: new Uint8Array(PNG_1X1),
+          mimeType: 'image/png',
+          extension: '.png',
+          metadata: {},
+        });
+        const result = await hub.invokeModel({ capability: 'image_to_3d', inputs: [image.id] });
+        assert.equal(result.modelId, 'test_three_d');
+        assert.equal(result.outputs[0]?.type, 'model_3d');
+        assert.equal(result.outputs[0]?.metadata['format'], 'glb');
+      } finally {
+        await hub.dispose();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await engine.close();
+    }
+  });
+
+  it('names the absolute path it tried and the base it used when the file is missing', async () => {
+    const engine = await startEngine();
+    const root = await mkdtemp(join(tmpdir(), 'aimh-3d-catalog-'));
+    roots.push(root);
+    try {
+      const catalogPath = await writeCatalog(root, engine.url, false);
+      const { hub } = loadHubFromDisk({
+        artifactRoot: root,
+        manageTimers: false,
+        machine: machine({}),
+        probeResources: false,
+        log: () => {},
+        load: { configPath: catalogPath },
+      });
+      try {
+        const model = hub.catalog.requireModel('test_three_d');
+        const report = await hub.adapters.require('three_d').health(model, new AbortController().signal, {
+          catalogDir: join(root, 'config'),
+        });
+        assert.equal(report.healthy, false);
+        // Both halves of the diagnosis, so a convention mismatch is visible from
+        // the message alone — a doubled `config/config/` included.
+        assert.ok(
+          (report.detail ?? '').includes(join(root, 'config', 'workflows', 'steps.gradio.json')),
+          `expected the resolved path in: ${report.detail}`,
+        );
+        assert.ok(
+          (report.detail ?? '').includes(`resolved against the catalog directory "${join(root, 'config')}"`),
+          `expected the base directory in: ${report.detail}`,
+        );
+      } finally {
+        await hub.dispose();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await engine.close();
+    }
+  });
+});
+
 // ───────────────────────────── health ─────────────────────────────
 
 describe('three_d health checking', () => {
@@ -1227,7 +1372,13 @@ describe('3D engine discovery', () => {
         // checkpoint, so the host declares it and every model inherits it. This is
         // the *shipped* TRELLIS template, so the test proves the real file parses
         // and drives a real invocation rather than a fixture written to match.
-        stepsPath: 'config/workflows/three-d-trellis.gradio.json',
+        //
+        // Named absolutely because this hub is built from an in-memory catalog
+        // (`new Hub({ config })`), so there is no catalog directory for a relative
+        // path to be relative to. The catalog-relative spelling — the one a
+        // deployment writes — is covered in "a step declaration belongs to the
+        // catalog that names it".
+        stepsPath: SHIPPED_TRELLIS_STEPS,
         models: [
           {
             id: 'trellis_image_large',
@@ -1286,7 +1437,7 @@ describe('3D engine discovery', () => {
       // The host's protocol travelled down to the discovered model, and the
       // `models` declaration — which is a discovery directive, not an adapter
       // setting — did not.
-      assert.equal(config.stepsPath, 'config/workflows/three-d-trellis.gradio.json');
+      assert.equal(config.stepsPath, SHIPPED_TRELLIS_STEPS);
       assert.equal(config.models, undefined);
 
       const result = await hub.invokeModel({ capability: 'image_to_3d', inputs: [image.id] });

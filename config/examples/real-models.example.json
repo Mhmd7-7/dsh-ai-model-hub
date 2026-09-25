@@ -1,5 +1,5 @@
 {
-  "$comment": "Example: real local engines, all external (the hub never launches them). Copy the entries you actually run into models.json. Nothing here is required for Phase 1.",
+  "$comment": "Example: real local engines, all external (the hub never launches them). Copy the entries you actually run into models.json. Nothing here is required for Phase 1. One rule matters when you copy: a relative `workflowPath` or `stepsPath` is relative to the catalog that writes it, so the same template this file reaches as `../workflows/…` is `workflows/…` from a catalog at `config/models.json`. Never write `config/workflows/…`: a catalog in `config/` would compose that into `config/config/workflows/…`.",
   "version": "1",
   "hosts": [
     {
@@ -305,7 +305,7 @@
       "notes": "Smaller footprint. On an 8 GB card this is what routing should pick, while SDXL is rejected as too large."
     },
     {
-      "$comment": "A ComfyUI model. Unlike the A1111 entries above, the engine is driven by a graph template rather than by request fields, so `workflowPath` is required. The template in config/workflows/ was captured from a real run.",
+      "$comment": "A ComfyUI model. Unlike the A1111 entries above, the engine is driven by a graph template rather than by request fields, so `workflowPath` is required. The template was captured from a real run and lives in `config/workflows/`; this file is in `config/examples/`, so the catalog-relative spelling is `../workflows/…` — the same file from a catalog at `config/models.json` is `workflows/…`.",
       "id": "comfyui_z_image_turbo",
       "name": "Z-Image Turbo (ComfyUI)",
       "type": "image_generation",
@@ -313,7 +313,7 @@
       "host": "comfyui",
       "capabilities": ["text_to_image"],
       "adapterConfig": {
-        "workflowPath": "config/workflows/z-image-turbo.api.json",
+        "workflowPath": "../workflows/z-image-turbo.api.json",
         "steps": 8,
         "cfg": 1,
         "sampler": "res_multistep",
@@ -359,7 +359,7 @@
       "notes": "Use when running llama-server instead of Ollama."
     },
     {
-      "$comment": "A 3D model. `adapterConfig.stepsPath` points at the protocol declaration in config/workflows/, which names the two Gradio calls and how the second one receives the first one's state. The hub never shows any of this to the agent: `image_to_3d` is the whole interface.",
+      "$comment": "A 3D model. `adapterConfig.stepsPath` points at the protocol declaration in `config/workflows/`, which names the two Gradio calls and how the second one receives the first one's state — `../workflows/…` here, `workflows/…` from a catalog at `config/models.json`. The hub never shows any of this to the agent: `image_to_3d` is the whole interface.",
       "id": "trellis_image_large",
       "name": "TRELLIS image-large (image to 3D)",
       "type": "three_d_generation",
@@ -368,7 +368,7 @@
       "capabilities": ["image_to_3d"],
       "adapterConfig": {
         "protocol": "gradio",
-        "stepsPath": "config/workflows/three-d-trellis.gradio.json",
+        "stepsPath": "../workflows/three-d-trellis.gradio.json",
         "timeoutMs": 900000
       },
       "resources": {

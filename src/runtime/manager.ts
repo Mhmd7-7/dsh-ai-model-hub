@@ -60,6 +60,17 @@ export interface RuntimeManagerOptions {
    * sweeper. Defaults to 15000.
    */
   readonly idleSweepIntervalMs?: number;
+  /**
+   * The directory of the catalog file the models were declared in, when there is
+   * one.
+   *
+   * A probe is the manager's, not an adapter's, so this is how the adapters that
+   * load a file a catalog named (`three_d`'s `stepsPath`) resolve it while
+   * probing exactly as they do while generating. Without it a probe would have to
+   * fall back to the working directory and could declare a perfectly configured
+   * model unhealthy.
+   */
+  readonly catalogDir?: string;
 }
 
 /** Per-model mutable state. */
@@ -90,6 +101,8 @@ export class RuntimeManager {
   private readonly log: (message: string, fields?: Readonly<Record<string, unknown>>) => void;
   private readonly healthIntervalMs: number;
   private readonly idleSweepIntervalMs: number;
+  /** The catalog's directory, handed to adapters that resolve a catalog-relative file. */
+  private readonly catalogDir: string | undefined;
   private readonly states = new Map<string, ModelState>();
   private healthTimer: NodeJS.Timeout | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
@@ -105,6 +118,7 @@ export class RuntimeManager {
     this.log = options.log ?? ((): void => {});
     this.healthIntervalMs = options.healthIntervalMs ?? 30_000;
     this.idleSweepIntervalMs = options.idleSweepIntervalMs ?? 15_000;
+    this.catalogDir = options.catalogDir;
 
     this.syncCatalog();
   }
@@ -448,7 +462,14 @@ export class RuntimeManager {
         if (adapter === undefined) {
           return { healthy: false, checkedAt: started, detail: `no adapter for "${model.adapter}"` };
         }
-        return adapter.health(model, signal);
+        // The catalog directory travels with the probe: an adapter that loads a
+        // file the catalog named must resolve it the same way here as during an
+        // invocation, or a correctly configured model probes as broken.
+        return adapter.health(
+          model,
+          signal,
+          ...(this.catalogDir === undefined ? [] : [{ catalogDir: this.catalogDir }]),
+        );
       }
       case 'tcp': {
         const target = parseHostPort(model);

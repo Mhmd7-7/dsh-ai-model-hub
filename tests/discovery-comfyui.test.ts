@@ -749,7 +749,7 @@ describe('comfyui discovery: catalog integration', () => {
           type: 'image_generation',
           capabilities: ['text_to_image'],
           host: host.id,
-          adapterConfig: { workflowPath: 'config/workflows/mine.api.json', steps: 8 },
+          adapterConfig: { workflowPath: 'workflows/mine.api.json', steps: 8 },
           priority: 10,
         },
       ],
@@ -757,7 +757,7 @@ describe('comfyui discovery: catalog integration', () => {
     const catalog = new ModelCatalog(mergeCatalogConfig(staticConfig, [discovered]));
     const resolved = catalog.requireModel(discovered.id);
     assert.equal(resolved.name, 'Tuned checkpoint');
-    assert.equal(resolved.adapterConfig['workflowPath'], 'config/workflows/mine.api.json');
+    assert.equal(resolved.adapterConfig['workflowPath'], 'workflows/mine.api.json');
     assert.equal(resolved.priority, 10);
     assert.deepEqual(resolved.capabilities, ['text_to_image']);
     assert.deepEqual(catalog.loadDiagnostics, []);

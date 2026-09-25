@@ -29,12 +29,12 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
 
 import type { Capability } from '../catalog/capabilities.ts';
 import type { ResolvedModel } from '../catalog/descriptor.ts';
 import type { HealthReport } from '../types.ts';
 import { ModelHubError } from '../errors.ts';
+import { describeAdapterPath, resolveAdapterPath } from './paths.ts';
 import type { AdapterInvocation, AdapterOutput, ModelAdapter } from './types.ts';
 
 /** Capabilities this adapter can serve. */
@@ -197,14 +197,13 @@ function settingsFor(invocation: AdapterInvocation): ComfySettings {
  * Accepts both shapes found in the wild: a bare graph, and the
  * `{ client_id, prompt }` envelope ComfyUI's own API examples use.
  *
- * A relative path is resolved against `catalogDir` — the directory of the catalog
- * that wrote the path — and only against the working directory when the hub was
- * built from an in-memory catalog and no catalog directory exists. Resolving
- * against `process.cwd()` here was a real bug: a host process is launched from
- * wherever its launcher stood, so the shipped entry
- * `config/workflows/z-image-turbo.api.json` resolved to
- * `<host-cwd>/config/workflows/...` and failed with `ENOENT` while the template
- * sat next to its own catalog.
+ * The path is resolved by {@link resolveAdapterPath}: a relative
+ * `adapterConfig.workflowPath` is relative to the catalog that wrote it, never to
+ * `process.cwd()`. That rule is shared with the `three_d` adapter's `stepsPath`,
+ * because it is one convention and the two spellings drifted apart once already —
+ * `config/workflows/…` read from `<pkg>/config/models.json` composed into
+ * `<pkg>/config/config/workflows/…`, a path that has never existed, and the
+ * invocation failed on its first call.
  *
  * @param path - the workflow file path, absolute or relative to the catalog.
  * @param catalogDir - the catalog's directory, when the hub was built from a file.
@@ -212,16 +211,15 @@ function settingsFor(invocation: AdapterInvocation): ComfySettings {
  * @throws ModelHubError when the file cannot be read or holds no graph.
  */
 async function loadWorkflowFile(path: string, catalogDir: string | undefined): Promise<ComfyGraph> {
-  const base = catalogDir ?? process.cwd();
-  const absolute = isAbsolute(path) ? path : resolve(base, path);
+  const resolved = resolveAdapterPath(path, catalogDir);
   let text: string;
   try {
-    text = await readFile(absolute, 'utf8');
+    text = await readFile(resolved.absolute, 'utf8');
   } catch (error) {
     throw new ModelHubError(
       'CONFIG_ERROR',
-      `comfyui workflow file "${absolute}" could not be read: ${error instanceof Error ? error.message : String(error)}`,
-      { path: absolute },
+      `comfyui workflow file ${describeAdapterPath(resolved)} could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      { path: resolved.absolute, base: resolved.base ?? null, origin: resolved.origin },
     );
   }
   let parsed: unknown;
@@ -230,11 +228,11 @@ async function loadWorkflowFile(path: string, catalogDir: string | undefined): P
   } catch (error) {
     throw new ModelHubError(
       'CONFIG_ERROR',
-      `comfyui workflow file "${absolute}" is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      { path: absolute },
+      `comfyui workflow file ${describeAdapterPath(resolved)} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { path: resolved.absolute, base: resolved.base ?? null, origin: resolved.origin },
     );
   }
-  return unwrapGraph(parsed, absolute);
+  return unwrapGraph(parsed, resolved.absolute);
 }
 
 /**
@@ -422,7 +420,8 @@ export function createComfyUiAdapter(): ModelAdapter {
           ok: false,
           reason:
             'the comfyui adapter requires a workflow template: set `adapterConfig.workflowPath` to an ' +
-            'API-format workflow JSON, or `adapterConfig.workflow` to an inline graph',
+            'API-format workflow JSON — relative to the catalog that names it, e.g. `workflows/mine.api.json`, ' +
+            'or absolute — or `adapterConfig.workflow` to an inline graph',
         };
       }
       const supported = model.capabilities.filter((capability) => IMAGE_CAPABILITIES.includes(capability));

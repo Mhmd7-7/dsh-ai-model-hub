@@ -100,7 +100,7 @@ Two edits: a host for the process, a model for what it can generate.
         "endpoint": "http://127.0.0.1:8080"
       },
       "adapterConfig": {
-        "stepsPath": "config/workflows/three-d-trellis.gradio.json",
+        "stepsPath": "workflows/three-d-trellis.gradio.json",
         "models": [
           {
             "id": "trellis_image_large",
@@ -134,7 +134,10 @@ declaration the engine cannot back is dropped, not published.
 
 **`adapterConfig.stepsPath` describes the engine's call protocol.** The shipped
 [`config/workflows/three-d-trellis.gradio.json`](../config/workflows/three-d-trellis.gradio.json)
-is TRELLIS's:
+is TRELLIS's. The path above is `workflows/…` because that catalog lives in
+`config/`: a relative `stepsPath` — like ComfyUI's `workflowPath`, through the same
+`resolveAdapterPath()` — is relative to **the catalog that declares it**, never to
+the directory the hub process was started from:
 
 ```json
 {
@@ -338,7 +341,9 @@ cannot.
 **An engine with a different call chain** gets its own steps file. Copy
 `config/workflows/three-d-trellis.gradio.json`, change the `apiName`s and the
 argument order to match what your engine's `/gradio_api/config` lists, and point
-`stepsPath` at your copy.
+`stepsPath` at your copy — spelled relative to the catalog that names it
+(`workflows/…` for a catalog in `config/`, `../workflows/…` from
+`config/examples/`), or absolutely.
 
 Nothing in `src/`, in the router, in the DSH plugin, or in the agent's prompt
 changes. That is the test `tests/three-d.test.ts` enforces: it drives the same

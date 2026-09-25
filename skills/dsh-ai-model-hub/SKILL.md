@@ -265,6 +265,14 @@ A1111/Forge, ComfyUI, and 3D entries in `config/examples/real-models.example.jso
 ComfyUI needs an **API-format** workflow template (see `config/workflows/`), not a UI
 export — a UI-format graph is rejected.
 
+When an entry names a file — `workflowPath` for ComfyUI, `stepsPath` for 3D — write
+the path **relative to the catalog that names it**, never with a `config/` prefix:
+the shipped catalog is `config/models.json`, so the shipped template is
+`workflows/z-image-turbo.api.json`, and `config/workflows/z-image-turbo.api.json`
+there composes to `config/config/workflows/…`, which does not exist. Two spellings
+are available for the same file: `workflows/…` from a catalog in `config/`,
+`../workflows/…` from `config/examples/`. Absolute paths are used as written.
+
 A **3D engine** follows the same rule. A local image-to-3D server is a `three_d`
 model whose `adapterConfig` names the two calls its Gradio app exposes (or one, if
 it is a single-call engine), and a host's `adapterConfig.models` declares what that

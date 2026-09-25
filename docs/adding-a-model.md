@@ -250,7 +250,7 @@ Two things are specific to it:
   "adapter": "three_d",
   "runtime": { "engine": "trellis", "adapter": "three_d", "endpoint": "http://127.0.0.1:8080" },
   "adapterConfig": {
-    "stepsPath": "config/workflows/three-d-trellis.gradio.json",
+    "stepsPath": "workflows/three-d-trellis.gradio.json",
     "models": [
       { "id": "trellis_image_large", "name": "TRELLIS image-large",
         "capabilities": ["image_to_3d"], "vramGb": 12, "ramGb": 16, "requiresGpu": true }
@@ -263,6 +263,20 @@ Two things are specific to it:
 A single-call engine needs no steps file at all — `"protocol": "gradio", "apiName":
 "image_to_3d"` is enough. Full walkthrough, including the step-declaration format,
 the two transports, and troubleshooting: [three-d.md](three-d.md).
+
+**One rule covers every file a catalog names.** `workflowPath` (ComfyUI) and
+`stepsPath` (3D) are resolved by the same code, `resolveAdapterPath()`, and a
+relative path is relative to **the catalog that wrote it** — never to the working
+directory of whatever process loaded the hub, which for a long-lived server is
+wherever its launcher happened to stand. So an entry in `config/models.json` names
+the shipped TRELLIS template as `workflows/three-d-trellis.gradio.json`, because
+that catalog sits in `config/`; an entry copied from
+`config/examples/real-models.example.json` reaches the same file as
+`../workflows/three-d-trellis.gradio.json`, because that file sits one level
+deeper. Prefixing a path with `config/` is always wrong: from `config/models.json`
+it composes to `config/config/…`. Absolute paths are used as written, which is the
+escape hatch when a template lives outside the catalog's tree. A missing file
+fails loudly and names both the absolute path it tried and the base it used.
 
 ### Adding a model with lifecycle management
 

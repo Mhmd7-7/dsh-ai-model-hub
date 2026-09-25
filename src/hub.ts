@@ -372,6 +372,9 @@ export class ModelHub {
       log: this.log,
       ...(options.healthIntervalMs === undefined ? {} : { healthIntervalMs: options.healthIntervalMs }),
       ...(options.idleSweepIntervalMs === undefined ? {} : { idleSweepIntervalMs: options.idleSweepIntervalMs }),
+      // Probes go through the same catalog-relative rule as invocations, so a
+      // model whose file lives beside its catalog is not reported unhealthy.
+      ...(this.catalogDir === undefined ? {} : { catalogDir: this.catalogDir }),
     });
 
     if (options.manageTimers !== false) this.runtime.start();

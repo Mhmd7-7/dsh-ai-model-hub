@@ -32,6 +32,7 @@ import './workspace.test.ts';
 import './schema.test.ts';
 import './openai.test.ts';
 import './http-json.test.ts';
+import './paths.test.ts';
 import './comfyui.test.ts';
 import './three-d.test.ts';
 import './discovery-ollama.test.ts';

@@ -50,7 +50,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { extname, resolve } from 'node:path';
+import { extname } from 'node:path';
 import { measureThreeD, sniffThreeDFormat, threeDFormatInfo, threeDFormatOf } from '../artifacts/formats.ts';
 import type { ThreeDFormat } from '../artifacts/formats.ts';
 import type { Artifact } from '../artifacts/types.ts';
@@ -61,7 +61,8 @@ import type { HealthReport } from '../types.ts';
 import { isLosslessJson, isRecord } from '../util/validate.ts';
 import type { JsonValue } from '../util/validate.ts';
 import { withTimeout } from '../util/process.ts';
-import type { AdapterInvocation, AdapterLogger, AdapterOutput, ModelAdapter } from './types.ts';
+import { describeAdapterPath, resolveAdapterPath } from './paths.ts';
+import type { AdapterHealthContext, AdapterInvocation, AdapterLogger, AdapterOutput, ModelAdapter } from './types.ts';
 
 /** Capabilities this adapter can serve. Anything else is refused up front. */
 const THREE_D_CAPABILITIES: readonly Capability[] = ['image_to_3d', 'text_to_3d'];
@@ -214,11 +215,11 @@ function resolveConfigSync(model: ResolvedModel): ResolvedConfig {
  * @returns the resolved configuration.
  * @throws ModelHubError with `CONFIG_ERROR` when the step file is unusable.
  */
-async function resolveConfig(model: ResolvedModel): Promise<ResolvedConfig> {
+async function resolveConfig(model: ResolvedModel, catalogDir?: string): Promise<ResolvedConfig> {
   const where = `model "${model.id}" (adapter ${model.adapter})`;
   if (optionalString(model.adapterConfig, 'stepsPath') === undefined) return resolveConfigSync(model);
 
-  const merged = await readStepsFile(model, model.adapterConfig, where);
+  const merged = await readStepsFile(model, model.adapterConfig, where, catalogDir);
   // Re-resolve through a model whose adapter config is the merged document, so
   // there is exactly one implementation of "what do these fields mean".
   const withSteps: ResolvedModel = { ...model, adapterConfig: merged };
@@ -235,9 +236,16 @@ async function resolveConfig(model: ResolvedModel): Promise<ResolvedConfig> {
  * stay in the catalog, because those are deployment facts while the steps are a
  * property of the engine's API.
  *
+ * The path is resolved by {@link resolveAdapterPath} — the same rule, and the
+ * same wording in a failure, as the `comfyui` adapter's `workflowPath`. This
+ * adapter used to resolve a bare `resolve(raw)` against `process.cwd()`, which
+ * made the documented `config/workflows/…` spelling work only for a host that
+ * happened to be launched from the package root.
+ *
  * @param model - the resolved model.
  * @param config - the adapter configuration.
  * @param where - a label for error messages.
+ * @param catalogDir - the catalog's directory, when the hub was built from a file.
  * @returns the configuration with the file's steps merged in, or a reason the
  *   file could not be used.
  * @throws ModelHubError when the file is named but unreadable or malformed.
@@ -246,6 +254,7 @@ async function readStepsFile(
   model: ResolvedModel,
   config: Readonly<Record<string, unknown>>,
   where: string,
+  catalogDir: string | undefined,
 ): Promise<Readonly<Record<string, unknown>>> {
   const raw = optionalString(config, 'stepsPath');
   if (raw === undefined) return config;
@@ -256,14 +265,15 @@ async function readStepsFile(
     );
   }
 
-  const file = resolve(raw);
+  const resolved = resolveAdapterPath(raw, catalogDir);
+  const file = resolved.absolute;
   let text: string;
   try {
     text = await readFile(file, 'utf8');
   } catch (error) {
     throw configError(
-      `${where}: could not read the 3D step declaration at ${file}: ${error instanceof Error ? error.message : String(error)}`,
-      { modelId: model.id, stepsPath: file },
+      `${where}: could not read the 3D step declaration ${describeAdapterPath(resolved)}: ${error instanceof Error ? error.message : String(error)}`,
+      { modelId: model.id, stepsPath: file, base: resolved.base ?? null, origin: resolved.origin },
     );
   }
 
@@ -272,14 +282,16 @@ async function readStepsFile(
     parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as unknown;
   } catch (error) {
     throw configError(
-      `${where}: the 3D step declaration at ${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      { modelId: model.id, stepsPath: file },
+      `${where}: the 3D step declaration ${describeAdapterPath(resolved)} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { modelId: model.id, stepsPath: file, base: resolved.base ?? null, origin: resolved.origin },
     );
   }
   if (!isRecord(parsed)) {
-    throw configError(`${where}: the 3D step declaration at ${file} must be a JSON object`, {
+    throw configError(`${where}: the 3D step declaration ${describeAdapterPath(resolved)} must be a JSON object`, {
       modelId: model.id,
       stepsPath: file,
+      base: resolved.base ?? null,
+      origin: resolved.origin,
     });
   }
   // A `$comment`-style key is common in this repository's config files; the
@@ -706,13 +718,15 @@ export function createThreeDAdapter(): ModelAdapter {
      *
      * @param model - the resolved model.
      * @param signal - cancellation for the probe.
+     * @param context - the hub's catalog directory, so a probe resolves a
+     *   `stepsPath` exactly as an invocation would.
      * @returns the probe outcome; never throws.
      */
-    async health(model: ResolvedModel, signal: AbortSignal): Promise<HealthReport> {
+    async health(model: ResolvedModel, signal: AbortSignal, context?: AdapterHealthContext): Promise<HealthReport> {
       const started = Date.now();
       let config: ResolvedConfig;
       try {
-        config = await resolveConfig(model);
+        config = await resolveConfig(model, context?.catalogDir);
       } catch (error) {
         return {
           healthy: false,
@@ -784,7 +798,7 @@ export function createThreeDAdapter(): ModelAdapter {
         );
       }
 
-      const config = await resolveConfig(model);
+      const config = await resolveConfig(model, invocation.catalogDir);
       const source = requireInputImage(invocation);
       const timeoutMs = invocationTimeout(invocation, config);
       const log = invocation.log;

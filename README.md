@@ -427,6 +427,15 @@ template — an example is in
 [`config/workflows/z-image-turbo.api.json`](config/workflows/z-image-turbo.api.json),
 a saved `{client_id, prompt}` payload the adapter accepts directly.
 
+A catalog names those files (`workflowPath` for ComfyUI, `stepsPath` for 3D) with
+paths **relative to the catalog itself**, because a catalog can live anywhere and
+the process that reads it can be started from anywhere. The shipped
+[`config/models.json`](config/models.json) therefore says
+`workflows/z-image-turbo.api.json` — `config/` is that file's own directory —
+while the same template from inside `config/examples/` is
+`../workflows/z-image-turbo.api.json`. Absolute paths also work. A path that does
+not resolve names itself and its base in the error rather than guessing.
+
 A wrong model name is a loud failure — the engine answers 404 and the invocation
 fails — never fixture text: there are no mock models in any shipped catalog. See
 [docs/adding-a-model.md](docs/adding-a-model.md).
