@@ -133,6 +133,43 @@ Discovery is off by default, fail-soft (an unreachable engine is a warning and n
 models from that host), cached per host for a TTL, and refreshable on demand —
 which is the answer to "I just pulled a model and do not want to wait".
 
+### 5. Machine ↔ Router — measured resources
+
+The router can only respect a model's declared `resources` if it knows what the
+machine has, so `src/machine.ts` measures it and the catalog holds the result.
+Two pairs of numbers exist on purpose, and conflating them is the mistake the
+shape is built to prevent:
+
+| | Question | Source |
+|---|---|---|
+| **capacity** — `vramGb`, `ramGb` | could this model *ever* run here? | total, from `nvidia-smi` and `os.totalmem()` |
+| **headroom** — `availableVramGb`, `availableRamGb` | will it fit *right now*? | free, from `nvidia-smi`'s `memory.free` and `os.freemem()` |
+
+The split shows up in three places:
+
+- **Startup gating** asks about capacity. A model that does not fit an idle
+  machine is `unsupported` and says so; rechecking it against headroom would let a
+  busy moment mark a perfectly startable model permanently unroutable.
+- **Routing** asks about headroom for a model that is *already resident* and about
+  capacity for one the runtime can cold-start — because launching a stopped model
+  is precisely what makes the whole machine's memory available to it. A model that
+  is already loaded has, by definition, already paid for its memory, so counting
+  its own footprint against it would be double-entry.
+- **`availableResources()`** reports the probe's figures minus the declared
+  footprint of every resident model, which is the number an operator should compare
+  a model's requirements against.
+
+Two properties keep this honest rather than clever. An unmeasurable figure is
+**absent**, never guessed at, and the check falls back to capacity and says which
+basis it used — `needs 12 GiB VRAM but only 6.5 GiB is available (of 8 GiB total)`.
+And a measurement **expires**: the constructor starts one in the background (it
+cannot await a subprocess), routing re-measures when the last one is older than
+`resourceTtlMs`, and an invocation invalidates it outright, because a generation is
+the one thing here that genuinely changes how much memory is free.
+
+The probe is also the one place a command runs outside the model-command allowlist,
+and deliberately: see the note on `GPU_PROBE_COMMAND` in `src/machine.ts`.
+
 ## Data flow: "Create a futuristic city image"
 
 ```
@@ -154,6 +191,28 @@ Steps 4–8 are capability-generic. Step 6 is the only one that knows anything
 about images, and it is replaceable by a config edit. The two ids above are the
 ones the shipped `config/models.json` declares; a catalog that declares others
 produces the same shape with different names, because nothing above reads them.
+
+### The same flow for 3D
+
+```
+1  agent            invoke_model({ capability: 'image_to_3d', inputs: ['image_…'] })
+2  router           filter by capability        → mock_text_model        rejected
+                                                 → trellis_image_large   eligible
+                    check availability           → cold but startable
+                    check resources              → 12 GiB needed, 8 GiB available → rejected
+                                                 → sf3d_image_to_mesh    eligible
+3  runtime          ensureReady()               → starts the engine if configured to
+4  adapter          three_d.invoke()            → speaks the engine's own two calls
+5  artifacts        store.put()                 → model_3d_…glb
+6  hub              InvocationResult { outputs: [mesh], decision, durationMs }
+```
+
+The 3D adapter is deliberately *protocol-driven rather than engine-driven*: the
+call names, argument order, and result location come from the catalog entry, and
+the transport is one of two shapes the local ecosystem actually uses (Gradio's
+queue API, or a JSON HTTP route). That is what makes "add another 3D engine" a
+JSON edit, and it is enforced by tests that drive the adapter against a fake engine
+configured entirely by the test. See [three-d.md](three-d.md).
 
 ## Routing policy
 
@@ -202,6 +261,7 @@ primary choice. A cancellation is the caller's decision and is never retried.
 |---|---|---|
 | Add a model on a supported engine | a JSON entry | none |
 | Let a supported engine report its own models | a flag: `discoverModels: true` | none |
+| Add another local 3D engine | a JSON entry (+ a steps file if it needs one) | none |
 | Add a new kind of engine | one adapter + one `AdapterKind` value | ~1 file |
 | Let a new engine report its own models | one discoverer | ~1 file |
 | Add a capability | the vocabulary + an adapter handler | ~2 files |

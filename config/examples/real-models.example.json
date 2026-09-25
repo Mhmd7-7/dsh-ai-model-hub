@@ -123,6 +123,91 @@
         "ramGb": 16,
         "requiresGpu": true
       }
+    },
+    {
+      "$comment": "A local image-to-3D server. TRELLIS's official app is a Gradio app (`python app.py`, port 8080 by default), which is why this host uses the `three_d` adapter: that adapter speaks Gradio's queue API generically, so Hunyuan3D, Stable Fast 3D and TripoSR are configured the same way. The host-level `adapterConfig.models` tells the hub what this engine can generate; the discoverer intersects that with the routes the running app actually exposes, so a claim the engine cannot back is dropped rather than published. Set `startable`/`stoppable` to true and fill in `start` to let `start_model` launch it; note that a launcher outside `python` needs `allowAnyCommand`.",
+      "id": "trellis",
+      "name": "TRELLIS (image to 3D)",
+      "adapter": "three_d",
+      "runtime": {
+        "engine": "trellis",
+        "adapter": "three_d",
+        "endpoint": "http://127.0.0.1:8080"
+      },
+      "adapterConfig": {
+        "models": [
+          {
+            "id": "trellis_image_large",
+            "name": "TRELLIS image-large",
+            "capabilities": ["image_to_3d"],
+            "weightsPath": "microsoft/TRELLIS-image-large",
+            "vramGb": 12,
+            "ramGb": 16,
+            "requiresGpu": true,
+            "notes": "Emits GLB directly through the app's Extract GLB call."
+          }
+        ]
+      },
+      "health": {
+        "kind": "http",
+        "path": "/gradio_api/config",
+        "timeoutMs": 3000
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false,
+        "start": {
+          "command": "python",
+          "args": ["app.py", "--host", "127.0.0.1", "--port", "8080"],
+          "cwd": "C:/tools/TRELLIS"
+        },
+        "startupTimeoutMs": 600000,
+        "awaitHealthOnStart": true
+      },
+      "resources": {
+        "vramGb": 12,
+        "ramGb": 16,
+        "requiresGpu": true
+      },
+      "notes": "Two-call protocol (generate, then export GLB), declared in config/workflows/three-d-trellis.gradio.json."
+    },
+    {
+      "$comment": "The same adapter against a Hugging Face `app.py` variant, to show that switching 3D engine is a catalog edit. `image_to_3d` here is a single call that already returns a mesh, so the step declaration is inline and one line long.",
+      "id": "sf3d",
+      "name": "Stable Fast 3D (image to 3D)",
+      "adapter": "three_d",
+      "runtime": {
+        "engine": "sf3d",
+        "adapter": "three_d",
+        "endpoint": "http://127.0.0.1:8081"
+      },
+      "adapterConfig": {
+        "models": [
+          {
+            "id": "sf3d_image_to_mesh",
+            "name": "Stable Fast 3D",
+            "capabilities": ["image_to_3d"],
+            "vramGb": 6,
+            "ramGb": 12,
+            "requiresGpu": true,
+            "notes": "Lighter than TRELLIS; the right default on an 8 GB card."
+          }
+        ]
+      },
+      "health": {
+        "kind": "http",
+        "path": "/gradio_api/config",
+        "timeoutMs": 3000
+      },
+      "lifecycle": {
+        "startable": false,
+        "stoppable": false
+      },
+      "resources": {
+        "vramGb": 6,
+        "ramGb": 12,
+        "requiresGpu": true
+      }
     }
   ],
   "models": [
@@ -272,6 +357,53 @@
       "priority": 20,
       "tags": ["local", "gpu", "text"],
       "notes": "Use when running llama-server instead of Ollama."
+    },
+    {
+      "$comment": "A 3D model. `adapterConfig.stepsPath` points at the protocol declaration in config/workflows/, which names the two Gradio calls and how the second one receives the first one's state. The hub never shows any of this to the agent: `image_to_3d` is the whole interface.",
+      "id": "trellis_image_large",
+      "name": "TRELLIS image-large (image to 3D)",
+      "type": "three_d_generation",
+      "version": "1.0.0",
+      "host": "trellis",
+      "capabilities": ["image_to_3d"],
+      "adapterConfig": {
+        "protocol": "gradio",
+        "stepsPath": "config/workflows/three-d-trellis.gradio.json",
+        "timeoutMs": 900000
+      },
+      "resources": {
+        "vramGb": 12,
+        "ramGb": 16,
+        "diskGb": 20,
+        "requiresGpu": true
+      },
+      "priority": 10,
+      "tags": ["local", "gpu", "3d", "gradio"],
+      "notes": "Emits GLB. Needs the TRELLIS app running (`python app.py`) with the image-large checkpoint downloaded; the first call of a session pays for loading the weights."
+    },
+    {
+      "$comment": "The same capability from a lighter engine. Two models, one capability, and routing picks by declared resources and priority — no code knows either name.",
+      "id": "sf3d_image_to_mesh",
+      "name": "Stable Fast 3D (image to 3D)",
+      "type": "three_d_generation",
+      "version": "1.0.0",
+      "host": "sf3d",
+      "capabilities": ["image_to_3d"],
+      "adapterConfig": {
+        "protocol": "gradio",
+        "apiName": "image_to_3d",
+        "inputMode": "data_uri",
+        "previewIndex": 1,
+        "timeoutMs": 300000
+      },
+      "resources": {
+        "vramGb": 6,
+        "ramGb": 12,
+        "requiresGpu": true
+      },
+      "priority": 50,
+      "tags": ["local", "gpu", "3d", "low-vram"],
+      "notes": "Single-call engine, so the step declaration is three fields. Wins on an 8 GB card where TRELLIS is rejected as too large."
     }
   ]
 }

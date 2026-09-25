@@ -138,6 +138,10 @@ async function main(): Promise<void> {
     config: loaded.config,
     artifactRoot,
     manageTimers: false,
+    // No machine probe: this script exists to demonstrate chaining, and a live
+    // VRAM measurement would make a routing refusal depend on what else is
+    // running on the machine at that moment.
+    probeResources: false,
     log: () => {},
   });
 

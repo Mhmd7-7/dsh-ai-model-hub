@@ -258,6 +258,20 @@ export function registerDiscoveryTools(
                 ramGb: { type: 'number', required: true },
                 hasGpu: { type: 'boolean', required: true },
                 notes: { type: 'string', required: true },
+                availableVramGb: {
+                  type: 'number',
+                  description: 'Free VRAM when the probe could measure it, after subtracting the models already resident.',
+                },
+                availableRamGb: { type: 'number', description: 'Free RAM when the probe could measure it.' },
+                availableDiskGb: { type: 'number', description: 'Free disk where artifacts are written.' },
+                platform: { type: 'string' },
+                arch: { type: 'string' },
+                probedAt: { type: 'integer', description: 'When the figures were measured, as epoch milliseconds.' },
+                residentModelIds: {
+                  type: 'array',
+                  description: 'Models whose engine is currently resident, and whose declared needs are therefore already accounted for.',
+                  items: { type: 'string' },
+                },
               },
             },
             statuses: {
@@ -285,8 +299,13 @@ export function registerDiscoveryTools(
           },
         },
         render: (_args, value) => {
+          const free = [
+            value.machine.availableVramGb === undefined ? undefined : `${value.machine.availableVramGb} GiB VRAM free`,
+            value.machine.availableRamGb === undefined ? undefined : `${value.machine.availableRamGb} GiB RAM free`,
+          ].filter((part): part is string => part !== undefined);
           const lines = [
             `machine: ${value.machine.ramGb} GiB RAM, ${value.machine.vramGb} GiB VRAM, GPU ${value.machine.hasGpu ? 'present' : 'absent'}`,
+            ...(free.length === 0 ? [] : [`  currently: ${free.join(', ')}`]),
             `  ${value.machine.notes}`,
             '',
           ];

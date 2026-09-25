@@ -62,6 +62,12 @@ async function main(): Promise<void> {
       artifactRoot,
       // No background timers: this is a one-shot script.
       manageTimers: false,
+      // No machine probe either. Routing is real either way, but this demo is
+      // meant to be readable and repeatable: a live VRAM measurement would make
+      // the transcript differ between two runs on the same machine, and the
+      // numbers it prints are the declared requirements rather than the free
+      // memory. `npm run demo:3d` shows the probed figures.
+      probeResources: false,
       // A real engine's rejection can carry an entire response body. The hub keeps
       // all of it in the error; a terminal wants the first line of it.
       log: (message) => {

@@ -58,6 +58,7 @@
     "test:isolated": "node --test \"tests/*.test.ts\"",
     "demo": "node examples/vertical-slice.ts",
     "demo:workflow": "node examples/workflow.ts",
+    "demo:3d": "node examples/three-d-slice.ts",
     "install:plugin": "node --no-deprecation scripts/install-plugin.mjs",
     "doctor": "node scripts/doctor.mjs",
     "smoke": "node scripts/smoke.mjs"

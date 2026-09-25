@@ -88,8 +88,10 @@ can and cannot do.
 - `findModelsByCapability()` — enabled only, best candidate first
 - `findModelsByCapabilityIncludingDisabled()` — for explaining *why* a capability is unserved
 - `listCapabilities()` / `listUnservedCapabilities()`
-- `checkResources()` — compares declared needs against the detected machine
-- `machineProfile`
+- `checkResources(model, { live, detail })` — declared needs against the machine,
+  either total capacity or current headroom, with the measured figures in the reason
+- `replaceMachineProfile(profile)` — how a re-probe publishes its result
+- `machineProfile` — the profile routing currently uses
 
 Ordering is computed once at construction, so routing order is cheap and stable.
 
@@ -99,10 +101,35 @@ different causes** — nothing configured, everything disabled, or a config erro
 information, so it can say "video generation is unavailable here" instead of
 attempting it.
 
-**Resource checking is conservative.** When detection returned nothing (no
+**Resource checking is conservative, and asks one of two questions.** `live: false`
+(the default, used for status and start gating) compares declared needs against
+detected *totals*: a model that does not fit an idle machine can never run here.
+`live: true` (used by the router for a resident model) compares against current
+*headroom*, because starting a stopped model is precisely what makes the whole
+machine's memory available to it. When detection returned nothing (no
 `nvidia-smi`, probe skipped), every model reports as supported rather than
-refusing everything. Trying and failing loudly at the engine beats refusing work
+refusing everything — trying and failing loudly at the engine beats refusing work
 the machine could actually do.
+
+---
+
+## 3b. Machine probing — `src/machine.ts`
+
+Measures the machine, and reports **evidence** for every figure so a surprising
+routing decision is diagnosable rather than mysterious.
+
+- RAM total from `os.totalmem()`; RAM free from `MemAvailable` on Linux and
+  `os.freemem()` elsewhere, because `MemFree` excludes reclaimable page cache and
+  reads alarmingly low on a machine that has merely been reading files.
+- VRAM per device from `nvidia-smi --query-gpu=name,memory.total,memory.free`,
+  so a GPU another application has filled is *visible*.
+- Free disk where artifacts are written, via `statfs` — no subprocess.
+- `gpus[]`, `platform`, `arch`, and `probedAt`, so a consumer can tell a
+  measurement from a guess and an old one from a fresh one.
+
+An unmeasurable figure is left **absent**, never guessed at, and `reserveResources`
+subtracts resident use from headroom only — capacity is a property of the hardware
+and does not change because a model is loaded.
 
 ---
 
@@ -216,12 +243,30 @@ with a real engine, without leaking the override.
 | `openai_compatible` | ✅ implemented | Ollama, llama.cpp, vLLM, LM Studio, KoboldCpp — `text_to_text` and `image_understanding` |
 | `http_json` | ✅ implemented | A1111/Forge, and any JSON-in/JSON-out image engine |
 | `comfyui` | ✅ implemented | ComfyUI's graph API, driven by an API-format workflow template |
+| `three_d` | ✅ implemented | Local image-to-3D servers over Gradio's queue API or a JSON route — TRELLIS, Hunyuan3D, Stable Fast 3D, TripoSR. Parameterised by a declarative step list, so the engine specifics are catalog data. See [three-d.md](three-d.md) |
 | `cli` | contract ready | Process-per-request engines reading a local checkpoint |
 
 `cli` is registered as valid configuration — the catalog accepts it, and a model
 declaring it is reported honestly as `error` with "no adapter registered for
-kind …" rather than failing silently — but it has no implementation yet. It is
-documented Phase 4 work; see [roadmap.md](roadmap.md).
+kind …" rather than failing silently — but it has no implementation yet. It
+remains the right shape for a 3D engine that only ships a batch script rather than
+a server; see [roadmap.md](roadmap.md).
+
+### How much an adapter is allowed to know
+
+The `three_d` adapter is the clearest illustration of the rule, because 3D
+generation has no shared product API at all. It knows:
+
+- that a local engine may be a Gradio app or a JSON HTTP route;
+- that generation takes minutes, so it submits-and-collects rather than assuming
+  one response;
+- that an engine may split "generate" from "export", so a declaration can hold
+  several steps and one step's output can be bound into the next;
+- that the result is named rather than streamed — a path, a URL, or base64.
+
+It knows **no** engine, no model, no API name, and no argument order: every one of
+those arrives in `adapterConfig`, which is why the tests drive it against a fake
+engine configured entirely by the test.
 
 ---
 
@@ -263,6 +308,28 @@ writes `file://`, and an HTTP or object-store backend would use `https://` /
 Ids are `<type>_<slug>_<hash>`: sortable by kind, readable in a tool result, and
 content-derived.
 
+### 3D artifacts — `src/artifacts/formats.ts`
+
+A 3D artifact is not one format, so the format is treated as a *fact about the
+bytes* rather than a promise from the producer:
+
+- GLB, GLTF, OBJ, STL, and PLY are recognised by **sniffing** the leading bytes —
+  GLB's `glTF` magic, glTF's leading `{`, PLY's `ply`, binary STL's declared
+  triangle count matching the file length, OBJ's geometry lines.
+- A disagreement between what the engine claimed and what the bytes look like is
+  recorded on the artifact as `validationWarning` rather than raised as an error.
+  A server that answers `200` with an HTML error page is caught here instead of
+  becoming a mesh the next step cannot open — but refusing to store a mesh because
+  its header was unusual would be worse than storing it with an honest caveat.
+- `vertexCount` and `triangleCount` are **measured out of the file** — OBJ vertex
+  lines, glTF accessor counts (including from the embedded JSON chunk of a GLB),
+  STL facet counts — so a downstream step can judge a mesh's weight without
+  opening it.
+- A 3D artifact with no identified container falls back to `.glb` and
+  `application/octet-stream` rather than guessing `model/gltf-binary`: a consumer
+  that trusts a wrong MIME type fails while parsing, which is exactly the confusion
+  this module exists to prevent.
+
 ---
 
 ## 8. Execution guardrails — `src/util/process.ts`
@@ -274,7 +341,9 @@ reviewable in one place. The threat model: *the agent is untrusted input.*
   There is no string to inject into, so `; rm -rf /` in a prompt is inert data.
 - **An explicit allowlist.** Only well-known inference engines launch by default.
   Names outside it are refused with an actionable message until the operator sets
-  `allowAnyCommand` — an explicit, auditable decision.
+  `allowAnyCommand` — an explicit, auditable decision. The single deliberate
+  exception is the resource probe's `nvidia-smi`, whose command and arguments are
+  constants in `src/machine.ts`; see [security.md](security.md).
 - **Per-argument validation.** NUL bytes (which can truncate a C string and
   smuggle a different argument past a check) and line breaks (a strong signal
   that someone built a shell line) are refused, not sanitized.
@@ -303,20 +372,32 @@ invokeModel()              tryInvokeModel()        route()
 startModel()               stopModel()             restartModel()
 probeModel()               probeAll()
 getArtifact()              listArtifacts()
+machineProfile             resourceSnapshot()      availableResources()
+refreshResources()         ensureResourcesFresh()
 onEvent()                  dispose()
 ```
 
 `invokeModel` is the whole system in one call:
 
 ```
-resolve inputs → route → for each candidate (bounded, deterministic order):
-                     ensure ready (start if cold) → invoke → return artifacts
-                  on failure: record, emit, try the next candidate
+freshen resources → resolve inputs → route
+   → for each candidate (bounded, deterministic order):
+        ensure ready (start if cold) → invoke → return artifacts
+   → on failure: record, emit, try the next candidate
 ```
 
 `tryInvokeModel` returns a structured failure instead of throwing — the shape a
 model-facing tool wants, because a clear refusal is more useful to an agent than
 an exception when a capability is simply not deployed.
+
+**The resource verbs are why routing is resource-aware.** `machineProfile` is what
+the router reads; `resourceSnapshot()` is what was *measured*, with its evidence
+lines, which is the one to show an operator ("only 6.5 GiB free"); and
+`availableResources()` subtracts the declared footprint of every resident model,
+which is the number to compare a model's requirements against. `invokeModel`
+invalidates the measurement when it finishes — a generation is the one thing here
+that genuinely changes how much memory is free — and the next decision re-measures
+rather than trusting it.
 
 `HubEvent` gives observers (a log, a UI, a test) visibility into what happened
 without the hub knowing about any of them, and listener failures are contained so

@@ -50,6 +50,21 @@ allowlist means a careless paste cannot invent a new executable.
 A deployment that genuinely needs another engine sets `allowAnyCommand: true`,
 which is an explicit, auditable decision rather than a silent widening.
 
+### The one exception, and why it is not a hole
+
+The resource probe runs `nvidia-smi`, which is not on that allowlist, and it widens
+whatever policy it is given by exactly that one binary (see `GPU_PROBE_COMMAND` in
+`src/machine.ts`).
+
+The allowlist exists to bound what the hub launches **on a model's behalf**, where
+the catalog — a document that can be copied from anywhere — supplies the command.
+The probe is not that: the executable is a constant in the source, the arguments
+are a constant in the source, the output is parsed as numbers, and the only failure
+mode of a missing or impersonated `nvidia-smi` is a reported GPU figure that is
+wrong. Blocking it would mean a machine whose allowlist has been narrowed reports
+no GPU, and a machine that reports no GPU disqualifies every GPU model — a silent,
+systematic wrong answer in exchange for no security property.
+
 ### 3. The agent cannot name a command
 
 This is the part the allowlist cannot provide on its own. Look at

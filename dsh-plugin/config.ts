@@ -116,6 +116,28 @@ export interface PluginConfig {
    */
   invocationTimeoutMs?: number;
   /**
+   * Whether the hub probes this machine's resources, and how.
+   *
+   * True (the default) means routing decisions are made against measured RAM,
+   * VRAM, and free space rather than against declared totals — which is what lets
+   * the router refuse a model that will not fit *now* instead of starting it and
+   * letting the engine die with an out-of-memory error.
+   *
+   * Set it to `false` for a deployment where spawning `nvidia-smi` is undesirable;
+   * resource checks then fall back to whatever the catalog declares, and no engine
+   * is ever refused for resource reasons.
+   */
+  probeResources?: boolean;
+  /**
+   * How long a machine measurement stays fresh enough to route against.
+   *
+   * Defaults to 30000. The probe runs again when the last measurement is older
+   * than this, and always after an invocation. Raising it reduces subprocess
+   * churn on a busy deployment; lowering it makes another application's memory use
+   * visible sooner.
+   */
+  resourceTtlMs?: number;
+  /**
    * Whether to augment the catalog with models discovered from the configured
    * engines at runtime.
    *
@@ -164,6 +186,8 @@ export const Config = z.object({
   healthIntervalMs: z.number().step(1).min(0).default(30_000),
   idleSweepIntervalMs: z.number().step(1).min(0).default(15_000),
   invocationTimeoutMs: z.number().step(1).min(0).default(600_000),
+  probeResources: z.boolean().default(true),
+  resourceTtlMs: z.number().step(1).min(0).default(30_000),
   discoverModels: z.boolean().default(false),
   discoveryTtlMs: z.number().step(1).min(0).default(60_000),
   discoveryTimeoutMs: z.number().step(1).min(1).default(5_000),
@@ -183,6 +207,8 @@ export function resolvePluginConfig(config: Partial<PluginConfig> | undefined): 
     healthIntervalMs: config?.healthIntervalMs ?? 30_000,
     idleSweepIntervalMs: config?.idleSweepIntervalMs ?? 15_000,
     invocationTimeoutMs: config?.invocationTimeoutMs ?? 600_000,
+    probeResources: config?.probeResources ?? true,
+    resourceTtlMs: config?.resourceTtlMs ?? 30_000,
     discoverModels: config?.discoverModels ?? false,
     discoveryTtlMs: config?.discoveryTtlMs ?? 60_000,
     discoveryTimeoutMs: config?.discoveryTimeoutMs ?? 5_000,

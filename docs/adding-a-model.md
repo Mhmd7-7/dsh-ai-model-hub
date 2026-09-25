@@ -131,6 +131,35 @@ Everything else is documentation. These five decide behaviour:
 | `lifecycle.idleTimeoutMs` | stop after this much idle time. **Off by default** — unloading a model a user is about to reuse is worse than holding VRAM |
 | `lifecycle.awaitHealthOnStart` | set `false` for an engine that accepts work before it reports ready |
 
+### Declaring `resources` honestly
+
+`vramGb` and `ramGb` are checked against a **measured** machine, and the check asks
+two different questions:
+
+- **Against total capacity** when the model is not loaded: *could this ever run
+  here?* A model that fails this is `unsupported`, permanently, and says why.
+- **Against current headroom** when the model *is* resident: *will it fit beside
+  what is already loaded?* This is what stops a second model being started onto a
+  GPU the first one has filled, which on a single-GPU machine is the difference
+  between a routing refusal and a CUDA out-of-memory crash inside the engine.
+
+So declare the model's own footprint — the weights plus the working memory that
+engine needs — and nothing about the machine. `requiresGpu: true` disqualifies the
+model on a machine with no detected accelerator, which is usually what you want for
+anything diffusion-based.
+
+```
+get_model_status({ modelId: '…' })     # the machine's figures, including free VRAM
+                                       # and the models already counted against it
+explain_routing({ capability: '…' })   # the exact shortfall that rejected a model
+```
+
+Measurement is on by default (`probeResources: true`, re-taken after
+`resourceTtlMs`). Turning it off makes resource checks fall back to the declared
+profile and nothing is refused for resource reasons — useful where spawning
+`nvidia-smi` is undesirable, at the cost of the crash-instead-of-refusal failure
+mode above.
+
 ### Validation tells you everything at once
 
 ```sh
@@ -200,6 +229,40 @@ Give SDXL `priority: 10` and SD 1.5 `priority: 80`, and routing picks SDXL on a
 capable machine while automatically rejecting it — and falling through to SD
 1.5 — on an 8 GB card, because SDXL's declared `vramGb` exceeds what was
 detected. That is resource-aware routing working with **zero** routing code.
+
+### A 3D model
+
+The `three_d` adapter ships, so a local image-to-3D engine is a catalog entry too.
+Two things are specific to it:
+
+- **The host declares the engine's call protocol**, because which endpoints a 3D
+  app exposes is a property of the app rather than of one checkpoint. A host that
+  declares `steps` or `stepsPath` shares it with every model on that engine.
+- **A 3D server cannot list its own models.** It loaded its weights at launch, so
+  the host declares them under `adapterConfig.models`, and discovery *verifies*
+  each declaration against the API surface the engine actually exposes before
+  publishing it.
+
+```json
+{
+  "id": "trellis",
+  "name": "TRELLIS (image to 3D)",
+  "adapter": "three_d",
+  "runtime": { "engine": "trellis", "adapter": "three_d", "endpoint": "http://127.0.0.1:8080" },
+  "adapterConfig": {
+    "stepsPath": "config/workflows/three-d-trellis.gradio.json",
+    "models": [
+      { "id": "trellis_image_large", "name": "TRELLIS image-large",
+        "capabilities": ["image_to_3d"], "vramGb": 12, "ramGb": 16, "requiresGpu": true }
+    ]
+  },
+  "resources": { "vramGb": 12, "ramGb": 16, "requiresGpu": true }
+}
+```
+
+A single-call engine needs no steps file at all — `"protocol": "gradio", "apiName":
+"image_to_3d"` is enough. Full walkthrough, including the step-declaration format,
+the two transports, and troubleshooting: [three-d.md](three-d.md).
 
 ### Adding a model with lifecycle management
 

@@ -123,6 +123,19 @@ Two things are never the answer: launching the engine yourself with a shell comm
 and telling the user the capability is unavailable because the engine is merely
 stopped.
 
+### When a model is refused for resources
+
+`explain_routing` and `invoke_model` name the shortfall — *"needs 12 GiB VRAM but
+only 6.5 GiB is available (of 8 GiB total)"*. That is the hub measuring this machine
+and refusing to start something that would die inside the engine, so it is a real
+answer, not a bug: report it, and if another local model is holding the memory,
+`stop_model` on it is the fix. `get_model_status` reports the machine's figures,
+including what is free and which resident models are already counted against it.
+
+A model refused for **capacity** (it does not fit even an idle machine) is
+permanently `unsupported` here; a model refused for **headroom** becomes routable
+again once the memory is free.
+
 ### When `start_model` answers UNSAFE_OPERATION
 
 That is `allowProcessLaunch: false` — the deployment has forbidden the hub from
@@ -173,9 +186,19 @@ exact path it loaded), then add an entry:
 
 Lower `priority` wins. No router, prompt, or DSH change is needed. Engine-specific
 recipes are in `docs/adding-a-model.md`, with ready-to-copy Ollama, llama.cpp,
-A1111/Forge, and ComfyUI entries in `config/examples/real-models.example.json`.
+A1111/Forge, ComfyUI, and 3D entries in `config/examples/real-models.example.json`.
 ComfyUI needs an **API-format** workflow template (see `config/workflows/`), not a UI
 export — a UI-format graph is rejected.
+
+A **3D engine** follows the same rule. A local image-to-3D server is a `three_d`
+model whose `adapterConfig` names the two calls its Gradio app exposes (or one, if
+it is a single-call engine), and a host's `adapterConfig.models` declares what that
+engine can generate — discovery verifies the declaration against the API surface
+the engine actually serves before publishing it. `docs/three-d.md` has the format,
+the shipped TRELLIS template, and every error message you are likely to see.
+`text_to_3d` is **not** served by any of the current engines: they are image-to-3D,
+so the workflow a user asking for text-to-3D actually wants is
+`text_to_image` → `image_to_3d`.
 
 ## When the hub tools are missing
 

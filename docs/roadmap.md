@@ -1,10 +1,16 @@
 # Roadmap
 
-Phase 1 is complete: the architecture is built, tested, and demonstrated end to
-end. The mock models it was validated with survive only as an internal test
-double — `src/adapters/mock.ts`, referenced by tests and by no shipped catalog.
-What follows is what each later phase actually requires — measured against what
-already exists, not estimated from scratch.
+Phases 1–7 are complete. The architecture is built, tested, and demonstrated end
+to end against real engines; the mock models it was validated with survive only as
+an internal test double — `src/adapters/mock.ts`, referenced by tests and by no
+shipped catalog. What follows is what each phase actually required, measured
+against what already exists rather than estimated from scratch, plus what is
+genuinely still open.
+
+The two gaps that used to be listed here are closed: a real local 3D adapter
+(Phase 4), and machine probing wired into `ModelHub` so routing decides against
+measured resources (Phase 5). What remains is a much shorter list, and it is
+recorded honestly at the end of each phase.
 
 ---
 
@@ -23,8 +29,9 @@ Delivered:
   never referenced by `config/models.json`
 - Durable artifact store with a tamper-resistant path resolver
 - DSH plugin exposing ten capability tools and a dynamic capability snapshot
-- 353 tests: unit, integration, adapter, discovery, and plugin — all runnable without an
-  engine (the eight spawn-based ones need a shell that permits piped child stdio)
+- 429 tests: unit, integration, adapter, discovery, machine, and plugin — all
+  runnable without an engine or a GPU, because the adapter tests run real local
+  HTTP servers as stand-ins
 - A vertical slice that runs the real code paths, not doubles
 
 | Requirement | Where |
@@ -33,9 +40,9 @@ Delivered:
 | Model metadata | `src/catalog/descriptor.ts` |
 | Schema validation | `parseModelCatalogConfig` + published JSON Schema, drift-tested |
 | Deterministic routing | `src/router/router.ts`, tested against invented models |
-| Hardware/resource checks | `ModelCatalog.checkResources` + `src/machine.ts` |
+| Hardware/resource checks | `ModelCatalog.checkResources` + `src/machine.ts`, measured and routed against (Phase 5) |
 | Lifecycle management | `src/runtime/manager.ts` |
-| Typed artifacts | `src/artifacts/` |
+| Typed artifacts | `src/artifacts/` — including 3D containers, sniffed from the bytes |
 | Multi-step workflows | `text → image → 3D` and `image → image → 3D` in `tests/integration.test.ts` |
 | Graceful failure | `tests/integration.test.ts`, `tests/plugin.test.ts` |
 | Timeouts | `withTimeout`, per-model budgets, tool budgets |
@@ -136,46 +143,72 @@ done, which is what makes this cheap.
 
 ---
 
-## Phase 4 — a real local 3D model
+## Phase 4 — a real local 3D model ✅ shipped
 
-**Code required: one adapter, plus a decision about output format.**
+**Shipped as one adapter: `three_d`.** See [three-d.md](three-d.md) for the operator
+guide; this section records what the decision turned out to be and why.
 
 This is the least standardised area. There is no dominant local text-to-3D server
 with a stable API, so the adapter shapes differ from Phases 2–3.
 
-### Candidates
+### What the survey found
 
-| Approach | Engine | Notes |
-|---|---|---|
-| Shap-E / Point-E | Python script | Simple API, fast, low fidelity. Best first target |
-| TripoSR / InstantMesh | Python script | Single-image → mesh, good quality, GPU-heavy |
-| Stable Fast 3D | Python script, or a Gradio HTTP API | Fast, permissive licence |
-| Trellis | Python server | High quality, significant VRAM |
-| Blender | `cli` adapter | Not generation — *post-processing*. Decimation, UV, format conversion |
+| Approach | Engine | Interface | Output |
+|---|---|---|---|
+| TRELLIS | `python app.py` | Gradio queue API, **two** calls (generate, then extract GLB) | `.glb` |
+| Hunyuan3D-2 | Gradio app, or `api_server.py` | Gradio queue API, or a FastAPI route | `.glb`, `.obj` |
+| Stable Fast 3D | Gradio app | Gradio queue API, one call | `.glb` |
+| TripoSR | Gradio app | Gradio queue API, one call | `.obj` |
+| Blender | `cli` adapter | Not generation — *post-processing* | — |
 
-### What to build
+Two findings shaped the implementation:
 
-1. **`src/adapters/python-script.ts`** — a general `cli` adapter for
-   process-per-request Python inference. This is the highest-leverage piece
-   because it covers Shap-E, TripoSR, Stable Fast 3D, and most future research
-   code without a new adapter each time:
-   - Stage inputs into a per-invocation temp directory (paths, not bytes).
-   - Run with a bounded timeout and the argv guardrails.
-   - Read a declared output file from the temp directory and persist it.
-   - Keep the exact invocation in `adapterConfig`, so a new model is a config
-     entry rather than a new adapter.
-2. **Format normalisation.** Decide the canonical mesh format (GLB is the right
-   answer — single file, embedded textures, universally readable) and convert in
-   the adapter. The artifact `type` stays `model_3d` regardless.
-3. **Metadata that matters downstream.** `vertexCount`, `triangleCount`, `format`,
-   and bounding-box dimensions. A workflow that decimates or retextures a mesh
-   needs these without loading it.
+1. **They are all Gradio apps.** There is no shared *product* API, but there is a
+   shared *framework* one: the queue API at `/gradio_api/call/<name>`, plus a
+   `/config` document that lists the names. That is a documented, stable interface
+   across Gradio 3, 4, and 5 — which makes it a far better integration point than
+   any single engine's routes.
+2. **`text_to_3d` is not real yet.** None of these engines generates a mesh from
+   text alone; text-to-3D products are a text-to-image model feeding an
+   image-to-3D model. The hub models that honestly: `text_to_3d` stays in the
+   vocabulary, the adapter will serve it if an engine exposes a route for it, and
+   no shipped catalog claims it.
+
+### What shipped
+
+1. **`src/adapters/three-d.ts`** — one adapter, two transports (`gradio`,
+   `http_json`), parameterised by a declarative step list in `adapterConfig`. Call
+   names, argument order, argument bindings, result location, and format are all
+   catalog data; the adapter knows no engine. Multi-call engines are expressed as
+   several steps, with `$N[.M]` bindings carrying one step's output into the next —
+   which is exactly how TRELLIS's generate-then-extract-GLB pair works.
+2. **`src/artifacts/formats.ts`** — format plurality handled at the boundary rather
+   than normalised away: GLB, GLTF, OBJ, STL, and PLY are recognised by *sniffing
+   the bytes*, cross-checked against what the engine claimed, and a disagreement is
+   recorded on the artifact as a warning. A server that answers 200 with an HTML
+   error page is caught here instead of becoming a mesh the next step cannot open.
+3. **`src/discovery/three-d.ts`** — a discoverer that verifies rather than trusts.
+   It reads the engine's API-description document, derives capabilities from the
+   *shape* of the endpoint names, and intersects them with the operator's declared
+   models. An engine whose only mesh routes are exporters is refused with a message
+   saying so.
+4. **Metadata that matters downstream.** `vertexCount` and `triangleCount` measured
+   out of the file (OBJ vertex lines, glTF accessors, STL facet count), plus
+   `format`, `mimeType`, `byteLength`, `sourceArtifactId`, and a digest of the
+   bytes.
 
 ### Definition of done
 
-- `text_to_3d` produces a real mesh loadable in a viewer.
-- `image_to_3d` accepts a generated image artifact and produces a mesh.
-- `text → image → 3D` runs end to end with real models on both hops.
+- `image_to_3d` accepts a generated image artifact and produces a mesh. ✅
+- `text → image → 3D` runs end to end with the artifact id as the only thing that
+  crosses the hop. ✅ (`npm run demo:3d`, `tests/three-d.test.ts`)
+- `text_to_3d` produces a real mesh. ⚠️ **Not claimed**, because no surveyed local
+  engine implements it — see finding 2 above. The capability is routable the moment
+  an engine declares a route for it.
+- Verified against a real engine on real hardware. ⚠️ **Not done here**: the tests
+  and the demo drive a stand-in Gradio server, which proves the protocol and the
+  boundary but not a specific engine's numerics. The catalog entries for TRELLIS
+  and Stable Fast 3D in `config/examples/` are the ones to run first.
 
 ### Risks
 
@@ -183,13 +216,15 @@ with a stable API, so the adapter shapes differ from Phases 2–3.
   splats. Normalising at the adapter boundary is what keeps the artifact system
   honest — do not leak engine-specific formats upward.
 - **VRAM.** Most text-to-3D models want 8–16 GB. Declare it, and let routing
-  refuse the model on a machine that cannot run it rather than crashing.
+  refuse the model on a machine that cannot run it rather than crashing. This is
+  what the measured-headroom work in Phase 5 exists for.
 - **No standard API.** Expect this adapter to need editing as the field moves.
-  That is exactly why it is one file with a `supports()` check.
+  That is exactly why it is one file, and why the engine specifics live in the
+  catalog rather than in it.
 
 ---
 
-## Phase 5 — lifecycle and resource-aware routing ✅ largely complete
+## Phase 5 — lifecycle and resource-aware routing ✅ complete
 
 Delivered in Phase 1, ahead of schedule, because doing it later would have meant
 retrofitting state into a stateless design:
@@ -200,6 +235,42 @@ retrofitting state into a stateless design:
 - Idle-timeout sweeping that spares any model with a call in flight
 - Resource gating on VRAM, RAM, and GPU presence
 - Machine detection via `nvidia-smi`, with conservative behaviour when absent
+
+### What the remaining gap was, and how it closed
+
+The probe existed but `ModelHub` never called it: routing compared declared needs
+against totals, and a machine that had never been probed passed everything. Three
+changes closed that:
+
+1. **The probe measures headroom, not just capacity.** `nvidia-smi` is asked for
+   `memory.free` as well as `memory.total`, so a GPU another application has
+   filled is visible. `MachineProfile` carries both pairs, and an unmeasurable
+   figure is left *absent* rather than guessed at.
+2. **`ModelHub` probes, publishes, and re-checks.** The constructor starts a pass
+   in the background (`probeResources: true` by default), publishes the result to
+   the catalog, re-validates every model's resource verdict against it, and
+   re-measures when the last one is older than `resourceTtlMs`. An invocation
+   invalidates the measurement outright, because a generation changes how much
+   memory is free.
+3. **The router asks the right question per candidate.** Capacity for a model the
+   runtime can cold-start, headroom for one that is already resident — and the
+   refusal names the shortfall: `needs 12 GiB VRAM but only 6.5 GiB is available
+   (of 8 GiB total)`.
+
+`hub.availableResources()` reports the probe's figures minus the declared footprint
+of every resident model, which is the number to compare a model against.
+
+### What remains
+
+1. **Cross-model reservation.** Headroom is measured, and resident models'
+   declared footprints are subtracted on request — but nothing *reserves* memory
+   ahead of a start. Two models started concurrently can both be admitted against
+   the same free bytes. A real reservation would need the runtime to hold a lease
+   per model, and would make an idle sweep able to reclaim it.
+2. **`diskGb` is advisory.** It is probed and reported but not enforced, because
+   the weights it describes may not be downloaded yet.
+3. **Per-process memory accounting.** RSS and VRAM per child would make the idle
+   sweeper smarter than a timer. Still the right answer, still not done.
 
 ### What remains
 
@@ -249,7 +320,6 @@ tests against the real code paths.
 ---
 
 ## Phase 7 — runtime model discovery ✅ shipped (ComfyUI auto-graph generation is a follow-up)
-
 **Goal:** stop requiring a JSON edit before a model the machine already has can be
 used.
 
@@ -275,6 +345,13 @@ directory, or a LoRA someone installed is usable without touching
   the loader nodes' own enumerations, capabilities from an explicit
   node-class → capability table (`CAPABILITY_SIGNALS`), and a **minimal default
   graph** generated for the common one-checkpoint shape.
+- `src/discovery/three-d.ts` — the API-description document (`/gradio_api/config`
+  or `/config`): the named endpoints a 3D app exposes, capabilities derived from
+  their *shape*, and the operator's declared models intersected with what the
+  engine actually proves. It is the one discoverer that **refuses** rather than
+  reports: an engine with only mesh *exporters* gets a warning saying exactly that,
+  because publishing `image_to_3d` for a mesh writer turns a clean routing refusal
+  into a confusing invocation failure.
 - Wired behind `ModelHubOptions.discoverModels` (default **false**) and the plugin
   setting of the same name; `ModelHub.fromConfigAndDiscovery` merges *before* the
   catalog is constructed; `ModelHub.refreshDiscovery` and the

@@ -33,12 +33,14 @@ Everything below that question is this project's job.
 │  ┌──────────────────────────────┬────────────────────────────────┐   │
 │  │ Model Adapters               │ Artifact Store                 │   │
 │  │ openai_compatible · http_json│ durable, typed, addressable    │   │
-│  │ comfyui · mock (tests only)  │ text/image/audio/video/3D/…    │   │
+│  │ comfyui · three_d ·          │ text/image/audio/video/3D/…    │   │
+│  │ mock (tests only)            │                                │   │
 │  └──────────────────────────────┴────────────────────────────────┘   │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │  spawn (argv, never a shell string)
 ┌───────────────────────────────▼──────────────────────────────────────┐
-│  Local engines: Ollama · llama.cpp · A1111/Forge · ComfyUI · …       │
+│  Local engines: Ollama · llama.cpp · A1111/Forge · ComfyUI ·         │
+│  TRELLIS · Hunyuan3D · Stable Fast 3D · TripoSR · …                  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -49,9 +51,10 @@ Everything below that question is this project's job.
 **Live as a DSH profile plugin.** The package installs as one unit — `dsh plugin
 add` mounts it, so the hub is composed on every boot — and it serves **real local
 engines only**: Ollama for text, ComfyUI / A1111 / Forge for images, llama.cpp for
-a second text engine. There are no mock models anywhere in the shipped catalogs
-and no mock fallback at runtime: a wrong model name or a stopped engine is a loud
-error (or a cold start), never fixture output.
+a second text engine, and any local image-to-3D Gradio app for meshes. There are no
+mock models anywhere in the shipped catalogs and no mock fallback at runtime: a
+wrong model name or a stopped engine is a loud error (or a cold start), never
+fixture output.
 
 The whole architecture — catalog → routing → runtime → adapter → artifact →
 chained workflow — is covered by the test suite, which uses an in-process **mock
@@ -63,14 +66,14 @@ catalog, and no deployment can reach it by accident.
 | 1 | Full architecture, DSH plugin, tests | ✅ done |
 | 2 | Real local text model (Ollama / llama.cpp / vLLM / LM Studio) | ✅ done — `openai_compatible` adapter ships |
 | 3 | Real local image model (A1111 / ComfyUI) | ✅ done — `http_json` and `comfyui` adapters ship |
-| 4 | Real local 3D model | needs a new adapter |
-| 5 | Runtime lifecycle + resource-aware routing | ✅ done (machine probing is not yet wired into `ModelHub`) |
+| 4 | Real local 3D model | ✅ done — `three_d` adapter ships; see [docs/three-d.md](docs/three-d.md) |
+| 5 | Runtime lifecycle + resource-aware routing | ✅ done — the machine is probed and routed against |
 | 6 | Multi-model workflows | ✅ done |
 
 Phase 2 needs no new code: the `openai_compatible` adapter is implemented, and
 `config/examples/real-models.example.json` contains ready-to-copy Ollama and
-llama.cpp entries. Phase 3 is now implemented too, by **two** adapters, because
-the two engine families are genuinely different:
+llama.cpp entries. Phase 3 is implemented by **two** adapters, because the two
+engine families are genuinely different:
 
 - **`http_json`** — engines that answer one request with a finished image:
   AUTOMATIC1111, Forge, and `stable-diffusion.cpp`'s `sd-server`. It POSTs the
@@ -81,9 +84,21 @@ the two engine families are genuinely different:
   sampler nodes), queues it on `/prompt`, polls `/history`, and downloads the
   result from `/view`.
 
-Both are registered by default. See
-[docs/adding-a-model.md](docs/adding-a-model.md) and the workflow templates in
-[`config/workflows/`](config/workflows/).
+Phase 4 is **`three_d`**: one adapter that speaks the shape the local 3D ecosystem
+actually has — a Gradio queue API or a JSON HTTP route, one or two calls, a mesh
+file at the end — so TRELLIS, Hunyuan3D, Stable Fast 3D, and TripoSR are catalog
+entries rather than code. It writes a typed `model_3d` artifact (GLB, GLTF, OBJ,
+STL, or PLY, sniffed from the bytes), and a discoverer verifies a declared engine
+against the API surface it actually exposes before publishing anything.
+
+Phase 5's remaining gap is closed: `ModelHub` now probes RAM, VRAM, free VRAM, and
+disk, re-measures on demand, and routes against measured **headroom** — so a model
+that would not fit beside what is already loaded is refused with the shortfall in
+the message instead of crashing inside the engine.
+
+All adapters are registered by default. See
+[docs/adding-a-model.md](docs/adding-a-model.md), [docs/three-d.md](docs/three-d.md),
+and the protocol templates in [`config/workflows/`](config/workflows/).
 
 ---
 
@@ -170,11 +185,12 @@ There are two halves, and you can use either without the other.
 cd dsh-ai-model-hub
 
 npm install                  # typescript + the DSH packages the plugin links against
-npm test                     # the suite, ~10 s, no engines required
+npm test                     # the suite, ~20 s, no engines or GPU required
 npm run typecheck            # strict TypeScript, no errors
 npm run build                # compile src/ + dsh-plugin/ into lib/
 npm run demo                 # the vertical slice, end to end
 npm run demo:workflow        # a multi-step cross-model pipeline
+npm run demo:3d              # image → 3D → a real .glb, against a stand-in engine
 ```
 
 The demo prints the full path — capability discovery, routing with reasons,
@@ -200,6 +216,13 @@ It runs against `config/models.json`, so it needs the engines that catalog names
 Ollama for text, ComfyUI for images. `node examples/vertical-slice.ts <catalog>`
 takes another catalog, and the last section deliberately asks for a capability
 nobody serves, to show what a refusal looks like.
+
+`npm run demo:3d` needs nothing installed. It starts a stand-in 3D engine inside
+the example and runs the *whole* real path against it — discovery, health,
+resource-aware routing, a two-step Gradio protocol, and a `.glb` written to disk —
+then prints every HTTP request the engine saw, to make the boundary concrete. To
+point it at TRELLIS instead, swap the stand-in for your catalog entry; the three
+capability calls are identical. See [docs/three-d.md](docs/three-d.md).
 
 ### B. Give the capability to the DeepSeek Harness agent
 
@@ -542,11 +565,14 @@ dsh-ai-model-hub/
 │   ├── runtime/                  process lifecycle, health, idle timeout
 │   ├── adapters/                 adapter contract + the mock test double,
 │   │                             PNG/STL/WAV writers, openai_compatible,
-│   │                             http_json, comfyui
-│   ├── artifacts/                artifact contract + the local filesystem store
+│   │                             http_json, comfyui, three_d
+│   ├── artifacts/                artifact contract, the local filesystem store,
+│   │                             and 3D container sniffing/measurement
+│   ├── discovery/                engine introspection: ollama · comfyui · a1111 ·
+│   │                             three_d, and the merge that keeps static first
 │   ├── config/                   catalog discovery and loading
 │   ├── util/                     process guardrails, primitive validators
-│   ├── machine.ts                RAM/VRAM/GPU detection
+│   ├── machine.ts                RAM/VRAM/GPU/disk probing, free figures included
 │   ├── hub.ts                    the facade: the public API
 │   └── index.ts                  the public surface
 ├── dsh-plugin/                   the ONLY DSH-aware code (~1 file per concern)
@@ -570,10 +596,10 @@ dsh-ai-model-hub/
 ├── config/
 │   ├── models.json               the catalog the package ships: real engines
 │   ├── examples/                 more real engines, ready to copy
-│   └── workflows/                ComfyUI API-format graph templates
-├── tests/                        the suite; the adapter ones run against real
-│                                 local HTTP servers, so no engine or GPU needed
-├── examples/vertical-slice.ts    the end-to-end demonstration
+│   └── workflows/                ComfyUI graph templates and 3D step declarations
+├── tests/                        the suite; real local HTTP servers stand in for
+│                                 engines, so no GPU or model download is needed
+├── examples/                     vertical-slice · workflow · three-d-slice demos
 └── docs/                         architecture, components, guides
 ```
 
@@ -591,8 +617,17 @@ the entire hub keeps working and keeps passing its tests.
 | [docs/architecture.md](docs/architecture.md) | You want the design, the data flow, and why each boundary is where it is |
 | [docs/components.md](docs/components.md) | You are working on one component and want its contract in detail |
 | [docs/adding-a-model.md](docs/adding-a-model.md) | You want to add a model — the common case needs no code |
+| [docs/three-d.md](docs/three-d.md) | You want local image-to-3D working: engine, catalog, discovery, troubleshooting |
 | [docs/security.md](docs/security.md) | You are about to enable process launching or widen the command allowlist |
-| [docs/roadmap.md](docs/roadmap.md) | You want to know what Phases 2–6 require |
+| [docs/roadmap.md](docs/roadmap.md) | You want to know what each phase required and what remains |
+
+## Try it without any engine
+
+```sh
+npm test          # the whole suite; real HTTP servers stand in for engines
+npm run demo:3d   # discovery → routing → a real .glb → the boundary transcript
+npm run demo      # capability discovery and routing against your own catalog
+```
 
 ---
 
