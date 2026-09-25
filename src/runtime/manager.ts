@@ -196,7 +196,7 @@ export class RuntimeManager {
       });
       return;
     }
-    const resources = this.catalog.checkResources(model);
+    const resources = this.catalog.checkResources(model, { detail: true });
     if (!resources.supported) {
       state.availability = 'unsupported';
       state.reason = resources.reason;
@@ -249,6 +249,47 @@ export class RuntimeManager {
         }
       }),
     );
+  }
+
+  /**
+   * Re-check one model's adapter support and resource fit, and correct its state.
+   *
+   * Called by the hub after a machine re-probe, because resource fit is the one
+   * verdict that goes *stale* rather than merely being unknown: a catalog built
+   * before the first probe has no measurements, so `checkResources` passes
+   * everything through; the probe then lands and several models become
+   * unrunnable. Without this re-check they would keep the verdict from before the
+   * machine was measured, and a `start_model` would be refused at the gate with a
+   * diagnosis ("unsupported") that contradicts what routing says.
+   *
+   * Only a model resting in a resource-derived state is revisited: a model that
+   * is disabled, in an error state, or unsupported by its *adapter* has a reason
+   * the machine has nothing to do with, and a live or owned process is never
+   * disturbed.
+   *
+   * @param modelId - the model to re-check.
+   */
+  revalidateResources(modelId: string): void {
+    const model = this.catalog.getModel(modelId);
+    const state = this.states.get(modelId);
+    if (model === undefined || state === undefined || !model.enabled) return;
+    if (state.process !== undefined) return;
+    if (state.availability === 'disabled' || state.availability === 'error') return;
+    if (state.availability === 'available' || state.availability === 'starting') return;
+
+    const resources = this.catalog.checkResources(model, { detail: true });
+    if (resources.supported) {
+      // A model that was `unsupported` only because nothing had been measured yet
+      // becomes startable again. Its previous reason belonged to that stale
+      // verdict, so it goes with it.
+      if (state.availability === 'unsupported') {
+        state.availability = 'stopped';
+        state.reason = undefined;
+      }
+      return;
+    }
+    state.availability = 'unsupported';
+    state.reason = resources.reason;
   }
 
   /**
@@ -484,9 +525,17 @@ export class RuntimeManager {
     report: HealthReport,
     endpointLive: boolean,
   ): void {
-    const resources = this.catalog.checkResources(model);
+    // Capacity, not headroom: a model that is not resident is not competing with
+    // anything, and the definitive headroom question for a *running* model is
+    // asked at routing time and again before a launch. Asking it here would make
+    // a busy machine mark a perfectly startable model `unsupported`, which is a
+    // state nothing would ever clear.
+    const resources = this.catalog.checkResources(model, { detail: true });
     if (!resources.supported) {
       state.availability = 'unsupported';
+      // The reason is kept, not just the verdict: routing refuses an unsupported
+      // model with this sentence, and "not supported on this machine" without the
+      // shortfall is exactly the unhelpful answer an operator is trying to avoid.
       state.reason = resources.reason;
       return;
     }
@@ -576,7 +625,14 @@ export class RuntimeManager {
           modelId,
         });
       }
-      const resources = this.catalog.checkResources(model);
+      const resources = this.catalog.checkResources(model, {
+        // A model the hub is about to launch gets the whole machine, so the
+        // question is capacity, not headroom. The exception is a model whose
+        // engine is somehow already resident — then its own footprint is real
+        // and must be counted against what is free.
+        live: state.availability === 'available',
+        detail: true,
+      });
       if (!resources.supported) {
         throw new ModelHubError('INSUFFICIENT_RESOURCES', `model "${modelId}" cannot run: ${resources.reason}`, {
           modelId,

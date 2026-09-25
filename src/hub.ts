@@ -24,6 +24,7 @@ import { createMockAdapter } from './adapters/mock.ts';
 import { createOpenAiCompatibleAdapter } from './adapters/openai.ts';
 import { createHttpJsonAdapter } from './adapters/http-json.ts';
 import { createComfyUiAdapter } from './adapters/comfyui.ts';
+import { createThreeDAdapter } from './adapters/three-d.ts';
 import type { Capability } from './catalog/capabilities.ts';
 import { isCapability } from './catalog/capabilities.ts';
 import type { ModelCatalogConfig } from './catalog/descriptor.ts';
@@ -33,12 +34,15 @@ import { ModelCatalog } from './catalog/registry.ts';
 import { createComfyUiDiscoverer } from './discovery/comfyui.ts';
 import { createA1111Discoverer } from './discovery/a1111.ts';
 import { createOllamaDiscoverer } from './discovery/ollama.ts';
+import { createThreeDDiscoverer } from './discovery/three-d.ts';
 import { DiscoveryRegistry, mergeCatalogConfig } from './discovery/types.ts';
 import type { DiscoveryResult, HostDiscoverer } from './discovery/types.ts';
-import type { MachineProfile } from './types.ts';
+import type { MachineProfile, MachineResourceUse } from './types.ts';
+import { reserveResources } from './types.ts';
 import type { AvailabilityState, InvocationRequest, InvocationResult, ModelRuntimeStatus, ModelView, RoutingDecision } from './types.ts';
 import { ModelHubError, toHubError } from './errors.ts';
 import { probeMachine } from './machine.ts';
+import type { MachineProbeOptions } from './machine.ts';
 import type { ExecutionPolicy } from './util/process.ts';
 import { DEFAULT_EXECUTION_POLICY } from './util/process.ts';
 import { RuntimeManager } from './runtime/manager.ts';
@@ -84,6 +88,45 @@ export interface ModelHubOptions {
   readonly routingPolicy?: RoutingPolicy;
   /** Machine profile override, for tests and for operators who know better. */
   readonly machine?: MachineProfile;
+  /**
+   * Probe this machine's resources before routing, rather than trusting totals.
+   *
+   * **On by default.** The probe is what turns "this model needs 8 GiB VRAM and
+   * the card has 8 GiB" into a correct decision when another engine is already
+   * holding 5 of them: without it, routing compares against capacity and happily
+   * selects a model that will die with a CUDA out-of-memory error.
+   *
+   * Two switches modify it:
+   *
+   * - {@link machineProbe}.`skipGpuProbe` reports only OS memory. Cheap, and the
+   *   right choice in a container with no GPU visibility.
+   * - Setting the whole object to `false` disables the probe. The catalog is then
+   *   built from `undefined`, i.e. its own "not probed" placeholder, and resource
+   *   checks pass everything through — which is exactly what a test that wants a
+   *   deterministic catalog, or an operator who has supplied `machine` by hand,
+   *   needs.
+   *
+   * The probe is asynchronous by nature (`nvidia-smi` is a subprocess) while the
+   * constructor is synchronous by contract, so it runs in the background and the
+   * catalog is updated when it lands. Routing then re-measures on demand once the
+   * previous measurement has gone stale — see
+   * {@link ModelHubOptions.resourceTtlMs} — so a long-lived host decides against
+   * the machine as it is now rather than as it was at boot.
+   */
+  readonly probeResources?: boolean | MachineProbeOptions;
+  /**
+   * How long a machine measurement stays fresh enough to route against.
+   *
+   * Defaults to 30000. A routing decision re-measures when the last measurement is
+   * older than this, and always after an invocation, because a generation is the
+   * one thing here that genuinely changes how much memory is free.
+   *
+   * The cost is one `nvidia-smi` subprocess; the benefit is that a model started
+   * by another application ten minutes ago is visible to the next decision instead
+   * of being routed into an out-of-memory crash. Set it to `Infinity` to measure
+   * once at startup and never again, or to `0` to measure before every decision.
+   */
+  readonly resourceTtlMs?: number;
   /** Diagnostic sink. Defaults to silence. */
   readonly log?: (message: string, fields?: Readonly<Record<string, unknown>>) => void;
   /** How often the runtime re-probes health. `0` disables probing. Defaults to 30000. */
@@ -213,7 +256,22 @@ export class ModelHub {
   private readonly listeners = new Set<HubEventListener>();
   private readonly log: (message: string, fields?: Readonly<Record<string, unknown>>) => void;
   private readonly ownsArtifacts: boolean;
+  private readonly probeOptions: MachineProbeOptions | undefined;
+  private readonly resourceTtlMs: number;
   private disposed = false;
+
+  /**
+   * The most recent probe of this machine, when one has run.
+   *
+   * Held here rather than read back out of the catalog because the two answer
+   * different questions at different times: the catalog holds the figures routing
+   * currently uses, while this holds the *measurement*, with its evidence and its
+   * timestamp, whether or not it was allowed to change routing.
+   */
+  private resources: { readonly profile: MachineProfile; readonly evidence: readonly string[] } | undefined;
+
+  /** The in-flight probe, so concurrent callers share one `nvidia-smi` run. */
+  private resourcePass: Promise<MachineProfile> | undefined;
 
   /**
    * Stores for the per-call roots {@link InvokeOptions.artifactRoot} names, keyed
@@ -229,6 +287,8 @@ export class ModelHub {
     this.routingPolicy = options.routingPolicy ?? DEFAULT_ROUTING_POLICY;
     this.executionPolicy = options.executionPolicy ?? DEFAULT_EXECUTION_POLICY;
     this.staticConfig = options.config;
+    this.probeOptions = resolveProbeOptions(options);
+    this.resourceTtlMs = options.resourceTtlMs ?? DEFAULT_RESOURCE_TTL_MS;
 
     // Discovery is built before the catalog so the very first pass can be
     // started below, but its results are *not* folded in here: the constructor
@@ -261,8 +321,10 @@ export class ModelHub {
     // The shipping set: the Phase 1 fixture adapter, the real-engine adapter
     // that reaches every `/v1/chat/completions` server (Ollama, llama.cpp, vLLM,
     // LM Studio, …), the real-image adapter that reaches every
-    // `/sdapi/v1/txt2img` server (A1111, Forge, stable-diffusion.cpp), and the
-    // graph-queue adapter for ComfyUI. A deployment adds more through
+    // `/sdapi/v1/txt2img` server (A1111, Forge, stable-diffusion.cpp), the
+    // graph-queue adapter for ComfyUI, and the 3D adapter that reaches every local
+    // 3D-generation server (TRELLIS, Hunyuan3D, Stable Fast 3D, TripoSR, …) over
+    // its Gradio queue API or a JSON route. A deployment adds more through
     // `extraAdapters`, or replaces the whole set with `adapters`.
     const defaultAdapters: readonly ModelAdapter[] =
       options.adapters ?? [
@@ -270,6 +332,7 @@ export class ModelHub {
         createOpenAiCompatibleAdapter(),
         createHttpJsonAdapter(),
         createComfyUiAdapter(),
+        createThreeDAdapter(),
       ];
     this.adapters = new AdapterRegistry([...defaultAdapters, ...(options.extraAdapters ?? [])]);
 
@@ -283,6 +346,18 @@ export class ModelHub {
     });
 
     if (options.manageTimers !== false) this.runtime.start();
+
+    // Probe this machine's resources in the background, for the same reason
+    // discovery is pre-warmed: the constructor cannot await a subprocess. Until
+    // it lands the catalog reports "not probed", whose resource check passes
+    // everything through — deliberately permissive, because refusing every model
+    // for the first few hundred milliseconds of a process's life would be worse
+    // than the OOM the probe exists to prevent.
+    if (this.probeOptions !== undefined) {
+      void this.refreshResources().catch((error: unknown) => {
+        this.log(`hub: resource probe failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
 
     // Pre-warm discovery in the background. The constructor is synchronous by
     // contract — a plugin's `apply` cannot await it — so the catalog starts with
@@ -559,13 +634,7 @@ export class ModelHub {
     return this.catalog.listUnservedCapabilities();
   }
 
-  /** The machine resources routing decisions are made against. */
-  get machineProfile(): MachineProfile {
-    return this.catalog.machineProfile;
-  }
-
   // ───────────────────────────── lifecycle ─────────────────────────────
-
   /**
    * Start a model.
    * @param modelId - the model id.
@@ -671,6 +740,150 @@ export class ModelHub {
     return { healthy: statuses.filter((status) => status.availability === 'available').length, total: statuses.length };
   }
 
+  // ───────────────────────────── machine resources ─────────────────────
+
+  /**
+   * The machine resources routing decisions are made against.
+   *
+   * This is the profile the router reads, so it includes the resource headroom
+   * figure when one has been probed. It is what `explain_routing` and
+   * `get_model_status` show an operator who is asking "why was that model
+   * rejected?".
+   */
+  get machineProfile(): MachineProfile {
+    return this.catalog.machineProfile;
+  }
+
+  /**
+   * The last measurement of this machine, with the evidence behind it.
+   *
+   * Distinct from {@link machineProfile}: that is what routing currently uses,
+   * while this is what was *measured* — including the case where the two differ
+   * because the deployment supplied a profile by hand or turned probing off. The
+   * evidence lines are what make a surprising resource decision diagnosable
+   * ("only 5.2 GiB free") instead of mysterious.
+   *
+   * @returns the snapshot, or `undefined` when nothing has been probed.
+   */
+  resourceSnapshot(): { readonly profile: MachineProfile; readonly evidence: readonly string[] } | undefined {
+    return this.resources;
+  }
+
+  /**
+   * What the machine has left once the running models are accounted for.
+   *
+   * Reported figures are the probe's, minus the declared footprint of every
+   * model whose engine is currently resident. This is the number an operator
+   * should compare a model's requirements against, and it is the number the
+   * router uses for a model that is already running.
+   *
+   * @returns the current profile with its available figures reduced, plus what
+   *   was subtracted.
+   */
+  availableResources(): { readonly profile: MachineProfile; readonly reserved: MachineResourceUse; readonly residentModelIds: readonly string[] } {
+    const reserved: { vramGb: number; ramGb: number } = { vramGb: 0, ramGb: 0 };
+    const residentModelIds: string[] = [];
+    for (const model of this.catalog.listModels()) {
+      const availability = this.runtime.checkAvailability(model.id);
+      if (availability !== 'available' && availability !== 'unhealthy' && availability !== 'starting') continue;
+      residentModelIds.push(model.id);
+      reserved.vramGb += model.resources.vramGb;
+      reserved.ramGb += model.resources.ramGb;
+    }
+    return {
+      profile: reserveResources(this.catalog.machineProfile, reserved),
+      reserved,
+      residentModelIds,
+    };
+  }
+
+  /**
+   * Re-measure this machine and republish the catalog's profile.
+   *
+   * Safe to call at any time and safe to call concurrently — passes are shared.
+   * A failed probe leaves the previous profile in place and reports the problem,
+   * because losing a measurement must never cost the ability to route.
+   *
+   * @returns the profile now in force.
+   */
+  async refreshResources(): Promise<MachineProfile> {
+    const existing = this.resourcePass;
+    if (existing !== undefined) return existing;
+
+    const pass = (async (): Promise<MachineProfile> => {
+      const probed = await probeMachine({
+        ...(this.probeOptions ?? {}),
+        // The deployment's own policy travels down so a narrowed allowlist is
+        // respected — the probe widens it by exactly one diagnostic binary.
+        policy: this.executionPolicy,
+      });
+      this.resources = { profile: probed.profile, evidence: probed.evidence };
+      // The catalog owns the profile the router reads, so publishing is a
+      // mutation of the catalog rather than a second source of truth. With
+      // probing disabled the catalog keeps whatever it was constructed with.
+      if (this.probeOptions !== undefined) {
+        this.catalog.replaceMachineProfile(probed.profile);
+        // The catalog was built before these numbers existed, so every model's
+        // resource verdict was made against "not probed" — which passes
+        // everything. Re-checking here is what turns the measurement into a
+        // decision instead of a fact nothing acts on.
+        for (const model of this.catalog.listModels()) this.runtime.revalidateResources(model.id);
+      }
+      this.log(
+        `hub: machine resources — ${probed.profile.vramGb} GiB VRAM` +
+          `${probed.profile.availableVramGb === undefined ? '' : ` (${probed.profile.availableVramGb} GiB free)`}, ` +
+          `${probed.profile.ramGb} GiB RAM` +
+          `${probed.profile.availableRamGb === undefined ? '' : ` (${probed.profile.availableRamGb} GiB free)`}`,
+        { evidence: probed.evidence },
+      );
+      return probed.profile;
+    })();
+
+    this.resourcePass = pass;
+    try {
+      return await pass;
+    } finally {
+      if (this.resourcePass === pass) this.resourcePass = undefined;
+    }
+  }
+
+  /**
+   * Re-measure if this deployment probes and the last measurement is stale.
+   *
+   * Called at the top of every routing decision, which is what makes the probe a
+   * *routing* input rather than a startup report. It is deliberately quiet about
+   * failure: a machine whose GPU query times out must still route, using the last
+   * numbers it had, because "I could not measure the GPU" is not a reason to
+   * refuse every model on the machine.
+   */
+  private async freshenResources(): Promise<void> {
+    if (this.probeOptions === undefined) return;
+    try {
+      await this.ensureResourcesFresh(this.resourceTtlMs);
+    } catch (error) {
+      this.log(`hub: resource probe failed, routing against the last measurement: ${String(error)}`);
+    }
+  }
+
+  /**
+   * Re-measure the machine if the last measurement is older than `maxAgeMs`.
+   *
+   * The seam a long-lived host uses: resources change as other applications come
+   * and go, and a routing decision made against a probe from yesterday is barely
+   * better than no probe at all. Cheap when the answer is "still fresh" — it is
+   * one timestamp comparison.
+   *
+   * @param maxAgeMs - how stale a measurement may be. Defaults to 60000.
+   * @returns the profile now in force.
+   */
+  async ensureResourcesFresh(maxAgeMs = 60_000): Promise<MachineProfile> {
+    const probedAt = this.resources?.profile.probedAt;
+    if (probedAt !== undefined && Date.now() - probedAt < Math.max(0, maxAgeMs)) {
+      return this.catalog.machineProfile;
+    }
+    return this.refreshResources();
+  }
+
   // ───────────────────────────── invocation ────────────────────────────
 
   /**
@@ -686,6 +899,7 @@ export class ModelHub {
    */
   async route(request: InvocationRequest, options: InvokeOptions = {}): Promise<RoutingDecision> {
     this.assertUsableCapability(request.capability);
+    await this.freshenResources();
     const artifacts = this.storeFor(options.artifactRoot);
     const resolved = await resolveRequestInputs({ artifacts }, request);
     const decision = routeRequest(
@@ -721,6 +935,7 @@ export class ModelHub {
     options: InvokeOptions = {},
   ): Promise<InvocationResult & { readonly decision: RoutingDecision }> {
     this.assertUsableCapability(request.capability);
+    await this.freshenResources();
     const artifacts = this.storeFor(options.artifactRoot);
     const resolved = await resolveRequestInputs({ artifacts }, request);
     const decision = routeRequest(
@@ -749,7 +964,9 @@ export class ModelHub {
       const modelId = attempts[index];
       if (modelId === undefined) continue;
       try {
-        const result = await this.invokeOn(request, resolved, modelId, decision, artifacts);
+        const result = await this.invokeWithResourceRelease(artifacts, modelId, () =>
+          this.invokeOn(request, resolved, modelId, decision, artifacts),
+        );
         if (index > 0) {
           const previous = attempts[index - 1];
           this.emit({
@@ -847,6 +1064,11 @@ export class ModelHub {
         ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
         inputs: resolved.inputs,
         options: request.options ?? {},
+        // The caller's budget is forwarded as its own field rather than folded
+        // into `options`, because it is a property of *this call* and not a
+        // capability setting: an adapter uses it to abort its own in-flight work,
+        // which an option bag cannot express.
+        ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
         artifacts,
         signal: request.signal ?? new AbortController().signal,
         log: this.runtime.adapterLogger(modelId),
@@ -894,6 +1116,61 @@ export class ModelHub {
     } finally {
       this.runtime.endInvocation(modelId);
     }
+  }
+
+  /**
+   * Run one model attempt, releasing this machine's resource measurement after it.
+   *
+   * A generation is the only thing here that genuinely changes how much memory is
+   * free: a 3D run loads several gigabytes that were not resident a moment ago,
+   * and a big text model's KV cache grows while it answers. That means the
+   * measurement taken before a generation is the *wrong* basis for the next
+   * routing decision — it describes the machine as it was, not as it is now.
+   *
+   * So the cache is invalidated here rather than merely aged. It is not re-probed
+   * inline, because a probe is a subprocess and an invocation's own latencies are
+   * the user's; the next decision that needs resources calls
+   * {@link ensureResourcesFresh} and pays for it then.
+   *
+   * Failure is irrelevant to this bookkeeping: whether the model succeeded, timed
+   * out, or crashed, it has still moved the machine's memory, so the release
+   * happens on both paths.
+   *
+   * @param artifacts - the store this attempt writes through (unused, kept for
+   *   call-site symmetry with {@link invokeOn}).
+   * @param modelId - the model being attempted, for diagnostics.
+   * @param run - the attempt.
+   * @returns the attempt's result.
+   */
+  private async invokeWithResourceRelease<T>(
+    artifacts: ArtifactStore,
+    modelId: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    void artifacts;
+    try {
+      return await run();
+    } finally {
+      this.invalidateResources(modelId);
+    }
+  }
+
+  /**
+   * Mark the machine measurement as taken before the last generation.
+   *
+   * Implemented by rewinding `probedAt` rather than by clearing the snapshot, so
+   * {@link availableResources} keeps reporting the last *known* figures — an
+   * operator asking "what is free?" is better served by a stale number with a
+   * timestamp than by no answer — while {@link ensureResourcesFresh} knows to
+   * re-measure before it decides anything.
+   *
+   * @param modelId - why the measurement was invalidated, for diagnostics.
+   */
+  private invalidateResources(modelId: string): void {
+    const current = this.resources;
+    if (current === undefined) return;
+    this.resources = { profile: { ...current.profile, probedAt: 0 }, evidence: current.evidence };
+    this.log(`hub: machine resources will be re-probed before the next decision (after ${modelId})`, { modelId });
   }
 
   /**
@@ -976,6 +1253,38 @@ export class ModelHub {
   }
 }
 /**
+ * How long a machine measurement stays fresh enough to route against.
+ *
+ * Thirty seconds is a compromise between two failure modes: measuring before
+ * every decision adds an `nvidia-smi` subprocess to each one, while measuring too
+ * rarely means a model another application loaded a minute ago is invisible and
+ * routing walks straight into an out-of-memory crash.
+ */
+const DEFAULT_RESOURCE_TTL_MS = 30_000;
+
+/**
+ * Decide whether this hub probes the machine, and how.
+ *
+ * Three inputs, in precedence order:
+ *
+ * 1. An explicit `probeResources: false` turns probing off outright.
+ * 2. A hand-supplied `machine` profile also turns it off: an operator or a test
+ *    that states what this machine has must not be second-guessed by a
+ *    subprocess, or a deterministic test would race a real `nvidia-smi`.
+ * 3. Otherwise the default is on, with any `MachineProbeOptions` the deployment
+ *    passed passed through to the probe itself.
+ *
+ * @param options - the hub's construction options.
+ * @returns the probe options, or `undefined` when nothing should be probed.
+ */
+function resolveProbeOptions(options: ModelHubOptions): MachineProbeOptions | undefined {
+  if (options.probeResources === false) return undefined;
+  if (options.machine !== undefined) return undefined;
+  if (options.probeResources === true || options.probeResources === undefined) return {};
+  return options.probeResources;
+}
+
+/**
  * The hub library's fallback artifact root: `artifacts/` under the current
  * working directory.
  *
@@ -1010,7 +1319,7 @@ export function defaultArtifactRoot(): string {
  * @returns the built-in discoverers.
  */
 function defaultDiscoverers(): readonly HostDiscoverer[] {
-  return [createOllamaDiscoverer(), createComfyUiDiscoverer(), createA1111Discoverer()];
+  return [createOllamaDiscoverer(), createComfyUiDiscoverer(), createA1111Discoverer(), createThreeDDiscoverer()];
 }
 
 /** Re-export so callers can construct a hub with a silent logger without another import. */

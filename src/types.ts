@@ -101,7 +101,45 @@ export interface ModelView {
   readonly status: ModelRuntimeStatus;
 }
 
-/** What the machine can offer, as far as the hub can tell. */
+/** One accelerators's memory, as the probe reported it. */
+export interface GpuInfo {
+  /** Device name as the driver reports it, e.g. `NVIDIA GeForce RTX 5060 Laptop GPU`. */
+  readonly name: string;
+  /** Total device memory in gibibytes. */
+  readonly vramGb: number;
+  /** Free device memory in gibibytes at probe time, when the probe could tell. */
+  readonly freeVramGb?: number;
+}
+
+/**
+ * A model's share of the machine, in gibibytes.
+ *
+ * Used by {@link reserveResources} to subtract what is already running from what
+ * the machine has, so the router can answer "does this fit *now*" rather than
+ * "would this fit on an idle machine".
+ */
+export interface MachineResourceUse {
+  /** GPU memory the resident model holds. */
+  readonly vramGb?: number;
+  /** System memory the resident model holds. */
+  readonly ramGb?: number;
+}
+
+/**
+ * What the machine can offer, as far as the hub can tell.
+ *
+ * Two pairs of numbers exist on purpose, and conflating them is the mistake this
+ * type is shaped to prevent:
+ *
+ * - {@link vramGb} / {@link ramGb} are *capacity*: what the machine has in total.
+ *   They answer "is this model ever runnable here?".
+ * - {@link availableVramGb} / {@link availableRamGb} are *headroom*: what is free
+ *   right now. They answer "can this model run here without evicting something
+ *   else?".
+ *
+ * Only the probe can know the second pair; a hand-supplied profile may omit it,
+ * in which case resource checks fall back to capacity and say so.
+ */
 export interface MachineProfile {
   /** Total GPU VRAM in gibibytes, summed over detected devices. */
   readonly vramGb: number;
@@ -111,6 +149,58 @@ export interface MachineProfile {
   readonly hasGpu: boolean;
   /** Human-readable description of what was detected, for diagnostics. */
   readonly notes: string;
+  /** Free GPU VRAM in gibibytes at probe time, when the probe could tell. */
+  readonly availableVramGb?: number;
+  /** Free system RAM in gibibytes at probe time, when the probe could tell. */
+  readonly availableRamGb?: number;
+  /** Free disk space where the hub writes, in gibibytes, when probed. */
+  readonly availableDiskGb?: number;
+  /** Every detected accelerator, in driver order. */
+  readonly gpus?: readonly GpuInfo[];
+  /** `process.platform` at probe time, e.g. `win32`, `darwin`, `linux`. */
+  readonly platform?: string;
+  /** `process.arch` at probe time, e.g. `x64`, `arm64`. */
+  readonly arch?: string;
+  /** When the probe ran, as Unix epoch milliseconds. */
+  readonly probedAt?: number;
+}
+
+/**
+ * Subtract what is already resident from what the machine has.
+ *
+ * Only the *available* pair is reduced. Capacity is a property of the hardware
+ * and does not change because a model is loaded — rewriting it would be the
+ * "claiming more than the machine offers" failure the probe is written to avoid,
+ * in reverse.
+ *
+ * An undefined available value stays undefined: "we never measured it" is not
+ * the same fact as "there is none left", and the caller must be able to tell.
+ *
+ * @param profile - the probed profile.
+ * @param use - what the resident models hold.
+ * @returns a profile whose available figures exclude `use`.
+ */
+export function reserveResources(profile: MachineProfile, use: MachineResourceUse): MachineProfile {
+  const reserved: {
+    availableVramGb?: number;
+    availableRamGb?: number;
+  } = {};
+  if (profile.availableVramGb !== undefined) {
+    reserved.availableVramGb = Math.max(0, round1(profile.availableVramGb - (use.vramGb ?? 0)));
+  }
+  if (profile.availableRamGb !== undefined) {
+    reserved.availableRamGb = Math.max(0, round1(profile.availableRamGb - (use.ramGb ?? 0)));
+  }
+  return { ...profile, ...reserved };
+}
+
+/**
+ * Round to one decimal place, the precision every resource figure is reported at.
+ * @param value - the number to round.
+ * @returns the rounded value.
+ */
+function round1(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 /**

@@ -185,13 +185,26 @@ export function routeRequest(
   const eligible: Scored[] = [];
 
   for (const model of context.catalog.listModels()) {
+    // Read the whole status, not just the availability enum. When the runtime has
+    // already ruled a model out it also recorded *why* — which resource fell
+    // short, by how much — and that sentence is what makes a routing refusal
+    // actionable. Re-deriving it here would duplicate the machine arithmetic and
+    // could contradict the status the operator is shown.
+    const status = context.runtime.getModelStatus(model.id);
     const verdict = evaluateCandidate(model, request, {
       policy,
       excluded,
       pinned,
       requiredTags,
-      availability: context.runtime.checkAvailability(model.id),
-      resourceFit: context.catalog.checkResources(model),
+      availability: status.availability,
+      availabilityReason: status.reason,
+      // The *current* machine is consulted afresh for a model that is still in
+      // the running: a model the runtime has not yet re-probed may have become
+      // unrunnable since, and a model that is not resident gets the whole machine.
+      resourceFit: context.catalog.checkResources(model, {
+        live: status.availability === 'available' || status.availability === 'unhealthy',
+        detail: true,
+      }),
     });
     if (verdict.eligible) {
       eligible.push(verdict.scored);
@@ -248,6 +261,14 @@ interface EvaluationInputs {
   readonly pinned: string | undefined;
   readonly requiredTags: readonly string[];
   readonly availability: AvailabilityState;
+  /** Why the runtime put the model in that state, when it said. */
+  readonly availabilityReason: string | undefined;
+  /**
+   * Whether the model's declared needs fit the machine, measured at decision
+   * time. Headroom is used for a model that is already resident and total
+   * capacity for one the runtime can cold-start; see
+   * {@link ModelCatalog.checkResources}.
+   */
   readonly resourceFit: { supported: boolean; reason?: string };
 }
 
@@ -303,11 +324,13 @@ function evaluateCandidate(
     }
   }
 
-  if (!inputs.resourceFit.supported) {
-    return { eligible: false, reason: inputs.resourceFit.reason ?? 'exceeds this machine' };
-  }
-
-  switch (inputs.availability) {
+  const availability = inputs.availability;
+  // A model that is already resident has already paid for its memory, so the
+  // question for it is headroom, not capacity — `resourceFit` was measured that
+  // way at the call site. The switch comes first because it decides which models
+  // are in the running at all; a model that is `unsupported` reports the
+  // runtime's own reason for it rather than a second opinion from here.
+  switch (availability) {
     case 'available':
       notes.push('healthy and ready');
       break;
@@ -330,13 +353,19 @@ function evaluateCandidate(
     case 'disabled':
       return { eligible: false, reason: 'disabled in configuration' };
     case 'unsupported':
-      return { eligible: false, reason: 'not supported on this machine' };
+      return { eligible: false, reason: inputs.availabilityReason ?? 'not supported on this machine' };
     case 'error':
-      return { eligible: false, reason: 'in an error state' };
+      return { eligible: false, reason: inputs.availabilityReason ?? 'in an error state' };
     default: {
-      const exhaustive: never = inputs.availability;
+      const exhaustive: never = availability;
       return { eligible: false, reason: `unhandled availability ${String(exhaustive)}` };
     }
+  }
+
+  // The machine is consulted last because *which* question to ask depends on the
+  // answer above; see the note at the top of the switch.
+  if (!inputs.resourceFit.supported) {
+    return { eligible: false, reason: inputs.resourceFit.reason ?? 'exceeds this machine' };
   }
 
   // Ordering contributions. Smaller is better; the weights are policy, not

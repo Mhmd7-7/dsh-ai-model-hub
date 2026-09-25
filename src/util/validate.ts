@@ -139,6 +139,13 @@ export function isLosslessJson(value: unknown, seen: Set<object> = new Set()): v
       return value.every((item) => isLosslessJson(item, seen));
     }
     if (!isRecord(value)) return false;
+    // A plain object only. `JSON.stringify(new Date())` yields a string and
+    // `JSON.stringify(new Map())` yields `{}`, so a class instance or a built-in
+    // container is silently *corrupted* by the round trip rather than rejected by
+    // it — which is exactly the loss this function exists to detect, and which a
+    // recursive walk over enumerable properties cannot see.
+    const prototype: unknown = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
     return Object.values(value).every((item) => isLosslessJson(item, seen));
   } finally {
     seen.delete(value);

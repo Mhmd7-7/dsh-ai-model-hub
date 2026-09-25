@@ -59,6 +59,16 @@ export type {
   ArtifactWriteRequest,
 } from './artifacts/types.ts';
 export { LocalArtifactStore, fileUriToPath, pathToFileUri } from './artifacts/local-store.ts';
+export {
+  THREE_D_FORMATS,
+  UNKNOWN_THREE_D_EXTENSION,
+  UNKNOWN_THREE_D_MIME,
+  measureThreeD,
+  sniffThreeDFormat,
+  threeDFormatInfo,
+  threeDFormatOf,
+} from './artifacts/formats.ts';
+export type { ThreeDFormat, ThreeDFormatInfo, ThreeDSniffResult } from './artifacts/formats.ts';
 
 // ── Adapters ────────────────────────────────────────────────────────────────
 export { AdapterRegistry, lineLogger, silentLogger } from './adapters/types.ts';
@@ -72,6 +82,7 @@ export { createMockAdapter, renderMockWav } from './adapters/mock.ts';
 export { createOpenAiCompatibleAdapter } from './adapters/openai.ts';
 export { createHttpJsonAdapter, extractImages, readPngSize } from './adapters/http-json.ts';
 export { createComfyUiAdapter, readPngDimensions } from './adapters/comfyui.ts';
+export { createThreeDAdapter } from './adapters/three-d.ts';
 export { MOCK_STL_VERTEX_COUNT, colorFromSeed, renderMockPng, renderMockStl } from './adapters/png.ts';
 
 // ── Router ──────────────────────────────────────────────────────────────────
@@ -112,22 +123,25 @@ export type {
 
 // ── Machine detection ───────────────────────────────────────────────────────
 export { probeMachine } from './machine.ts';
-export type { MachineProbeResult } from './machine.ts';
+export type { MachineProbeOptions, MachineProbeResult } from './machine.ts';
 
 // ── Shared types ────────────────────────────────────────────────────────────
 export {
   AVAILABILITY_STATES,
   LIFECYCLE_STATES,
+  reserveResources,
 } from './types.ts';
 export type {
   ArtifactInput,
   AvailabilityState,
   CatalogOptions,
+  GpuInfo,
   HealthReport,
   InvocationRequest,
   InvocationResult,
   LifecycleState,
   MachineProfile,
+  MachineResourceUse,
   ModelRuntimeStatus,
   ModelView,
   RoutingCandidate,
@@ -226,6 +240,19 @@ export type {
   DiffusionGraphSelection,
   WeightKind,
 } from './discovery/comfyui.ts';
+export {
+  THREE_D_ENGINE,
+  THREE_D_ENGINE_ALIASES,
+  createThreeDDiscoverer,
+  mapThreeDModel,
+  parseGradioSurface,
+  parseThreeDHostConfig,
+} from './discovery/three-d.ts';
+export type {
+  ThreeDDeclaredModel,
+  ThreeDHostConfigResult,
+  ThreeDSurface,
+} from './discovery/three-d.ts';
 
 // ── Configuration loading ───────────────────────────────────────────────────
 export {
