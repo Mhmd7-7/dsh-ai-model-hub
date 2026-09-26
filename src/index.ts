@@ -86,7 +86,7 @@ export type { AdapterPathOrigin, ResolvedAdapterPath } from './adapters/paths.ts
 export { createMockAdapter, renderMockWav } from './adapters/mock.ts';
 export { createOpenAiCompatibleAdapter } from './adapters/openai.ts';
 export { createHttpJsonAdapter, extractImages, readPngSize } from './adapters/http-json.ts';
-export { createComfyUiAdapter, readPngDimensions } from './adapters/comfyui.ts';
+export { createComfyUiAdapter, readComfyFileRefs, readPngDimensions } from './adapters/comfyui.ts';
 export { createThreeDAdapter } from './adapters/three-d.ts';
 export { MOCK_STL_VERTEX_COUNT, colorFromSeed, renderMockPng, renderMockStl } from './adapters/png.ts';
 
@@ -245,6 +245,41 @@ export type {
   DiffusionGraphSelection,
   WeightKind,
 } from './discovery/comfyui.ts';
+// Workflow discovery: the half of ComfyUI that proves a *capability* rather than
+// a loadable file. Kept in its own module because the two answer different
+// questions and only one of them infers anything.
+export {
+  COMFYUI_WORKFLOW_DIR,
+  ComfyWorkflowError,
+  classifyComfyNode,
+  estimateComfyWorkflowVram,
+  inferWorkflowCapabilities,
+  isThreeDFilename,
+  linkSource,
+  mapComfyWorkflow,
+  matchWorkflowOverride,
+  missingWorkflowModelFiles,
+  parseComfyWorkflow,
+  parseComfyWorkflowOverrides,
+  parseWorkflowList,
+  readComfyNodeIo,
+  readComfyWorkflows,
+  workflowModelFiles,
+} from './discovery/comfyui-workflow.ts';
+export type {
+  ComfyGraphNode,
+  ComfyNodeIndex,
+  ComfyNodeIo,
+  ComfyWorkflowConfigResult,
+  ComfyWorkflowFormat,
+  ComfyWorkflowOverride,
+  ComfyWorkflowReadResult,
+  ComfyWorkflowRef,
+  MappedComfyWorkflow,
+  NodeClassification,
+  ParsedComfyWorkflow,
+  WorkflowInference,
+} from './discovery/comfyui-workflow.ts';
 export {
   THREE_D_ENGINE,
   THREE_D_ENGINE_ALIASES,

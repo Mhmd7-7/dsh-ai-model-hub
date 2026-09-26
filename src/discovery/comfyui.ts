@@ -42,6 +42,17 @@ import type { ModelDescriptor, ModelHost } from '../catalog/descriptor.ts';
 import { fetchJson, isRecordLike, slugifyModelId, stableDigest } from './http.ts';
 import { DISCOVERED_PRIORITY, ioForCapabilities } from './types.ts';
 import type { HostDiscoverer } from './types.ts';
+import {
+  inferWorkflowCapabilities,
+  mapComfyWorkflow,
+  missingWorkflowModelFiles,
+  matchWorkflowOverride,
+  parseComfyWorkflowOverrides,
+  readComfyNodeIo,
+  readComfyWorkflows,
+  workflowModelFiles,
+} from './comfyui-workflow.ts';
+import type { ComfyNodeIndex, ComfyWorkflowOverride } from './comfyui-workflow.ts';
 
 /** Engine labels this discoverer answers to. */
 export const COMFYUI_ENGINES: readonly string[] = ['comfyui'];
@@ -357,13 +368,23 @@ function fileOptionsIn(fieldSpec: unknown): string[] {
 }
 
 /**
- * The capabilities a discovered ComfyUI model can serve.
+ * The capabilities a discovered ComfyUI *weight file* can serve.
  *
  * `text_to_image` is a property of having a checkpoint at all: any checkpoint
- * this install can load and any sampler is a text-to-image path. The rest come
- * from the installed node packs — see {@link CAPABILITY_SIGNALS} — and apply to
- * every checkpoint, because in ComfyUI the graph, not the checkpoint, decides
- * the output kind.
+ * this install can load and any sampler is a text-to-image path. `image_to_image`
+ * is the same sampler with different conditioning, so the discovered weights
+ * serve it directly — see {@link CAPABILITY_SIGNALS}.
+ *
+ * **Everything else is deliberately excluded, and this is the correction of a
+ * false positive found on a real install twice.** A 3D or video capability is not
+ * a property of the weights: in ComfyUI the *graph* decides what is produced, and
+ * a graph that makes a mesh needs its own model (TRELLIS.2, Hunyuan3D, …) that the
+ * discovered checkpoint does not power. Granting it here because a node pack is
+ * installed — or, worse, because a *workflow* on the same host proves it — routes
+ * work into a guaranteed failure, and it is exactly the confusion that
+ * {@link inferWorkflowCapabilities} exists to remove: **a capability belongs to the
+ * thing that demonstrates it.** The workflow descriptors carry the 3D capabilities
+ * because their graphs prove them; a checkpoint entry never does.
  *
  * @param introspection - what the node graph revealed.
  * @returns the capability list, never empty.
@@ -374,10 +395,19 @@ export function capabilitiesForComfyModel(introspection: ComfyIntrospection): Ca
   // checkpoint plus a sampler is a text-to-image path by construction.
   capabilities.push('text_to_image');
   for (const capability of introspection.capabilities) {
+    if (!WEIGHT_FILE_CAPABILITIES.includes(capability)) continue;
     if (!capabilities.includes(capability)) capabilities.push(capability);
   }
   return capabilities;
 }
+
+/**
+ * The capabilities a discovered weight file may claim from node presence.
+ *
+ * The narrowing rule described on {@link capabilitiesForComfyModel}, expressed as
+ * data so the boundary is one list rather than an `if` inside a loop.
+ */
+const WEIGHT_FILE_CAPABILITIES: readonly Capability[] = ['image_to_image'];
 
 /**
  * The `type` a descriptor declares for a capability set.
@@ -396,6 +426,15 @@ function modelTypeForCapabilities(capabilities: readonly Capability[]): ModelTyp
   if (capabilities.includes('image_to_image')) return 'image_editing';
   return 'image_generation';
 }
+
+/**
+ * The `Capability` names a discovered workflow may advertise.
+ *
+ * Kept beside the weight-file list so the two halves of ComfyUI discovery state
+ * their claims in one place; a capability added to the vocabulary is either
+ * provable from a graph or it is not, and this says which.
+ */
+export const WORKFLOW_CAPABILITIES: readonly Capability[] = ['text_to_3d', 'image_to_3d'];
 
 /**
  * Estimate a checkpoint's VRAM need from its filename.
@@ -650,20 +689,29 @@ export function buildDefaultGraph(
 /**
  * Map one discovered weight file into a descriptor.
  *
+ * `overrides` is the host's `adapterConfig.workflows` list, reused here because a
+ * weight model is pinned the same way a workflow is: by naming the thing the
+ * operator recognises. The override's `workflowName` matches the weight file's own
+ * name, which is the only handle an operator has on a discovered checkpoint, and
+ * the discovery-derived fields the override does not mention are kept.
+ *
  * @param file - the enumerated weight file.
  * @param host - the host it belongs to.
  * @param introspection - what the node graph revealed.
+ * @param overrides - operator overrides from the host's configuration.
  * @returns the descriptor.
  */
 export function mapComfyWeightFile(
   file: ComfyWeightFile,
   host: ModelHost,
   introspection: ComfyIntrospection,
+  overrides: readonly ComfyWorkflowOverride[] = [],
 ): ModelDescriptor {
   const capabilities = capabilitiesForComfyModel(introspection);
   const { inputTypes, outputTypes } = ioForCapabilities(capabilities);
   const id = slugifyModelId(file.filename, host.runtime.engine || COMFYUI_ENGINE, `model-${stableDigest(file.filename)}`);
   const vramGb = estimateComfyVram(file.filename);
+  const override = matchWorkflowOverride(overrides, file.filename);
 
   // The two shapes a model can take here, each with its own loader path. A
   // checkpoint carries its own CLIP and VAE; a diffusion model does not, so the
@@ -677,8 +725,8 @@ export function mapComfyWeightFile(
         : undefined;
 
   return {
-    id,
-    name: file.filename,
+    id: override?.id ?? id,
+    name: override?.name ?? file.filename,
     type: modelTypeForCapabilities(capabilities),
     host: host.id,
     capabilities,
@@ -696,12 +744,14 @@ export function mapComfyWeightFile(
         ...(selection?.vaeName === undefined ? {} : { vae: selection.vaeName }),
         ...(selection?.clipType === undefined ? {} : { clipType: selection.clipType }),
         ...(introspection.signals.length === 0 ? {} : { capabilitySignals: [...introspection.signals] }),
+        ...(override === undefined ? {} : { configured: true }),
       },
     },
-    resources: { vramGb, ramGb: vramGb, requiresGpu: true },
-    priority: DISCOVERED_PRIORITY,
-    tags: [...DISCOVERED_TAGS],
-    notes: describeComfyModel(file, introspection, selection, vramGb),
+    resources: { vramGb: override?.vramGb ?? vramGb, ramGb: override?.ramGb ?? vramGb, requiresGpu: override?.requiresGpu ?? true },
+    priority: override?.priority ?? DISCOVERED_PRIORITY,
+    tags: override?.tags === undefined ? [...DISCOVERED_TAGS] : [...DISCOVERED_TAGS, ...override.tags],
+    ...(override?.enabled === undefined ? {} : { enabled: override.enabled }),
+    notes: describeComfyModel(file, introspection, selection, vramGb, override),
   };
 }
 
@@ -789,6 +839,7 @@ function diffusionSelection(selection: DiffusionGraphSelection | undefined): Gra
  * @param introspection - what the node graph revealed.
  * @param selection - what a generated graph wired up, or `undefined` when none was.
  * @param vramGb - the estimate that was applied.
+ * @param override - the configuration override that applied, when one did.
  * @returns the note.
  */
 function describeComfyModel(
@@ -796,10 +847,14 @@ function describeComfyModel(
   introspection: ComfyIntrospection,
   selection: GraphSelection | undefined,
   vramGb: number,
+  override?: ComfyWorkflowOverride,
 ): string {
   const facts: string[] = [
     `Discovered from ComfyUI's /object_info (${file.kind} file); not listed in models.json.`,
   ];
+  if (override !== undefined) {
+    facts.push('Configuration pins this file: its id, capabilities, resources, or priority come from models.json.');
+  }
   if (selection === undefined) {
     facts.push(
       'No workflow template is attached and this install could not run either graph shape discovery knows ' +
@@ -829,10 +884,30 @@ function describeComfyModel(
 /**
  * Build the ComfyUI discoverer.
  *
+ * ## Two kinds of thing, one host
+ *
+ * A ComfyUI install holds **weight files** and **workflows**, and they answer
+ * different questions. The weight files (`/object_info` loader enumerations) say
+ * what the engine can load; the workflows (`/userdata?dir=workflows`) say what it
+ * can be *asked to do*. Both are published here, from one pass, and they cannot be
+ * confused because a workflow descriptor carries the graph in
+ * `adapterConfig.workflow` while a weight descriptor carries the loader path
+ * discovery generated for it.
+ *
+ * ## Failure containment
+ *
+ * `/object_info` failing is a hard failure for the host: without it neither half
+ * can be read, because the node index is what makes a workflow interpretable at
+ * all. Everything after that is contained — an unreadable workflow directory, a
+ * malformed workflow file, or an unusable override list costs that one item and is
+ * reported, never the pass.
+ *
  * @param options - options for the pass.
  * @returns the discoverer.
  */
-export function createComfyUiDiscoverer(options: { readonly requestTimeoutMs?: number } = {}): HostDiscoverer {
+export function createComfyUiDiscoverer(
+  options: { readonly requestTimeoutMs?: number; readonly maxWorkflows?: number } = {},
+): HostDiscoverer {
   const requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
   return {
     engine: COMFYUI_ENGINE,
@@ -851,6 +926,24 @@ export function createComfyUiDiscoverer(options: { readonly requestTimeoutMs?: n
       }
 
       const introspection = parseComfyObjectInfo(read.value);
+      const nodeIo: ComfyNodeIndex = readComfyNodeIo(read.value);
+
+      const configured = parseComfyWorkflowOverrides(host);
+      if (!configured.ok) {
+        throw new Error(`the ${host.id} host declares unusable workflow overrides: ${configured.reason}`);
+      }
+      const overrides = configured.overrides;
+
+      // Workflows first: they are the entries that prove a *capability*, and
+      // placing them before the weight files keeps the published order stable and
+      // readable (capability-bearing models, then the weights behind them).
+      const descriptors: ModelDescriptor[] = [];
+      const seen = new Set<string>();
+      for (const descriptor of await discoverWorkflows(endpoint, host, nodeIo, introspection, overrides, signal, requestTimeoutMs, options)) {
+        if (seen.has(descriptor.id)) continue;
+        seen.add(descriptor.id);
+        descriptors.push(descriptor);
+      }
 
       // One descriptor per *routeable model*: a checkpoint, or a diffusion model
       // the generated graph can actually load. A LoRA is not published — it is a
@@ -858,11 +951,9 @@ export function createComfyUiDiscoverer(options: { readonly requestTimeoutMs?: n
       // to that checkpoint" yet. A diffusion model is published only when a graph
       // for it could be built, so the catalog never advertises something the
       // adapter would then refuse.
-      const seen = new Set<string>();
-      const descriptors: ModelDescriptor[] = [];
       for (const file of introspection.files) {
         if (file.kind !== 'checkpoint' && file.kind !== 'diffusionModel') continue;
-        const descriptor = mapComfyWeightFile(file, host, introspection);
+        const descriptor = mapComfyWeightFile(file, host, introspection, overrides);
         if (descriptor.adapterConfig?.['workflow'] === undefined) continue;
         if (seen.has(descriptor.id)) continue;
         seen.add(descriptor.id);
@@ -871,6 +962,63 @@ export function createComfyUiDiscoverer(options: { readonly requestTimeoutMs?: n
       return descriptors;
     },
   };
+}
+
+/**
+ * Read every saved workflow and map the ones worth publishing.
+ *
+ * Each workflow is fetched, parsed, and classified independently, so one bad file
+ * cannot hide the others. A workflow that parses but whose capabilities cannot be
+ * proven is still published — disabled — because "this is installed and the hub
+ * cannot tell what it does" is information an operator needs, and the alternative
+ * is a workflow they can see in the ComfyUI UI but not in `list_models`. The same
+ * applies to one whose weights are missing: the capability is real, the install is
+ * incomplete, and the descriptor says so.
+ *
+ * @param endpoint - the ComfyUI base URL.
+ * @param host - the configured host, for the id and engine label a descriptor carries.
+ * @param nodeIo - every node class's IO contract.
+ * @param introspection - what the weight-file pass revealed, for the installed files.
+ * @param overrides - the operator's override list.
+ * @param signal - cancellation for the pass.
+ * @param requestTimeoutMs - budget per request.
+ * @param options - the discoverer's own options, for the workflow-count cap.
+ * @returns the descriptors, in listing order.
+ */
+async function discoverWorkflows(
+  endpoint: string,
+  host: ModelHost,
+  nodeIo: ComfyNodeIndex,
+  introspection: ComfyIntrospection,
+  overrides: readonly ComfyWorkflowOverride[],
+  signal: AbortSignal,
+  requestTimeoutMs: number,
+  options: { readonly maxWorkflows?: number },
+): Promise<ModelDescriptor[]> {
+  const read = await readComfyWorkflows(endpoint, nodeIo, signal, requestTimeoutMs, {
+    ...(options.maxWorkflows === undefined ? {} : { maxWorkflows: options.maxWorkflows }),
+  });
+  if (!read.listed) return [];
+
+  const installed = introspection.files.map((file) => file.filename);
+  const descriptors: ModelDescriptor[] = [];
+  for (const workflow of read.workflows) {
+    const inference = inferWorkflowCapabilities(workflow, nodeIo);
+    const override = matchWorkflowOverride(overrides, workflow.name);
+    const modelFiles = workflowModelFiles(workflow, nodeIo);
+    const mapped = mapComfyWorkflow(workflow, host, inference, {
+      ...(override === undefined ? {} : { override }),
+      modelFiles,
+      // A workflow the operator pinned to its own file is exempt from the
+      // installed-file check: the check is about the graph the hub read, and the
+      // pinned file is a different graph the hub has not seen.
+      ...(override?.workflowPath === undefined
+        ? { missingModelFiles: missingWorkflowModelFiles(workflow, nodeIo, installed) }
+        : {}),
+    });
+    descriptors.push(mapped.descriptor);
+  }
+  return descriptors;
 }
 
 /**

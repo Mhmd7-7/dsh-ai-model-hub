@@ -92,7 +92,7 @@
       }
     },
     {
-      "$comment": "ComfyUI has a graph API rather than a prompt endpoint, so it has its own `comfyui` adapter. A model points at a template with `adapterConfig.workflowPath`; the adapter writes the prompt into the CLIPTextEncode node wired to the sampler's `positive` link, queues the graph, polls /history, and downloads from /view.",
+      "$comment": "ComfyUI has a graph API rather than a prompt endpoint, so it has its own `comfyui` adapter. A model points at a template with `adapterConfig.workflowPath`; the adapter writes the prompt into the CLIPTextEncode node wired to the sampler's `positive` link, queues the graph, polls /history, and downloads from /view. The same adapter runs 3D workflows: an `image_to_3d` request uploads its image to /upload/image, puts the returned filename on the workflow's LoadImage node, queues the graph, and returns the GLB as a `model_3d` artifact. You do not write an entry for a 3D workflow at all — ComfyUI discovery reads the workflows saved in ComfyUI, infers `image_to_3d` (and `text_to_3d`, when a prompt reaches the generator) from the graph, verifies the nodes and weights the graph needs, and publishes the ones that can run. Do not list several 3D workflow entries here just to register them.",
       "id": "comfyui",
       "name": "ComfyUI",
       "adapter": "comfyui",
@@ -102,6 +102,7 @@
         "endpoint": "http://127.0.0.1:8188",
         "path": "/prompt"
       },
+      "$comment:adapterConfig": "Optional, and the override layer for discovered workflows — not a way to register them. `workflows` matches a workflow by the name ComfyUI stores it under (`workflowName`, with or without `.json`), and can pin a preferred one with `priority`, disable one with `enabled: false`, correct discovery's heuristic resource estimate with `vramGb`/`ramGb`, narrow its capabilities with `capabilities` (never widen: a capability the graph does not prove cannot be added), or run a different file with `workflowPath` when a UI export could not be converted faithfully. A discovered 2D checkpoint is pinned the same way, by its filename. Example: \"adapterConfig\": { \"workflows\": [{ \"workflowName\": \"3d/my_image_to_model\", \"priority\": 10 }, { \"workflowName\": \"3d/experimental\", \"enabled\": false }] }",
       "health": {
         "kind": "http",
         "path": "/system_stats",

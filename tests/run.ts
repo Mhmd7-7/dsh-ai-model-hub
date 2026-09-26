@@ -38,3 +38,4 @@ import './three-d.test.ts';
 import './discovery-ollama.test.ts';
 import './discovery-a1111.test.ts';
 import './discovery-comfyui.test.ts';
+import './discovery-comfyui-workflow.test.ts';

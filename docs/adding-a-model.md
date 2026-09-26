@@ -24,7 +24,7 @@ Set `discoverModels: true` on the plugin (or `discoverModels: true` on
 | Engine | Where it is asked | What comes back |
 |---|---|---|
 | Ollama | `/api/tags`, then `/api/show` per model | every pulled model, with vision detected and the declared context window |
-| ComfyUI | `/object_info` | every checkpoint file, with capabilities from the installed node packs |
+| ComfyUI | `/object_info`, then `/userdata?dir=workflows` | every checkpoint file, plus every **saved workflow** with the capabilities its own graph proves — including `image_to_3d` and `text_to_3d` |
 | A1111 / Forge | `/sdapi/v1/sd-models`, `/samplers`, `/options` | every checkpoint, with the loaded one preferred |
 
 Some properties worth knowing before you switch it on:
@@ -39,16 +39,44 @@ Some properties worth knowing before you switch it on:
   contributes no models from that host, and the hub boots normally.
 - **Models appear as they are installed.** The result is cached per host for
   `discoveryTtlMs` (60 s by default); the `refresh_model_discovery` tool bypasses
-  the cache, which is the path right after an `ollama pull`.
+  the cache, which is the path right after an `ollama pull` — or right after saving
+  a workflow in ComfyUI.
 - **Estimates are estimates.** A discovered model's `resources` come from a
-  reported file size where the engine provides one and from a filename heuristic
-  (does it say `xl`, `sdxl`, `flux`?) where it does not. They are good enough to
-  filter a small card out of the running; they are not a specification.
+  reported file size where the engine provides one and from a name heuristic
+  (does it say `xl`, `sdxl`, `flux`?) where it does not. A ComfyUI *workflow* is the
+  extreme case: nothing reports a graph's memory demand, so its figure is inferred
+  from the node classes it uses. They are good enough to filter a small card out of
+  the running; they are not a specification.
 
 Discovered models appear in `list_models` alongside static ones, with a note
 recording that they were discovered and where from. If you want to know exactly
 what discovery decided and why, run `refresh_model_discovery` — it reports what
 each engine contributed, what was added or removed, and every warning.
+
+### ComfyUI workflows: capability discovered, not configured
+
+ComfyUI is the one engine where a *capability* comes from discovery. A saved
+workflow is read as a graph, and what it can do is inferred from structure rather
+than from its name:
+
+```
+LoadImage  +  a node that returns MESH  +  a node that writes a 3D file
+   = image_to_3d
+```
+
+The same test with a prompt that reaches the generator gives `text_to_3d`. Anything
+that cannot be proven — a graph that only previews a mesh, a graph that decimates
+one, a graph whose mesh never reaches a writer — is published **disabled**, with the
+reason in its notes, so you see it in `list_models` without the router ever sending
+work into it. A workflow whose weights are not installed is disabled for the same
+reason, and its notes name the missing files.
+
+Because capability belongs to the thing that demonstrates it, the checkpoint models
+discovered from `/object_info` never claim a 3D capability, even when the 3D node
+packs are installed. Installing a 3D workflow in ComfyUI is all it takes to make
+`image_to_3d` routable; no JSON entry is needed. To *override* what discovery found,
+configure the host — see `adapterConfig.workflows` in the SKILL and the ComfyUI
+section of `config/examples/real-models.example.json`.
 
 ---
 
