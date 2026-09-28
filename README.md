@@ -14,8 +14,8 @@ Everything below that question is this project's job.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  DeepSeek Harness                        agent reasoning, planning, │
-│  ─────────────────                       tool invocation, workflows │
+│  DeepSeek Harness                        agent reasoning, planning,  │
+│  ─────────────────                       tool invocation, workflows  │
 │                                                                      │
 │      tools: invoke_model · list_models · list_capabilities ·         │
 │             get_model_status · start_model · stop_model · …          │
