@@ -216,6 +216,7 @@
         "name": { "type": "string", "description": "Human-facing name." },
         "adapter": { "$ref": "#/$defs/adapterKind" },
         "runtime": { "$ref": "#/$defs/runtime" },
+        "adapterConfig": { "type": "object", "description": "For ComfyUI: workflows is an array of explicitly declared workflow capability providers; never model files.", "additionalProperties": true },
         "lifecycle": { "$ref": "#/$defs/lifecycle" },
         "resources": { "$ref": "#/$defs/resources" },
         "health": { "$ref": "#/$defs/health" },
@@ -236,6 +237,8 @@
           "description": "Unique, stable, kebab-case id. Never reused for a different model."
         },
         "name": { "type": "string", "minLength": 1, "description": "Human-facing display name." },
+        "providerKind": { "type": "string", "enum": ["workflow"], "description": "Required for static ComfyUI workflow providers." },
+        "workflowId": { "type": "string", "description": "Public workflow identity; never a checkpoint filename." },
         "type": { "$ref": "#/$defs/modelType" },
         "capabilities": {
           "type": "array",

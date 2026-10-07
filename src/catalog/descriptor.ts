@@ -41,6 +41,7 @@ import {
   readRequiredString,
 } from '../util/validate.ts';
 import { ModelHubError } from '../errors.ts';
+import { readContract } from '../comfy/workflow.ts';
 
 /**
  * How the hub talks to a model. One adapter per kind, registered in the adapter
@@ -214,6 +215,10 @@ export type AdapterConfig = Readonly<Record<string, unknown>>;
 export interface ModelDescriptor {
   /** Unique, stable, kebab-case id. Never reused for a different model. */
   readonly id: string;
+  /** ComfyUI entries are workflow-backed providers, never weight-file models. */
+  readonly providerKind?: 'workflow';
+  /** Public workflow identity (not a checkpoint or graph node). */
+  readonly workflowId?: string;
   /** Human-facing display name. */
   readonly name: string;
   /** What the model is. */
@@ -324,6 +329,8 @@ export interface ModelCatalogConfig {
  */
 export interface ResolvedModel {
   readonly id: string;
+  readonly providerKind?: 'workflow';
+  readonly workflowId?: string;
   readonly name: string;
   readonly type: ModelType;
   readonly capabilities: readonly Capability[];
@@ -460,8 +467,12 @@ export function parseModelDescriptor(
     return undefined;
   }
 
+  const providerKind = readOptionalEnum(raw, 'providerKind', ['workflow'] as const, path, collector);
+  const workflowId = readOptionalString(raw, 'workflowId', path, collector);
   const descriptor: {
     id: string;
+    providerKind?: 'workflow';
+    workflowId?: string;
     name: string;
     type: ModelType;
     capabilities: readonly Capability[];
@@ -481,6 +492,8 @@ export function parseModelDescriptor(
     tags?: readonly string[];
     notes?: string;
   } = { id, name, type, capabilities };
+  if (providerKind !== undefined) descriptor.providerKind = providerKind;
+  if (workflowId !== undefined) descriptor.workflowId = workflowId;
 
   const inputTypes = readOptionalEnumArray(raw, 'inputTypes', IO_TYPE_VALUES, path, collector);
   if (inputTypes !== undefined) descriptor.inputTypes = inputTypes;
@@ -902,6 +915,12 @@ function validateCatalogCrossReferences(
     if (modelIds.has(model.id)) collector.add(`${path}.id`, `duplicate model id "${model.id}"`);
     modelIds.add(model.id);
 
+    const host = hosts.find((candidate) => candidate.id === model.host);
+    if ((model.adapter ?? host?.adapter ?? model.runtime?.adapter) === 'comfyui') {
+      if (model.providerKind !== 'workflow' || model.workflowId === undefined) collector.add(`${path}.providerKind`, 'ComfyUI providers must declare providerKind "workflow" and workflowId');
+      try { readContract(model.adapterConfig ?? {}, model.capabilities); }
+      catch (error) { collector.add(`${path}.adapterConfig`, error instanceof Error ? error.message : String(error)); }
+    }
     if (model.host !== undefined && model.runtime === undefined && !hostIds.has(model.host)) {
       collector.add(`${path}.host`, `references unknown host "${model.host}"`);
     }
@@ -1009,6 +1028,8 @@ export function resolveDescriptor(
 
   const resolved: {
     id: string;
+    providerKind?: 'workflow';
+    workflowId?: string;
     name: string;
     type: ModelType;
     capabilities: readonly Capability[];
@@ -1029,6 +1050,8 @@ export function resolveDescriptor(
     descriptor: ModelDescriptor;
   } = {
     id: descriptor.id,
+    ...(descriptor.providerKind === undefined ? {} : { providerKind: descriptor.providerKind }),
+    ...(descriptor.workflowId === undefined ? {} : { workflowId: descriptor.workflowId }),
     name: descriptor.name,
     type: descriptor.type,
     capabilities: [...descriptor.capabilities],

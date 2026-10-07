@@ -242,7 +242,7 @@ with a real engine, without leaking the override.
 | `mock` | ✅ implemented | **A test double, never a shipped model.** In-process, deterministic, and used by this repository's own tests: text, PNG images, STL meshes, WAV audio, JSON video manifests. No catalog in `config/` references it. |
 | `openai_compatible` | ✅ implemented | Ollama, llama.cpp, vLLM, LM Studio, KoboldCpp — `text_to_text` and `image_understanding` |
 | `http_json` | ✅ implemented | A1111/Forge, and any JSON-in/JSON-out image engine |
-| `comfyui` | ✅ implemented | ComfyUI's graph API, driven by an API-format workflow template |
+| `comfyui` | ✅ implemented | ComfyUI's graph API, driven only by explicitly configured API-format workflows with input bindings and typed output selectors; graphs are opaque |
 | `three_d` | ✅ implemented | Local image-to-3D servers over Gradio's queue API or a JSON route — TRELLIS, Hunyuan3D, Stable Fast 3D, TripoSR. Parameterised by a declarative step list, so the engine specifics are catalog data. See [three-d.md](three-d.md) |
 | `cli` | contract ready | Process-per-request engines reading a local checkpoint |
 

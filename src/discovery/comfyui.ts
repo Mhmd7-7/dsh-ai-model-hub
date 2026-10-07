@@ -37,7 +37,10 @@
  * @module dsh-ai-model-hub/discovery/comfyui
  */
 
+import { isCapability } from '../catalog/capabilities.ts';
 import type { Capability, ModelType } from '../catalog/capabilities.ts';
+const isComfyCapability = (value: string): value is Capability => isCapability(value) && ['text_to_image', 'image_to_image', 'text_to_3d', 'image_to_3d'].includes(value);
+import { readContract, loadComfyGraph, validateComfyGraph } from '../comfy/workflow.ts';
 import type { ModelDescriptor, ModelHost } from '../catalog/descriptor.ts';
 import { fetchJson, isRecordLike, slugifyModelId, stableDigest } from './http.ts';
 import { DISCOVERED_PRIORITY, ioForCapabilities } from './types.ts';
@@ -925,39 +928,40 @@ export function createComfyUiDiscoverer(
         throw new Error(`could not read /object_info from ${endpoint}: ${read.reason}`);
       }
 
-      const introspection = parseComfyObjectInfo(read.value);
-      const nodeIo: ComfyNodeIndex = readComfyNodeIo(read.value);
-
-      const configured = parseComfyWorkflowOverrides(host);
-      if (!configured.ok) {
-        throw new Error(`the ${host.id} host declares unusable workflow overrides: ${configured.reason}`);
-      }
-      const overrides = configured.overrides;
-
-      // Workflows first: they are the entries that prove a *capability*, and
-      // placing them before the weight files keeps the published order stable and
-      // readable (capability-bearing models, then the weights behind them).
+      // /object_info verifies required node classes; no loader filenames are published.
+      const classes = new Set(Object.keys(read.value as Record<string, unknown>));
+      const configured = host.adapterConfig?.['workflows'];
+      if (configured === undefined) return [];
+      if (!Array.isArray(configured)) throw new Error('ComfyUI host adapterConfig.workflows must be an array');
       const descriptors: ModelDescriptor[] = [];
       const seen = new Set<string>();
-      for (const descriptor of await discoverWorkflows(endpoint, host, nodeIo, introspection, overrides, signal, requestTimeoutMs, options)) {
-        if (seen.has(descriptor.id)) continue;
-        seen.add(descriptor.id);
-        descriptors.push(descriptor);
-      }
-
-      // One descriptor per *routeable model*: a checkpoint, or a diffusion model
-      // the generated graph can actually load. A LoRA is not published — it is a
-      // modifier, not a model, and there is no descriptor shape for "apply this
-      // to that checkpoint" yet. A diffusion model is published only when a graph
-      // for it could be built, so the catalog never advertises something the
-      // adapter would then refuse.
-      for (const file of introspection.files) {
-        if (file.kind !== 'checkpoint' && file.kind !== 'diffusionModel') continue;
-        const descriptor = mapComfyWeightFile(file, host, introspection, overrides);
-        if (descriptor.adapterConfig?.['workflow'] === undefined) continue;
-        if (seen.has(descriptor.id)) continue;
-        seen.add(descriptor.id);
-        descriptors.push(descriptor);
+      for (const [index, entry] of configured.entries()) {
+        if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`workflows[${index}] must be an object`);
+        const row = entry as Record<string, unknown>;
+        const { id, name, capabilities } = row;
+        if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9._-]*$/.test(id) || typeof name !== 'string' || !Array.isArray(capabilities) || !capabilities.length || !capabilities.every((value) => typeof value === 'string' && isComfyCapability(value))) {
+          throw new Error(`workflows[${index}] needs a valid id, name and supported capabilities`);
+        }
+        if (seen.has(id)) throw new Error(`duplicate ComfyUI workflow id "${id}"`);
+        seen.add(id);
+        const declared = capabilities as Capability[];
+        const config = { workflowPath: row['workflowPath'], workflow: row['workflow'], bindings: row['bindings'], outputs: row['outputs'] };
+        const contract = readContract(config, declared);
+        const graph = await loadComfyGraph(config, typeof host.adapterConfig?.['catalogDir'] === 'string' ? host.adapterConfig['catalogDir'] : undefined);
+        validateComfyGraph(graph, contract, classes);
+        const { inputTypes, outputTypes } = ioForCapabilities(declared);
+        const vramGb = typeof row['vramGb'] === 'number' ? row['vramGb'] : 0;
+        descriptors.push({
+          id, name, type: modelTypeForCapabilities(declared), host: host.id,
+          providerKind: 'workflow', workflowId: id,
+          capabilities: declared, inputTypes, outputTypes,
+          adapterConfig: { workflow: graph, bindings: contract.bindings, outputs: contract.outputs },
+          resources: { vramGb, ramGb: typeof row['ramGb'] === 'number' ? row['ramGb'] : vramGb, requiresGpu: row['requiresGpu'] === true },
+          priority: typeof row['priority'] === 'number' ? row['priority'] : DISCOVERED_PRIORITY,
+          tags: [...DISCOVERED_TAGS, 'workflow', ...(Array.isArray(row['tags']) ? row['tags'].filter((tag): tag is string => typeof tag === 'string') : [])],
+          enabled: row['enabled'] !== false,
+          notes: 'Configured ComfyUI workflow capability provider.',
+        });
       }
       return descriptors;
     },

@@ -78,11 +78,11 @@ engine families are genuinely different:
 - **`http_json`** — engines that answer one request with a finished image:
   AUTOMATIC1111, Forge, and `stable-diffusion.cpp`'s `sd-server`. It POSTs the
   familiar `/sdapi/v1/txt2img` body and decodes the base64 images that come back.
-- **`comfyui`** — ComfyUI takes a *node graph*, not a prompt. This adapter edits
-  a workflow template (the prompt goes to the CLIPTextEncode node wired to the
-  sampler's `positive` link; size and sampler settings go to the latent and
-  sampler nodes), queues it on `/prompt`, polls `/history`, and downloads the
-  result from `/view`.
+- **`comfyui`** — ComfyUI takes an API-format *node graph*, not a prompt endpoint.
+  Each explicitly configured workflow declares capabilities, exact input bindings
+  and a typed output selector. The adapter treats graph internals as opaque, edits
+  only declared inputs, queues on `/prompt`, polls `/history`, and retrieves the
+  declared output. No checkpoint or saved-workflow enumeration creates providers.
 
 Phase 4 is **`three_d`**: one adapter that speaks the shape the local 3D ecosystem
 actually has — a Gradio queue API or a JSON HTTP route, one or two calls, a mesh
@@ -412,11 +412,11 @@ Two halves, both dependency-free:
 
 ### Pointing the hub at your engines
 
-The catalog the package ships ([`config/models.json`](config/models.json)) already
-declares two real engines — Ollama for text and ComfyUI for images — so the first
-run needs no editing at all; it needs those engines installed, and the model
-names to match what you actually pulled (`ollama list`) and what your ComfyUI
-models directory holds.
+The shipped catalog ([`config/models.json`](config/models.json)) declares two real
+engines — Ollama for text and ComfyUI for images — and includes a specific ComfyUI
+workflow provider. Ensure Ollama has the configured model and ComfyUI has the
+workflow's required weights; installing a new checkpoint or saving a workflow does
+not, on its own, register a new ComfyUI provider.
 
 To change them, or to add more, edit that file or point the plugin at your own
 with `configPath` / `searchRoots`. Everything else is copy-and-adjust from
@@ -425,7 +425,12 @@ an A1111/Forge/sd.cpp server uses `http_json`, llama.cpp uses
 `openai_compatible`, and ComfyUI uses its own `comfyui` adapter driven by a graph
 template — an example is in
 [`config/workflows/z-image-turbo.api.json`](config/workflows/z-image-turbo.api.json),
-a saved `{client_id, prompt}` payload the adapter accepts directly.
+an API-format `{client_id, prompt}` graph. The provider additionally declares exact
+`bindings` for caller inputs and an `outputs` node/type selector; the graph's
+internals are not inferred. To add a ComfyUI provider, configure the host's
+`adapterConfig.workflows` with `id`, `name`, `workflowPath`, `capabilities`,
+`bindings`, `outputs` and optional routing/resource settings. The static model
+alternative uses `adapterConfig.providerKind: "workflow"` and `workflowId`.
 
 A catalog names those files (`workflowPath` for ComfyUI, `stepsPath` for 3D) with
 paths **relative to the catalog itself**, because a catalog can live anywhere and
@@ -442,10 +447,11 @@ fails — never fixture text: there are no mock models in any shipped catalog. S
 
 #### Let the engines list their own models
 
-Editing JSON is not the only way. Set `discoverModels: true` on the plugin and
-the hub also asks each configured host what it currently holds — a pulled Ollama
-model, a checkpoint dropped into ComfyUI's models directory, a LoRA someone
-installed — and adds those to the catalog with no edit at all:
+For supported enumerating engines such as Ollama, set `discoverModels: true` on
+the plugin to register pulled models. **ComfyUI remains workflow-only and
+configuration-driven**: discovery does not publish its loose checkpoints or saved
+workflows. Add a ComfyUI workflow descriptor to the host config (or a static
+workflow model) and reload the catalog:
 
 ```yaml
 - insert:
@@ -460,8 +466,8 @@ introspection. With it on:
 
 - `config/models.json` still wins. A discovered model whose id a hand-written
   entry claims is dropped before the catalog is built, so the file stays the
-  place to pin a checkpoint, set exact resources, attach a tuned workflow, or fix
-  a priority.
+  place to set exact resources or fix priority. ComfyUI workflow providers are
+  always explicitly configured, independently of this discovery switch.
 - An engine that is down is a warning in the log, never a failed boot.
 - Results are cached per host for `discoveryTtlMs` (60 s). The
   `refresh_model_discovery` tool bypasses the cache — that is the path right

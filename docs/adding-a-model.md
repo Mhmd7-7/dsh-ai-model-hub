@@ -24,7 +24,7 @@ Set `discoverModels: true` on the plugin (or `discoverModels: true` on
 | Engine | Where it is asked | What comes back |
 |---|---|---|
 | Ollama | `/api/tags`, then `/api/show` per model | every pulled model, with vision detected and the declared context window |
-| ComfyUI | `/object_info`, then `/userdata?dir=workflows` | every checkpoint file, plus every **saved workflow** with the capabilities its own graph proves — including `image_to_3d` and `text_to_3d` |
+| ComfyUI | configured `adapterConfig.workflows` on its host | one provider per explicitly configured API-format workflow; no checkpoints or saved workflows are implicitly published |
 | A1111 / Forge | `/sdapi/v1/sd-models`, `/samplers`, `/options` | every checkpoint, with the loaded one preferred |
 
 Some properties worth knowing before you switch it on:
@@ -39,44 +39,51 @@ Some properties worth knowing before you switch it on:
   contributes no models from that host, and the hub boots normally.
 - **Models appear as they are installed.** The result is cached per host for
   `discoveryTtlMs` (60 s by default); the `refresh_model_discovery` tool bypasses
-  the cache, which is the path right after an `ollama pull` — or right after saving
-  a workflow in ComfyUI.
-- **Estimates are estimates.** A discovered model's `resources` come from a
-  reported file size where the engine provides one and from a name heuristic
-  (does it say `xl`, `sdxl`, `flux`?) where it does not. A ComfyUI *workflow* is the
-  extreme case: nothing reports a graph's memory demand, so its figure is inferred
-  from the node classes it uses. They are good enough to filter a small card out of
-  the running; they are not a specification.
+  the cache, which is the path right after an `ollama pull`. ComfyUI workflows
+  instead require explicit host configuration.
+- **Estimates are estimates.** Other engines may report file sizes or use filename
+  heuristics. For ComfyUI workflows, specify deployment-appropriate `vramGb` and
+  `ramGb` in the configured workflow.
 
 Discovered models appear in `list_models` alongside static ones, with a note
 recording that they were discovered and where from. If you want to know exactly
 what discovery decided and why, run `refresh_model_discovery` — it reports what
 each engine contributed, what was added or removed, and every warning.
 
-### ComfyUI workflows: capability discovered, not configured
+### ComfyUI: explicitly configured workflow providers
 
-ComfyUI is the one engine where a *capability* comes from discovery. A saved
-workflow is read as a graph, and what it can do is inferred from structure rather
-than from its name:
+ComfyUI is **workflow-only**: the hub publishes a provider only for an API-format
+workflow explicitly listed under the ComfyUI host's `adapterConfig.workflows` (or
+as a static workflow model). It does not enumerate checkpoints or automatically
+register workflows saved in ComfyUI. A workflow's internals are opaque: its declared
+capabilities, input bindings, output selector and resources are operator-owned
+metadata, not inferred from node names or graph topology.
 
+```json
+"adapterConfig": {
+  "workflows": [{
+    "id": "comfyui_my_image",
+    "name": "My image workflow",
+    "workflowPath": "workflows/my-image.api.json",
+    "capabilities": ["text_to_image"],
+    "bindings": { "prompt": { "node": "13", "input": "text" },
+                  "seed": { "node": "15", "input": "seed" } },
+    "outputs": { "image": { "node": "18", "type": "image" } },
+    "priority": 10,
+    "vramGb": 6,
+    "tags": ["local", "gpu", "image"]
+  }]
+}
 ```
-LoadImage  +  a node that returns MESH  +  a node that writes a 3D file
-   = image_to_3d
-```
 
-The same test with a prompt that reaches the generator gives `text_to_3d`. Anything
-that cannot be proven — a graph that only previews a mesh, a graph that decimates
-one, a graph whose mesh never reaches a writer — is published **disabled**, with the
-reason in its notes, so you see it in `list_models` without the router ever sending
-work into it. A workflow whose weights are not installed is disabled for the same
-reason, and its notes name the missing files.
-
-Because capability belongs to the thing that demonstrates it, the checkpoint models
-discovered from `/object_info` never claim a 3D capability, even when the 3D node
-packs are installed. Installing a 3D workflow in ComfyUI is all it takes to make
-`image_to_3d` routable; no JSON entry is needed. To *override* what discovery found,
-configure the host — see `adapterConfig.workflows` in the SKILL and the ComfyUI
-section of `config/examples/real-models.example.json`.
+The binding targets are exact node IDs and input names in *your* API-format JSON;
+choose them by inspecting that export. `outputs` identifies the producing node
+and artifact type. For `image_to_3d`, bind `image` to the image input and select
+`outputs.model_3d` with `type: "model_3d"`; declare `image_to_3d` only when that
+workflow really accepts an image and writes a 3D file. `workflowPath` is relative
+to the catalog. Saving a new workflow in ComfyUI alone does **not** register it;
+add its descriptor, then reload the catalog. See the host example in
+`config/examples/real-models.example.json`.
 
 ---
 

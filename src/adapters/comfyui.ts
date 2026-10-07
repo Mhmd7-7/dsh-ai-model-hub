@@ -59,6 +59,8 @@ import type { ThreeDFormat } from '../artifacts/formats.ts';
 import type { Capability } from '../catalog/capabilities.ts';
 import type { ResolvedModel } from '../catalog/descriptor.ts';
 import { isThreeDFilename } from '../discovery/comfyui-workflow.ts';
+import { readContract, loadComfyGraph, validateComfyGraph } from '../comfy/workflow.ts';
+import type { WorkflowContract } from '../comfy/workflow.ts';
 import type { HealthReport } from '../types.ts';
 import type { Artifact } from '../artifacts/types.ts';
 import { ModelHubError } from '../errors.ts';
@@ -676,6 +678,8 @@ export function createComfyUiAdapter(): ModelAdapter {
       const hasTemplate =
         (typeof config['workflowPath'] === 'string' && config['workflowPath'].length > 0) ||
         (config['workflow'] !== null && typeof config['workflow'] === 'object');
+      try { readContract(config, model.capabilities); }
+      catch (error) { return { ok: false, reason: error instanceof Error ? error.message : String(error) }; }
       if (!hasTemplate) {
         return {
           ok: false,
@@ -759,20 +763,10 @@ export function createComfyUiAdapter(): ModelAdapter {
       }
 
       const settings = settingsFor(invocation);
+      const contract = readContract(model.adapterConfig, model.capabilities);
 
-      const template =
-        settings.workflow ??
-        (settings.workflowPath === undefined
-          ? undefined
-          : await loadWorkflowFile(settings.workflowPath, invocation.catalogDir));
-      if (template === undefined) {
-        throw new ModelHubError(
-          'INVOCATION_FAILED',
-          `model "${model.id}" has no comfyui workflow template configured`,
-          { modelId: model.id },
-        );
-      }
-
+      const template = await loadComfyGraph(model.adapterConfig, invocation.catalogDir);
+      validateComfyGraph(template, contract);
       const base = endpoint.endsWith('/') ? endpoint : `${endpoint}/`;
 
       // One deadline and one controller for the whole operation: upload, queue,
@@ -808,9 +802,14 @@ export function createComfyUiAdapter(): ModelAdapter {
 
       try {
         if (!isThreeD) {
-          const graph = buildImageGraph(settings, template);
+          if (invocation.capability === 'image_to_image' && !invocation.inputs.some((artifact) => artifact.type === 'image')) {
+            throw new ModelHubError('INVOCATION_FAILED', 'image_to_image needs an image input artifact');
+          }
+          const imageName = invocation.capability === 'image_to_image'
+            ? await uploadInputImage(invocation, base, controller.signal, reason) : undefined;
+          const graph = bindPublicInputs(template, contract, invocation, imageName);
           const { promptId, outputs } = await runGraph(invocation, graph, base, settings, controller.signal, reason);
-          return await collectImages(invocation, outputs, base, settings, promptId, controller.signal, reason, started);
+          return await collectImages(invocation, selectedOutputs(outputs, contract), base, settings, promptId, controller.signal, reason, started);
         }
 
         // The 3D path. The image (when the caller supplied one) is uploaded first,
@@ -839,15 +838,11 @@ export function createComfyUiAdapter(): ModelAdapter {
             ? await uploadInputImage(invocation, base, controller.signal, reason)
             : undefined;
 
-        const graph = buildThreeDGraph(settings, template, {
-          ...(imageName === undefined ? {} : { imageName }),
-          wantedImage: source === 'image',
-          wantedPrompt: source === 'text',
-        });
+        const graph = bindPublicInputs(template, contract, invocation, imageName);
         const { promptId, outputs } = await runGraph(invocation, graph, base, settings, controller.signal, reason);
         return await collectThreeD(
           invocation,
-          outputs,
+          selectedOutputs(outputs, contract),
           base,
           settings,
           promptId,
@@ -875,6 +870,41 @@ const THREE_D_SOURCE_KINDS: Readonly<Record<string, 'image' | 'text'>> = Object.
   image_to_3d: 'image',
   text_to_3d: 'text',
 });
+
+function bindPublicInputs(template: ComfyGraph, contract: WorkflowContract, invocation: AdapterInvocation, imageName?: string): ComfyGraph {
+  const graph = structuredClone(template);
+  const supplied: Record<string, unknown> = { ...invocation.options, prompt: invocation.prompt, image: imageName };
+  // A public binding is a typed scalar; no option can mutate a graph path, class or loader.
+  // Defaults in the trusted API graph remain unchanged unless a bound value is supplied.
+  for (const [name, binding] of Object.entries(contract.bindings)) {
+    let value: unknown = supplied[name];
+    if (name === 'negative_prompt') value = supplied['negativePrompt'] ?? supplied['negative_prompt'];
+    if (name === 'seed' && value === undefined) value = Math.floor(Math.random() * 2 ** 31);
+    if (value === undefined) continue;
+    if (name === 'image' || name === 'prompt' || name === 'negativePrompt' || name === 'negative_prompt' || name === 'sampler' || name === 'scheduler') {
+      if (typeof value !== 'string') throw new ModelHubError('INVOCATION_FAILED', `workflow parameter "${name}" must be a string`);
+    } else if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new ModelHubError('INVOCATION_FAILED', `workflow parameter "${name}" must be a finite number`);
+    }
+    graph[binding.node]!.inputs![binding.input] = value;
+  }
+  if (['text_to_image', 'text_to_3d'].includes(invocation.capability) && !invocation.prompt?.trim()) {
+    throw new ModelHubError('INVOCATION_FAILED', `capability "${invocation.capability}" requires a prompt`);
+  }
+  if (contract.bindings['image'] && ['image_to_image', 'image_to_3d'].includes(invocation.capability) && !imageName) {
+    throw new ModelHubError('INVOCATION_FAILED', `capability "${invocation.capability}" requires an image artifact`);
+  }
+  return graph;
+}
+
+function selectedOutputs(outputs: Readonly<Record<string, unknown>>, contract: WorkflowContract): Readonly<Record<string, unknown>> {
+  const selected: Record<string, unknown> = {};
+  for (const [name, binding] of Object.entries(contract.outputs)) {
+    if (!Object.hasOwn(outputs, binding.node)) throw new ModelHubError('INVOCATION_FAILED', `ComfyUI produced no declared output "${name}" at node "${binding.node}"`);
+    selected[binding.node] = outputs[binding.node];
+  }
+  return selected;
+}
 
 /** A queued graph's outcome: its id, and the per-node outputs ComfyUI reported. */
 interface GraphOutcome {

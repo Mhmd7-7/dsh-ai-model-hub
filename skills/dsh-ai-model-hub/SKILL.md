@@ -262,10 +262,10 @@ exact path it loaded), then add an entry:
 Lower `priority` wins. No router, prompt, or DSH change is needed. Engine-specific
 recipes are in `docs/adding-a-model.md`, with ready-to-copy Ollama, llama.cpp,
 A1111/Forge, ComfyUI, and 3D entries in `config/examples/real-models.example.json`.
-A ComfyUI catalog entry you write by hand needs an **API-format** workflow template
-(see `config/workflows/`) — a UI export is rejected there, because a hand-written
-entry names one file and the hub cannot ask that file's engine what its nodes mean.
-Discovery is the exception and converts them: see the next section.
+Every ComfyUI provider needs an explicitly configured **API-format** workflow
+template plus bindings and output metadata (see `config/workflows/`). A UI export
+is not an API-format template; saved workflows and loose checkpoints do not
+implicitly become providers. See the next section.
 
 When an entry names a file — `workflowPath` for ComfyUI, `stepsPath` for 3D — write
 the path **relative to the catalog that names it**, never with a `config/` prefix:
@@ -275,59 +275,51 @@ there composes to `config/config/workflows/…`, which does not exist. Two spell
 are available for the same file: `workflows/…` from a catalog in `config/`,
 `../workflows/…` from `config/examples/`. Absolute paths are used as written.
 
-## ComfyUI discovers its own workflows, including 3D ones
+## ComfyUI providers are configured workflows only
 
-ComfyUI is the one engine whose *capabilities* are discovered rather than
-configured. A discovery pass reads two things from the running server:
+Neither `/object_info` checkpoint filenames nor ComfyUI's saved workflows are
+published automatically. A provider is an explicitly configured API-format
+workflow, with capabilities, input bindings and an output descriptor supplied by
+the operator. The hub treats its graph as opaque; it does not guess a task from node
+classes, checkpoint names or a saved workflow title.
 
-1. `/object_info` — which node classes exist, what each one takes and returns, and
-   which weight files the loaders enumerate. This is what the **weight-file** models
-   come from.
-2. `/userdata?dir=workflows` — every workflow saved in ComfyUI, each of which is
-   fetched and read as a graph. This is what the **workflow** models come from.
-
-A workflow is published with the capabilities its own graph *proves*:
-an image input, a node that builds a mesh, and a node that writes a 3D file add up
-to `image_to_3d`; a prompt that reaches the generator adds `text_to_3d`. A graph
-that only *previews* a mesh, or that post-processes one, proves nothing and is
-published **disabled** with the reason in its notes — so you can see it in
-`list_models` without the router ever sending work into it. So is a workflow whose
-weights are not installed.
-
-The upshot: **install a 3D workflow in ComfyUI and it becomes routable with no
-configuration at all.** Ask for `image_to_3d`; the hub finds the workflow, verifies
-its nodes and weights, checks the resource estimate, queues its API-format graph,
-uploads your image to ComfyUI, and returns a `model_3d` artifact. You never name the
-workflow.
-
-To override what discovery found, configure the **host** — not a model entry:
+Configure one or more providers on the **host**:
 
 ```json
 {
-  "hosts": [
-    {
-      "id": "comfyui",
-      "adapter": "comfyui",
-      "runtime": { "engine": "comfyui", "adapter": "comfyui", "endpoint": "http://127.0.0.1:8188" },
-      "adapterConfig": {
-        "workflows": [
-          { "workflowName": "3d/my_image_to_model", "priority": 10, "vramGb": 12 },
-          { "workflowName": "3d/experimental", "enabled": false },
-          { "workflowName": "3d/needs-api-export", "workflowPath": "workflows/mine.api.json" }
-        ]
-      }
-    }
-  ]
+  "hosts": [{
+    "id": "comfyui", "name": "ComfyUI", "adapter": "comfyui",
+    "runtime": { "engine": "comfyui", "adapter": "comfyui", "endpoint": "http://127.0.0.1:8188" },
+    "adapterConfig": { "workflows": [{
+      "id": "comfyui_my_image", "name": "My image workflow",
+      "workflowPath": "workflows/my-image.api.json",
+      "capabilities": ["text_to_image"],
+      "bindings": { "prompt": { "node": "13", "input": "text" },
+                    "seed": { "node": "15", "input": "seed" } },
+      "outputs": { "image": { "node": "18", "type": "image" } },
+      "priority": 10, "vramGb": 6, "tags": ["local", "gpu", "image"]
+    }] }
+  }],
+  "models": []
 }
 ```
 
-`workflowName` matches the name ComfyUI stores the workflow under (with or without
-`.json`, case-insensitively). Everything else is optional: `priority`, `vramGb` and
-`ramGb` (discovery's figures are heuristics — see below), `enabled`, `id`, `name`,
-`capabilities` (**narrows** what the graph proved; it can never add a capability the
-graph does not prove), `tags`, and `workflowPath` (run that file instead of the
-discovered graph, for a UI export the hub could not convert faithfully). A 2D
-checkpoint discovered on the same host is pinned the same way, by its filename.
+`bindings` names precise input slots and `outputs` identifies the output node and
+artifact type in **your** graph. A 3D provider must explicitly declare its genuine
+`image_to_3d` or `text_to_3d` capability, bind the needed input (`image` or
+`prompt`) and select `outputs.model_3d` with `type: "model_3d"`. Do not advertise a
+capability the configured workflow cannot perform. A static `models[]` entry is an
+alternative: use `adapterConfig.providerKind: "workflow"`,
+`adapterConfig.workflowId` and the same `workflowPath`/`bindings`/`outputs`
+metadata. Do not duplicate an id in host workflows and static models.
+
+A **3D engine that is not ComfyUI** follows the `three_d` recipe. Its
+`adapterConfig.models` declares what that engine can generate; discovery verifies
+its declaration against its API surface. See `docs/three-d.md`. For standalone
+image-to-3D-only engines, compose `text_to_image` → `image_to_3d` rather than
+advertising `text_to_3d`. Set realistic `vramGb`/`ramGb` for ComfyUI workflows:
+ComfyUI does not report a workflow's resource budget; `explain_routing` reports
+resource shortfalls.
 
 A **3D engine that is not ComfyUI** follows the `three_d` recipe. A local
 image-to-3D server is a `three_d` model whose `adapterConfig` names the two calls

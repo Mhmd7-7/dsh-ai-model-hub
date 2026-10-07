@@ -29,7 +29,7 @@
       "notes": "External process. The hub only ever probes /api/tags and posts to /v1/chat/completions."
     },
     {
-      "$comment": "ComfyUI has a graph API rather than a prompt endpoint, so it has its own `comfyui` adapter. A model points at a template with `adapterConfig.workflowPath`; the adapter writes the prompt into the CLIPTextEncode node wired to the sampler's `positive` link, queues the graph, polls /history, and downloads from /view.",
+      "$comment": "ComfyUI providers are explicit API-format workflows, not automatically discovered checkpoint or saved-workflow entries. The configured workflow declares exact input bindings and output selector; graph internals are opaque to the hub.",
       "id": "comfyui",
       "name": "ComfyUI",
       "adapter": "comfyui",
@@ -91,12 +91,18 @@
       "$comment": "The template in config/workflows/ was captured from a real run. Z-Image Turbo is step-distilled: 8 steps at cfg 1.0 is its intended operating point. A relative `workflowPath` is relative to the catalog that writes it, and this catalog lives in `config/` — so `workflows/z-image-turbo.api.json` means `config/workflows/z-image-turbo.api.json`. Writing `config/workflows/…` here would compose to `config/config/workflows/…`, which has never existed.",
       "id": "comfyui_z_image_turbo",
       "name": "Z-Image Turbo (ComfyUI)",
+      "providerKind": "workflow",
+      "workflowId": "comfyui_z_image_turbo",
       "type": "image_generation",
       "version": "1.0.0",
       "host": "comfyui",
       "capabilities": ["text_to_image"],
       "adapterConfig": {
+        "providerKind": "workflow",
+        "workflowId": "comfyui_z_image_turbo",
         "workflowPath": "workflows/z-image-turbo.api.json",
+        "bindings": { "prompt": { "node": "13", "input": "text" }, "seed": { "node": "15", "input": "seed" } },
+        "outputs": { "image": { "node": "18", "type": "image" } },
         "steps": 8,
         "cfg": 1,
         "sampler": "res_multistep",

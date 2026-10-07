@@ -29,7 +29,7 @@ import { createComfyUiAdapter } from './adapters/comfyui.ts';
 import { createThreeDAdapter } from './adapters/three-d.ts';
 import type { Capability } from './catalog/capabilities.ts';
 import { isCapability } from './catalog/capabilities.ts';
-import type { ModelCatalogConfig } from './catalog/descriptor.ts';
+import type { ModelCatalogConfig, ModelHost } from './catalog/descriptor.ts';
 import { parseModelCatalogConfig } from './catalog/descriptor.ts';
 import type { CapabilityView } from './catalog/registry.ts';
 import { ModelCatalog } from './catalog/registry.ts';
@@ -479,7 +479,7 @@ export class ModelHub {
         ...(options.log === undefined ? {} : { log: (message, fields) => options.log?.(message, fields) }),
       },
     );
-    const discovery = await registry.generate(parsed.config.hosts ?? []);
+    const discovery = await registry.generate(withComfyCatalogDir(parsed.config.hosts ?? [], options.catalogPath === undefined ? undefined : dirname(options.catalogPath)));
     const hub = new ModelHub({
       ...options,
       config: mergeCatalogConfig(parsed.config, discovery.descriptors),
@@ -548,7 +548,7 @@ export class ModelHub {
     }
 
     const pass = (async (): Promise<DiscoveryResult> => {
-      const result = await registry.generate(this.staticConfig.hosts ?? [], options.force === true ? { refresh: true } : {});
+      const result = await registry.generate(withComfyCatalogDir(this.staticConfig.hosts ?? [], this.catalogDir), options.force === true ? { refresh: true } : {});
       if (result.cached) return result;
 
       for (const warning of result.warnings) {
@@ -606,7 +606,7 @@ export class ModelHub {
     return this.catalog
       .listModels()
       .filter((model) => includeDisabled || model.enabled)
-      .map((model) => ({ model, status: this.runtime.getModelStatus(model.id) }));
+      .map((model) => ({ model: publicModelView(model), status: this.runtime.getModelStatus(model.id) }));
   }
 
   /**
@@ -616,7 +616,7 @@ export class ModelHub {
    * @throws ModelHubError with `MODEL_NOT_FOUND`.
    */
   getModel(modelId: string): ModelView {
-    return { model: this.catalog.requireModel(modelId), status: this.runtime.getModelStatus(modelId) };
+    return { model: publicModelView(this.catalog.requireModel(modelId)), status: this.runtime.getModelStatus(modelId) };
   }
 
   /**
@@ -647,7 +647,7 @@ export class ModelHub {
     }
     return this.catalog
       .findModelsByCapabilityIncludingDisabled(capability)
-      .map((model) => ({ model, status: this.runtime.getModelStatus(model.id) }));
+      .map((model) => ({ model: publicModelView(model), status: this.runtime.getModelStatus(model.id) }));
   }
 
   /**
@@ -1355,6 +1355,23 @@ export function defaultArtifactRoot(): string {
  *
  * @returns the built-in discoverers.
  */
+// Public model views never serialize the trusted workflow graph.
+function publicModelView<T extends { readonly adapter: string; readonly adapterConfig: Readonly<Record<string, unknown>>; readonly descriptor: ModelCatalogConfig['models'][number] }>(model: T): T {
+  if (model.adapter !== 'comfyui') return model;
+  return {
+    ...model,
+    adapterConfig: {},
+    descriptor: { ...model.descriptor, adapterConfig: {} },
+  };
+}
+
+function withComfyCatalogDir(hosts: readonly ModelHost[], catalogDir: string | undefined): readonly ModelHost[] {
+  if (catalogDir === undefined) return hosts;
+  return hosts.map((host) => host.adapter !== 'comfyui' ? host : {
+    ...host, adapterConfig: { ...(host.adapterConfig ?? {}), catalogDir },
+  });
+}
+
 function defaultDiscoverers(): readonly HostDiscoverer[] {
   return [createOllamaDiscoverer(), createComfyUiDiscoverer(), createA1111Discoverer(), createThreeDDiscoverer()];
 }

@@ -71,6 +71,8 @@ export function registerDiscoveryTools(
                   id: { type: 'string', required: true },
                   name: { type: 'string', required: true },
                   type: { type: 'string', required: true },
+                  providerKind: { type: 'string' },
+                  workflowId: { type: 'string' },
                   capabilities: { type: 'array', required: true, items: { type: 'string' } },
                   availability: { type: 'string', required: true },
                   lifecycle: { type: 'string', required: true },
@@ -92,7 +94,7 @@ export function registerDiscoveryTools(
           const blocks = value.models.map((model) =>
             [
               `${model.id} â€” ${model.name}`,
-              `  type: ${model.type}`,
+              `  type: ${model.type}${model.providerKind === undefined ? '' : `; provider: ${model.providerKind} (${model.workflowId})`}`,
               `  capabilities: ${model.capabilities.join(', ') || '(none)'}`,
               `  status: ${model.availability} [${model.lifecycle}]`,
               `  engine: ${model.engine}${model.endpoint === undefined ? '' : ` at ${model.endpoint}`}`,
@@ -118,6 +120,7 @@ export function registerDiscoveryTools(
             id: view.model.id,
             name: view.model.name,
             type: view.model.type,
+            ...(view.model.providerKind === undefined ? {} : { providerKind: view.model.providerKind, workflowId: view.model.workflowId }),
             capabilities: [...view.model.capabilities],
             availability: view.status.availability,
             lifecycle: view.status.lifecycle,
@@ -525,7 +528,7 @@ export { formatAvailability, formatModel };
  * Kept separate from the read-only discovery tools because it is the one tool
  * here with a side effect: it re-reads every configured engine and republishes
  * the catalog. That is exactly what an operator wants right after pulling an
- * Ollama model or dropping a checkpoint into ComfyUI — without it, the answer is
+ * Ollama model or configuring a new ComfyUI workflow — without it, the answer is
  * "wait out the cache TTL and ask again".
  *
  * A hub with runtime discovery disabled answers candidly rather than pretending
@@ -542,7 +545,7 @@ export function registerRefreshDiscoveryTool(ctx: Context, service: ModelHubServ
       name: 'refresh_model_discovery',
       description:
         'Re-read every configured model engine and republish the catalog, so models installed since the last check ' +
-        '(a freshly pulled Ollama model, a new checkpoint in ComfyUI) become usable immediately instead of after the ' +
+        '(a freshly pulled Ollama model, a newly configured ComfyUI workflow) become usable immediately instead of after the ' +
         'discovery cache expires. ' +
         'Engines that are unreachable are reported as warnings and contribute no models; nothing is started or invoked. ' +
         'Use this when you have been told a model was just installed, or when a capability you expect is missing.',

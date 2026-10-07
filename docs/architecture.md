@@ -93,19 +93,19 @@ The router satisfies the second call by checking that some model declares
 
 ### 4. Host ↔ Model — runtime discovery
 
-A **host** is the only thing an operator configures: "ComfyUI is at
-`http://127.0.0.1:8188`". Everything about what that engine can do *right now* —
-which checkpoints are on disk, which of them can see, which node packs are
-installed — is answered by the engine itself and synthesized into
-`ModelDescriptor` entries:
+For enumerating engines such as Ollama, a **host** declares the endpoint and the
+engine's reported models can become `ModelDescriptor` entries. ComfyUI is a
+deliberate exception: its host config explicitly lists API-format workflow
+providers, with capabilities, bindings and output selectors. The hub does not
+synthesize providers from checkpoints or saved workflows:
 
 ```
    host.runtime.engine
-        │  ("comfyui", "ollama", "a1111", …)
+        │  ("ollama", "a1111", …)
         ▼
    ┌──────────────┐    ┌────────────────────┐    ┌───────────────┐
    │  Discoverer  │───▶│ parse → map        │───▶│ merge         │───▶ ModelCatalog
-   │  /object_info│    │ (pure, testable)   │    │ static first  │
+   │   API list   │    │ (pure, testable)   │    │ static first  │
    └──────────────┘    └────────────────────┘    └───────────────┘
 ```
 
@@ -119,9 +119,10 @@ Three rules keep it from becoming a second, weaker catalog:
   from.
 - **No model identifier appears in discovery code.** Discoverers know an
   engine's *response shape* and apply general heuristics. Capabilities are
-  decided by shape (does `/api/show` report a projector? does `/object_info`
-  contain a mesh export node?) rather than by matching a name, because a name
-  list is wrong the moment someone installs something new.
+  decided from the enumerating engine's reported API properties (for example,
+  whether `/api/show` reports a projector), rather than a hardcoded model-name
+  list. ComfyUI capabilities are instead declared by each configured workflow;
+  graph structure and node class names are not used to invent providers.
 - **The merge enforces precedence, not the catalog.**
   `mergeCatalogConfig(static, discovered)` returns
   `[...static, ...discovered.filter(id not already claimed)]`. `ModelCatalog`'s
@@ -131,7 +132,9 @@ Three rules keep it from becoming a second, weaker catalog:
 
 Discovery is off by default, fail-soft (an unreachable engine is a warning and no
 models from that host), cached per host for a TTL, and refreshable on demand —
-which is the answer to "I just pulled a model and do not want to wait".
+which is the answer to "I just pulled an Ollama model and do not want to wait".
+ComfyUI providers are explicit host workflow declarations, unaffected by rescanning
+saved workflows or loose checkpoint files.
 
 ### 5. Machine ↔ Router — measured resources
 

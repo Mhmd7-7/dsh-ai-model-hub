@@ -56,7 +56,18 @@ function catalog(): Record<string, unknown> {
     ],
     models: [
       { id: 'ollama_text', name: 'Local text', type: 'text_generation', host: 'ollama', capabilities: ['text_to_text'] },
-      { id: 'comfyui_image', name: 'Local image', type: 'image_generation', host: 'comfyui', capabilities: ['text_to_image'] },
+      {
+        id: 'comfyui_image', name: 'Local image', type: 'image_generation', host: 'comfyui',
+        capabilities: ['text_to_image'], providerKind: 'workflow', workflowId: 'inventory_image',
+        adapterConfig: {
+          workflow: {
+            '1': { class_type: 'CLIPTextEncode', inputs: { text: '' } },
+            '2': { class_type: 'SaveImage', inputs: { images: ['1', 0] } },
+          },
+          bindings: { prompt: { node: '1', input: 'text' } },
+          outputs: { image: { node: '2', type: 'image' } },
+        },
+      },
     ],
   };
 }

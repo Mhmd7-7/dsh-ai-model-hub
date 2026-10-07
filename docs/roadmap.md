@@ -319,16 +319,14 @@ tests against the real code paths.
 
 ---
 
-## Phase 7 — runtime model discovery ✅ shipped (ComfyUI auto-graph generation is a follow-up)
-**Goal:** stop requiring a JSON edit before a model the machine already has can be
-used.
+## Phase 7 — runtime discovery for enumerating engines ✅ shipped
+**Goal:** avoid a JSON edit for models reported by engines such as Ollama and A1111.
 
-A *host* — "ComfyUI is at `http://127.0.0.1:8188`" — is the only thing configured.
-Everything about what an engine can currently do is read out of the engine's own
-introspection API at runtime and synthesized into `ModelDescriptor` entries, so a
-freshly pulled Ollama model, a checkpoint dropped into ComfyUI's models
-directory, or a LoRA someone installed is usable without touching
-`config/models.json`.
+ComfyUI deliberately uses a different contract: its providers are exclusively
+explicit API-format workflows declared in the host's `adapterConfig.workflows` or
+static model entries. A loose checkpoint, installed LoRA or saved workflow alone
+is not a routable provider. The operator supplies capabilities, exact input
+bindings and typed output selectors; graph internals are opaque.
 
 ### What shipped
 
@@ -341,10 +339,9 @@ directory, or a LoRA someone installed is usable without touching
 - `src/discovery/a1111.ts` — `/sdapi/v1/sd-models`, `/samplers`, and `/options`:
   every checkpoint, plus the loaded one promoted by priority so routing prefers
   it (a checkpoint switch is expensive; only the loaded one serves without one).
-- `src/discovery/comfyui.ts` — `/object_info`: checkpoint filenames read out of
-  the loader nodes' own enumerations, capabilities from an explicit
-  node-class → capability table (`CAPABILITY_SIGNALS`), and a **minimal default
-  graph** generated for the common one-checkpoint shape.
+- ComfyUI workflow descriptors are operator-supplied; the configured API-format
+  graph is invoked through its explicit bindings and output selector rather than
+  synthesized from `/object_info` checkpoint listings.
 - `src/discovery/three-d.ts` — the API-description document (`/gradio_api/config`
   or `/config`): the named endpoints a 3D app exposes, capabilities derived from
   their *shape*, and the operator's declared models intersected with what the
@@ -367,22 +364,15 @@ directory, or a LoRA someone installed is usable without touching
 
 ### What remains
 
-1. **ComfyUI auto-graph generation beyond the common case.** The shipped version
-   synthesizes a graph only when `/object_info` contains exactly the six node
-   classes a minimal `CheckpointLoaderSimple → KSampler → VAEDecode → SaveImage`
-   pipeline needs, and otherwise leaves `adapterConfig.workflow` absent so the
-   adapter reports "needs a workflow template". LoRA chains, controlnets,
-   upscalers, second passes, and UNET+CLIP+VAE triples each need their own
-   template, and guessing one is worse than saying so. The natural next step is a
-   small library of *shapes* (not models) selected by which loader nodes exist.
-2. **File sizes for better resource estimates.** Neither `/object_info` nor the
-   A1111 listing reports a size, so ComfyUI and A1111 VRAM figures are filename
-   heuristics. A companion listing (or a HEAD request per file) would replace the
-   guess with a measurement; the Ollama path already has real numbers.
-3. **Discovering LoRAs and UNETs as *modifiers*.** They are enumerated today but
-   deliberately not published as models: a LoRA is not something this hub can
-   route to on its own. Modelling "apply this LoRA to that checkpoint" needs a
-   descriptor shape that does not exist yet.
+1. **More documented workflow templates.** ComfyUI intentionally does not infer
+   providers or synthesize graphs from installed checkpoints. Examples for LoRA
+   chains, controlnets and 3D can be added as API-format workflows with explicit
+   capabilities, bindings and outputs; each remains operator-configured.
+2. **File sizes for A1111 resource estimates.** The A1111 listing does not
+   report sizes, so its VRAM figures can be heuristic. ComfyUI workflow budgets
+   are explicitly configured; Ollama reports actual weight sizes.
+3. **LoRAs and UNETs as modifiers.** A loose modifier is not a routable
+   provider. The operator can incorporate one in a configured ComfyUI workflow.
 4. **Per-host opt-in and per-engine budgets.** Discovery is all-or-nothing today.
    A deployment may want discovery on Ollama (cheap, local) but off for an engine
    on a slow remote endpoint.
