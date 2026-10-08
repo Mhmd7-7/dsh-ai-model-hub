@@ -181,6 +181,8 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
     catalogPath,
     artifactRoot: config.artifactRoot,
     allowProcessLaunch: config.allowProcessLaunch,
+    ...(config.comfyuiWorkflowDir.length === 0 ? {} : { workflowDir: config.comfyuiWorkflowDir }),
+    scanTimeoutMs: config.scanTimeoutMs,
   });
 
   // One diagnostic line per invocation, so an operator can see what ran without

@@ -171,6 +171,21 @@ export interface PluginConfig {
    * discovery times out should raise this rather than disable discovery.
    */
   discoveryTimeoutMs?: number;
+  /**
+   * A directory of ComfyUI workflow JSON files for the Local models scan.
+   *
+   * The scan already reads the workflows ComfyUI has saved, through the engine's
+   * own `/userdata` route. This is the second source, and it is the one that
+   * works when the engine is down or when workflows are kept beside the catalog
+   * instead of inside ComfyUI. Every `*.json` file under the directory is read,
+   * recursively.
+   *
+   * It is a **source of workflows only**. Nothing here enumerates checkpoints,
+   * LoRAs, VAEs or custom nodes — those stay inside the workflow that uses them.
+   */
+  comfyuiWorkflowDir?: string;
+  /** Budget for one scan request, in milliseconds. Defaults to 4000. */
+  scanTimeoutMs?: number;
 }
 
 /** Schemastery schema for {@link PluginConfig}. */
@@ -191,6 +206,8 @@ export const Config = z.object({
   discoverModels: z.boolean().default(false),
   discoveryTtlMs: z.number().step(1).min(0).default(60_000),
   discoveryTimeoutMs: z.number().step(1).min(1).default(5_000),
+  comfyuiWorkflowDir: z.string().default(''),
+  scanTimeoutMs: z.number().step(1).min(1).default(4_000),
 });
 
 /** Apply defaults for direct callers that bypass Loader validation. */
@@ -212,6 +229,8 @@ export function resolvePluginConfig(config: Partial<PluginConfig> | undefined): 
     discoverModels: config?.discoverModels ?? false,
     discoveryTtlMs: config?.discoveryTtlMs ?? 60_000,
     discoveryTimeoutMs: config?.discoveryTimeoutMs ?? 5_000,
+    comfyuiWorkflowDir: config?.comfyuiWorkflowDir ?? '',
+    scanTimeoutMs: config?.scanTimeoutMs ?? 4_000,
   };
 }
 

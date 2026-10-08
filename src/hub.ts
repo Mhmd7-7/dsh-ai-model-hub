@@ -29,7 +29,7 @@ import { createComfyUiAdapter } from './adapters/comfyui.ts';
 import { createThreeDAdapter } from './adapters/three-d.ts';
 import type { Capability } from './catalog/capabilities.ts';
 import { isCapability } from './catalog/capabilities.ts';
-import type { ModelCatalogConfig, ModelHost } from './catalog/descriptor.ts';
+import type { ModelCatalogConfig, ModelDescriptor, ModelHost } from './catalog/descriptor.ts';
 import { parseModelCatalogConfig } from './catalog/descriptor.ts';
 import type { CapabilityView } from './catalog/registry.ts';
 import { ModelCatalog } from './catalog/registry.ts';
@@ -272,6 +272,23 @@ export class ModelHub {
    * caller can await the pre-warm the constructor started.
    */
   private discoveryPass: Promise<DiscoveryResult> | undefined;
+
+  /**
+   * The models the last completed discovery pass reported.
+   *
+   * Kept because {@link publishScannedModels} republishes the catalog outside a
+   * discovery pass, and a scan must not quietly erase what a discoverer found.
+   */
+  private discoveredModels: readonly ModelDescriptor[] = [];
+
+  /**
+   * The models an explicit scan registered (the "Local models" page).
+   *
+   * A scan is a user action, not a background pass, so its results are held here
+   * and merged ahead of discovery results: an operator who just scanned a
+   * workflow has said that workflow should be usable now.
+   */
+  private scannedModels: readonly ModelDescriptor[] = [];
 
   private readonly listeners = new Set<HubEventListener>();
   private readonly log: (message: string, fields?: Readonly<Record<string, unknown>>) => void;
@@ -558,7 +575,8 @@ export class ModelHub {
       }
 
       const before = new Set(this.catalog.listModelIds());
-      this.catalog.replaceModels(mergeCatalogConfig(this.staticConfig, result.descriptors).models);
+      this.discoveredModels = result.descriptors;
+      this.catalog.replaceModels(this.mergedModelList());
       // The runtime manager seeds its per-model state when it is constructed, and
       // discovery can add a model long after that. Without this, a discovered
       // model has no runtime state and `getModelStatus` throws for it — which
@@ -594,6 +612,55 @@ export class ModelHub {
    */
   get pendingDiscovery(): Promise<DiscoveryResult> | undefined {
     return this.discoveryPass;
+  }
+
+  /**
+   * The catalog's model list, assembled from its three sources in precedence
+   * order: static configuration, then an explicit scan, then runtime discovery.
+   *
+   * `mergeCatalogConfig` is what applies that precedence — static entries come
+   * first and a later duplicate id is dropped — so this method only has to state
+   * the order once, and every publisher of the catalog agrees on it.
+   *
+   * @returns the merged descriptors.
+   */
+  private mergedModelList(): readonly ModelDescriptor[] {
+    return mergeCatalogConfig(this.staticConfig, [...this.scannedModels, ...this.discoveredModels]).models;
+  }
+
+  /**
+   * Publish the providers an explicit scan found, alongside everything already
+   * registered.
+   *
+   * This is the seam the "Local models" page uses. A scan is a deliberate user
+   * action — "find the workflows on this machine and let me run them" — so its
+   * results are added to the running catalog rather than requiring a JSON edit
+   * and a restart. It is the same `replaceModels` rebuild runtime discovery uses,
+   * so the router, the runtime manager, and the tools all see the new providers
+   * immediately, and calling it again with a fresh scan *replaces* the scanned
+   * half rather than growing it: a workflow the operator deleted stops being
+   * routable, and a repeated scan cannot accumulate duplicates.
+   *
+   * Static configuration still wins: a scanned provider whose id a `models.json`
+   * entry already claims is dropped by the merge, so a hand-declared workflow is
+   * never shadowed by a discovered one.
+   *
+   * @param descriptors - the providers the scan produced, in publication order.
+   * @returns how many models the catalog now holds.
+   */
+  publishScannedModels(descriptors: readonly ModelDescriptor[]): number {
+    this.scannedModels = descriptors;
+    this.catalog.replaceModels(this.mergedModelList());
+    this.runtime.syncCatalog();
+    this.log(`hub: scan published ${descriptors.length} provider(s)`, {
+      total: this.catalog.listModels().length,
+    });
+    return this.catalog.listModels().length;
+  }
+
+  /** The providers an explicit scan registered, in publication order. */
+  get scannedProviderIds(): readonly string[] {
+    return this.scannedModels.map((model) => model.id);
   }
 
   /**

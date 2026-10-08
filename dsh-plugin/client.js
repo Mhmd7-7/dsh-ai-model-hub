@@ -199,13 +199,66 @@ window.__ModuleLoader__.load({
       });
     }
 
+    /**
+     * One scan result: an installed Ollama model, or a complete ComfyUI workflow.
+     *
+     * The kind label is the point of this row. A workflow is one selectable unit
+     * — its checkpoints, LoRAs, VAEs and nodes are deliberately absent, because
+     * they are the workflow's business and not something a caller chooses.
+     */
+    function ResourceItem(props) {
+      const resource = props.resource;
+      const tone =
+        resource.status === 'ready' ? 'ok' : resource.status === 'needs_conversion' ? 'muted' : 'error';
+      const kindTone = resource.kind === 'ollama_model' ? 'muted' : 'ok';
+      return h('div', {
+        style: {
+          border: '1px solid ' + text.border,
+          borderRadius: '10px',
+          padding: '8px 10px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px',
+        },
+        children: [
+          h('div', {
+            style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+            children: [
+              h('span', {
+                style: { fontFamily: MONO, fontSize: '12px', color: text.primary, userSelect: 'text' },
+                children: resource.name,
+              }),
+              h(Pill, { tone: kindTone, children: resource.typeLabel }),
+              h(Pill, { tone, children: resource.status }),
+            ],
+          }),
+          h(Row, { label: 'source', value: resource.source, mono: true }),
+          h(Row, { label: 'status', value: resource.detail }),
+          resource.capabilities && resource.capabilities.length > 0
+            ? h(Row, { label: 'capabilities', value: resource.capabilities.join(', ') })
+            : null,
+          resource.inputs && resource.inputs.length > 0
+            ? h(Row, { label: 'inputs', value: resource.inputs.join(', ') })
+            : null,
+          resource.outputs && resource.outputs.length > 0
+            ? h(Row, { label: 'outputs', value: resource.outputs.join(', ') })
+            : null,
+          resource.format ? h(Row, { label: 'format', value: resource.format === 'ui' ? 'editor (UI)' : 'API' }) : null,
+          resource.sizeBytes ? h(Row, { label: 'size', value: formatBytes(resource.sizeBytes) }) : null,
+          resource.runnable && resource.modelId
+            ? h(Row, { label: 'run with', value: 'invoke_model modelId: ' + resource.modelId, mono: true })
+            : null,
+        ],
+      });
+    }
+
     /** The settings section itself. */
     function LocalModelsSection() {
       const [state, setState] = useState({ status: 'loading', data: null, error: '' });
 
-      const load = useCallback((probe) => {
+      const load = useCallback((query) => {
         setState((previous) => ({ ...previous, status: previous.data ? 'refreshing' : 'loading' }));
-        fetch(ENDPOINT + (probe ? '?probe=1' : ''))
+        fetch(ENDPOINT + (query || ''))
           .then((response) => {
             if (!response.ok) throw new Error('HTTP ' + response.status);
             return response.json();
@@ -217,7 +270,7 @@ window.__ModuleLoader__.load({
       }, []);
 
       useEffect(() => {
-        load(true);
+        load('?scan=1');
       }, [load]);
 
       const button = (label, onClick, disabled) =>
@@ -239,6 +292,11 @@ window.__ModuleLoader__.load({
         });
 
       const data = state.data;
+      const resources = (data && data.resources) || [];
+      const ollamaCount = resources.filter((entry) => entry.kind === 'ollama_model').length;
+      const workflowCount = resources.filter((entry) => entry.kind === 'comfyui_workflow').length;
+      const scanSources = (data && data.scan && data.scan.sources) || [];
+      const scanWarnings = (data && data.scan && data.scan.warnings) || [];
 
       return h('section', {
         style: {
@@ -261,14 +319,46 @@ window.__ModuleLoader__.load({
           h('div', {
             style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
             children: [
-              button(state.status === 'loading' ? 'Checking…' : 'Check now', () => load(true), state.status === 'loading'),
-              button('Refresh', () => load(false), state.status === 'loading'),
-              state.status === 'refreshing' ? h('span', { style: { fontSize: '12px', color: text.tertiary }, children: 'refreshing…' }) : null,
-              state.status === 'error'
-                ? h('span', { style: { fontSize: '12px', color: text.error }, children: 'could not read the inventory: ' + state.error })
+              button(
+                state.status === 'loading' ? 'Scanning…' : 'Scan',
+                () => load('?scan=1'),
+                state.status === 'loading' || state.status === 'refreshing',
+              ),
+              button('Refresh', () => load(''), state.status === 'loading' || state.status === 'refreshing'),
+              state.status === 'refreshing'
+                ? h('span', { style: { fontSize: '12px', color: text.tertiary }, children: 'scanning…' })
                 : null,
             ],
           }),
+
+          state.status === 'loading'
+            ? h('div', {
+                style: {
+                  border: '1px solid ' + text.border,
+                  borderRadius: '12px',
+                  padding: '10px 14px',
+                  fontSize: '12px',
+                  color: text.tertiary,
+                },
+                children: 'Scanning this machine for Ollama models and ComfyUI workflows…',
+              })
+            : null,
+
+          state.status === 'error'
+            ? h('div', {
+                style: {
+                  border: '1px solid ' + text.error,
+                  borderRadius: '12px',
+                  padding: '10px 14px',
+                  fontSize: '12px',
+                  color: text.error,
+                },
+                children:
+                  'The scan could not be read: ' +
+                  state.error +
+                  '. The engines themselves may still be reachable — press Scan to try again.',
+              })
+            : null,
 
           data
             ? h('div', {
@@ -300,6 +390,64 @@ window.__ModuleLoader__.load({
                       (data.machine.hasGpu ? 'GPU detected' : 'no GPU detected'),
                   }),
                   h(Row, { label: 'checked at', value: data.generatedAt }),
+                ],
+              })
+            : null,
+
+          data
+            ? h('div', {
+                style: {
+                  border: '1px solid ' + text.border,
+                  borderRadius: '12px',
+                  padding: '10px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px',
+                },
+                children: [
+                  h('div', {
+                    style: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' },
+                    children: [
+                      h('div', { style: { fontSize: '13px', fontWeight: 500 }, children: 'Local resources' }),
+                      h('span', {
+                        style: { fontSize: '12px', color: text.tertiary },
+                        children:
+                          ollamaCount + ' Ollama Model(s) · ' + workflowCount + ' ComfyUI Workflow(s)',
+                      }),
+                    ],
+                  }),
+                  resources.length === 0
+                    ? h('div', {
+                        style: { fontSize: '12px', color: text.tertiary, lineHeight: '18px' },
+                        children:
+                          'Nothing found yet. Press Scan to look for installed Ollama models and complete ComfyUI workflows.',
+                      })
+                    : h('div', {
+                        style: { display: 'flex', flexDirection: 'column', gap: '6px' },
+                        children: resources.map((resource) => h(ResourceItem, { key: resource.id, resource })),
+                      }),
+                  ...scanWarnings.map((warning, index) =>
+                    h('div', {
+                      key: 'scan-warning-' + index,
+                      style: { fontSize: '12px', color: text.error, lineHeight: '18px' },
+                      children: warning,
+                    }),
+                  ),
+                  scanSources.length > 0
+                    ? h('div', {
+                        style: { display: 'flex', flexDirection: 'column', gap: '2px' },
+                        children: [
+                          h('div', { style: { fontSize: '12px', color: text.tertiary }, children: 'sources' }),
+                          ...scanSources.map((source) =>
+                            h(Row, {
+                              key: source.id + ':' + source.kind,
+                              label: source.label,
+                              value: (source.ok ? 'read' : 'failed') + ' — ' + source.detail,
+                            }),
+                          ),
+                        ],
+                      })
+                    : null,
                 ],
               })
             : null,

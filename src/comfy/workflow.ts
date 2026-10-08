@@ -60,6 +60,7 @@ export async function loadComfyGraph(config: Readonly<Record<string, unknown>>, 
 }
 export function validateComfyGraph(graph: ComfyGraph, contract: WorkflowContract, classes?: ReadonlySet<string>): void {
   for (const node of Object.values(graph)) {
+    if (typeof node?.class_type !== 'string') continue;
     if (classes && !classes.has(node.class_type)) fail('required ComfyUI node class is unavailable; check workflow dependencies');
   }
   for (const [name, binding] of Object.entries(contract.bindings)) {

@@ -80,6 +80,9 @@ function machine(options: { ollamaUp?: boolean; probeOllamaTags?: boolean } = {}
   return {
     fetchJson: async (url) => {
       if (url === 'http://127.0.0.1:8188' || url === 'http://127.0.0.1:8188/system_stats') return { ok: true };
+      if (url === 'http://127.0.0.1:8188/object_info') return comfyObjectInfo;
+      if (url.endsWith('/userdata?dir=workflows&recurse=true')) return ['demo/workflow.json'];
+      if (url === 'http://127.0.0.1:8188/userdata/demo%2Fworkflow.json') return comfyWorkflow;
       if (url === 'http://127.0.0.1:11434' || url === 'http://127.0.0.1:11434/api/tags') {
         if (options.ollamaUp === false) throw new Error('connect ECONNREFUSED');
         if (url === 'http://127.0.0.1:11434/api/tags' && options.probeOllamaTags !== false) {
@@ -89,16 +92,44 @@ function machine(options: { ollamaUp?: boolean; probeOllamaTags?: boolean } = {}
       }
       throw new Error('connect ECONNREFUSED');
     },
-    isDirectory: async (path) => norm(path) === 'C:/ComfyUI' || norm(path) === 'C:/ComfyUI/models',
+    isDirectory: async (path) =>
+      norm(path) === 'C:/ComfyUI' || norm(path) === 'C:/ComfyUI/user/default/workflows',
     listDir: async (path) => {
-      if (norm(path) === 'C:/ComfyUI/models') return [{ name: 'checkpoints', isDirectory: true }];
-      if (norm(path) === 'C:/ComfyUI/models/checkpoints') {
-        return [{ name: 'z_image_turbo.safetensors', isDirectory: false, sizeBytes: 2_048_000 }];
+      if (norm(path) === 'C:/ComfyUI/user/default/workflows') {
+        return [{ name: 'demo', isDirectory: true }];
+      }
+      if (norm(path) === 'C:/ComfyUI/user/default/workflows/demo') {
+        return [{ name: 'workflow.json', isDirectory: false, sizeBytes: 512 }];
       }
       return undefined;
     },
   };
 }
+
+/** The fake install's node classes, including the loaders whose files must stay hidden. */
+const comfyObjectInfo = {
+  CheckpointLoaderSimple: { input: { required: { ckpt_name: [['z_image_turbo.safetensors'], {}] } } },
+  LoraLoader: { input: { required: { lora_name: [['style.safetensors'], {}] } } },
+  CLIPTextEncode: { input: { required: { text: ['STRING', {}] } }, output: ['CONDITIONING'] },
+  EmptyLatentImage: { input: { required: { width: ['INT', {}], height: ['INT', {}] } }, output: ['LATENT'] },
+  KSampler: {
+    input: { required: { positive: ['CONDITIONING', {}], negative: ['CONDITIONING', {}], latent_image: ['LATENT', {}], seed: ['INT', {}], steps: ['INT', {}], cfg: ['FLOAT', {}] } },
+    output: ['LATENT'],
+  },
+  VAEDecode: { input: { required: { samples: ['LATENT', {}], vae: ['VAE', {}] } }, output: ['IMAGE'] },
+  SaveImage: { input: { required: { images: ['IMAGE', {}], filename_prefix: ['STRING', {}] } }, output: [] },
+};
+
+/** A complete workflow the fake install has saved. */
+const comfyWorkflow = {
+  '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'z_image_turbo.safetensors' } },
+  '2': { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: 'a cat' } },
+  '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: '' } },
+  '4': { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512 } },
+  '5': { class_type: 'KSampler', inputs: { positive: ['2', 0], negative: ['3', 0], latent_image: ['4', 0], seed: 1, steps: 8, cfg: 1 } },
+  '6': { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
+  '7': { class_type: 'SaveImage', inputs: { images: ['6', 0], filename_prefix: 'demo' } },
+};
 
 /** A hub over the fixture catalog. */
 function hub(): ModelHub {
@@ -173,13 +204,16 @@ describe('engine inventory (host half)', () => {
     );
   });
 
-  it('lists the model store and the files inside it', async () => {
+  it('lists the workflow store, and never the engine\'s model files', async () => {
     const report = await inventory();
     const comfyui = report.engines.find((engine) => engine.id === 'comfyui');
     const store = comfyui?.storePaths.find((entry) => entry.exists === true);
 
-    assert.equal(store?.path, 'C:/ComfyUI/models');
-    assert.deepEqual(store?.files, [{ name: 'checkpoints/z_image_turbo.safetensors', sizeBytes: 2_048_000 }]);
+    assert.equal(store?.path, 'C:/ComfyUI/user/default/workflows');
+    // ComfyUI's `models/` tree — checkpoints, LoRAs, VAEs — is workflow-internal
+    // detail, so it is deliberately absent from this page.
+    assert.equal(store?.files, undefined, 'a store is reported, its weight files are not');
+    assert.doesNotMatch(JSON.stringify(report), /safetensors/);
   });
 
   it('still reports an engine that is neither installed nor configured', async () => {
@@ -515,8 +549,15 @@ describe('the settings page (browser half)', () => {
     assert.match(page, /C:\/ComfyUI/, 'the installation directory is on the page');
     assert.match(page, /C:\/catalog\/models\.json/, 'the active catalog is on the page');
     assert.match(page, /llama3:8b/, "the engine's own models are on the page");
-    assert.match(page, /checkpoints\/z_image_turbo\.safetensors/, 'the model store is on the page');
     assert.match(page, /Stable Diffusion WebUI/, 'an engine that is not installed is still listed');
     assert.match(page, /video_generation/, 'what cannot be served is reported');
+
+    // The Local models list shows both kinds of resource, each labelled, and it
+    // never shows a ComfyUI weight file or an individual node.
+    assert.match(page, /Ollama Model/, 'Ollama rows are labelled');
+    assert.match(page, /ComfyUI Workflow/, 'workflow rows are labelled');
+    assert.match(page, /workflow\.json|demo/, 'the discovered workflow is listed');
+    assert.doesNotMatch(page, /safetensors/, 'no checkpoint, LoRA or VAE file is listed');
+    assert.doesNotMatch(page, /CheckpointLoaderSimple|LoraLoader|EmptyLatentImage|KSampler/, 'no node class is listed');
   });
 });

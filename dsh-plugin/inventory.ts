@@ -32,6 +32,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ModelHub } from '../src/hub.ts';
 import type { ModelHost } from '../src/index.ts';
+import { scanLocalResources } from './scan.ts';
+import type { LocalResource, ScanSourceReport } from './scan.ts';
 import type { PluginLogger } from './types.ts';
 
 /** The route the settings page reads. Absolute, no trailing slash. */
@@ -139,6 +141,20 @@ export interface CatalogModelReport {
 export interface Inventory {
   /** When this was produced, as an ISO timestamp. */
   readonly generatedAt: string;
+  /**
+   * Everything the scan found, as one selectable list: the Ollama models this
+   * machine has installed, and the complete ComfyUI workflows it can run.
+   *
+   * Each row is labelled with its own kind, and no ComfyUI weight file or node
+   * ever appears here — a workflow is the smallest thing the hub exposes.
+   */
+  readonly resources: readonly LocalResource[];
+  /** What each discovery source contributed, so a partial scan explains itself. */
+  readonly scan: {
+    readonly sources: readonly ScanSourceReport[];
+    readonly warnings: readonly string[];
+    readonly registered: number;
+  };
   /** The catalog file the hub actually loaded. */
   readonly catalogPath: string;
   /** Where artifacts are written. */
@@ -252,7 +268,11 @@ const KNOWN_ENGINES: readonly KnownEngine[] = [
     adapter: 'comfyui',
     endpoint: 'http://127.0.0.1:8188',
     installCandidates: ['C:/ComfyUI', '%USERPROFILE%/ComfyUI', '%USERPROFILE%/Documents/ComfyUI'],
-    storeCandidates: [{ label: 'ComfyUI models', path: '%INSTALL%/models', listFiles: true }],
+    // Deliberately NOT the model directory. This page lists workflows, and a
+    // ComfyUI install's `models/` tree is exactly the checkpoint/LoRA/VAE
+    // inventory the hub treats as workflow-internal detail — enumerated here it
+    // would read as a list of things a user can pick, which none of them are.
+    storeCandidates: [{ label: 'ComfyUI saved workflows', path: '%INSTALL%/user/default/workflows' }],
   },
   {
     id: 'a1111',
@@ -321,11 +341,32 @@ export async function buildInventory(
     readonly probes?: InventoryProbes;
     /** Probe every endpoint live. Slower, and the page asks for it explicitly. */
     readonly probe?: boolean;
+    /**
+     * A directory of ComfyUI workflow JSON files to scan in addition to whatever
+     * the engine has saved. Unset means the engine's own store is the only source.
+     */
+    readonly workflowDir?: string;
+    /** Budget for one scan request, in milliseconds. */
+    readonly scanTimeoutMs?: number;
+    /** Diagnostic sink for the scan; defaults to silence. */
+    readonly log?: (message: string) => void;
   },
 ): Promise<Inventory> {
   const probes = options.probes ?? DEFAULT_PROBES;
   const declaredHosts = options.hosts;
   const views = hub.listModels({ includeDisabled: true });
+
+  // The scan is the page's actual job, so it always runs. It is contained by
+  // construction — each engine is contacted on its own and reports its own
+  // failure — so a machine with only one of the two engines still lists what it
+  // has instead of showing an error page.
+  const scan = await scanLocalResources(hub, {
+    hosts: declaredHosts,
+    ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
+    ...(options.scanTimeoutMs === undefined ? {} : { timeoutMs: options.scanTimeoutMs }),
+    probes,
+    ...(options.log === undefined ? {} : { log: options.log }),
+  });
 
   const engines: EngineReport[] = [];
   const reported = new Set<string>();
@@ -397,6 +438,8 @@ export async function buildInventory(
 
   return {
     generatedAt: new Date().toISOString(),
+    resources: scan.resources,
+    scan: { sources: scan.sources, warnings: scan.warnings, registered: scan.registered },
     catalogPath: options.catalogPath,
     ...(options.artifactRoot === undefined || options.artifactRoot.length === 0
       ? {}
@@ -577,6 +620,15 @@ async function describeEngineModels(
       return { models: [], modelsSource: `Ollama did not answer: ${error instanceof Error ? error.message : String(error)}` };
     }
   }
+  if (known?.id === 'comfyui') {
+    // ComfyUI reports no models of its own, and this page must not invent any:
+    // its checkpoints, LoRAs and VAEs are workflow-internal detail. What the
+    // engine *can* be asked to do is the workflow list, filled in by the scan.
+    return {
+      models: [],
+      modelsSource: 'ComfyUI exposes workflows, not models — see the local resources list',
+    };
+  }
   if (installPath !== undefined && known !== undefined) {
     return { models: [], modelsSource: 'listed from the model store below' };
   }
@@ -606,6 +658,10 @@ export function registerInventoryRoute(
     readonly allowProcessLaunch: boolean;
     /** Machine probes; overridable so a test can describe a machine it does not own. */
     readonly probes?: InventoryProbes;
+    /** A directory of ComfyUI workflow JSON files to scan, when configured. */
+    readonly workflowDir?: string;
+    /** Budget for one scan request, in milliseconds. */
+    readonly scanTimeoutMs?: number;
   },
 ): void {
   ctx.inject(['webServer'], (scope) => {
@@ -621,14 +677,22 @@ export function registerInventoryRoute(
         return;
       }
       try {
-        const probe = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('probe') === '1';
+        const params = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams;
+        const probe = params.get('probe') === '1';
+        // `scan=1` is the Scan button. Both flags currently drive the same pass;
+        // they are kept separate because "probe the endpoints" and "re-read what
+        // the engines have" are different questions and may diverge.
+        const scan = params.get('scan') === '1';
         const inventory = await buildInventory(options.hub, {
           hosts: options.hosts,
           catalogPath: options.catalogPath,
           artifactRoot: options.artifactRoot,
           allowProcessLaunch: options.allowProcessLaunch,
           ...(options.probes === undefined ? {} : { probes: options.probes }),
-          probe,
+          ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
+          ...(options.scanTimeoutMs === undefined ? {} : { scanTimeoutMs: options.scanTimeoutMs }),
+          probe: probe || scan,
+          log: (message) => log.debug(message),
         });
         const body = JSON.stringify(inventory, null, 2);
         res.writeHead(200, {

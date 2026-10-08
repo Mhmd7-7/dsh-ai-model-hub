@@ -133,8 +133,34 @@ Three rules keep it from becoming a second, weaker catalog:
 Discovery is off by default, fail-soft (an unreachable engine is a warning and no
 models from that host), cached per host for a TTL, and refreshable on demand —
 which is the answer to "I just pulled an Ollama model and do not want to wait".
-ComfyUI providers are explicit host workflow declarations, unaffected by rescanning
-saved workflows or loose checkpoint files.
+ComfyUI providers declared on the host are unaffected by rescanning saved
+workflows or loose checkpoint files.
+
+### 4b. The Local models scan — an explicit, user-driven pass
+
+The settings page's **Scan** is a second, deliberately separate discovery path,
+because it answers a different question. Automatic discovery decides what the
+*router* may select and is therefore conservative and configuration-driven; the
+scan decides what the *user* can see and run right now, so it reads the machine
+in front of them.
+
+- `dsh-plugin/scan.ts` walks the declared engines: Ollama through its own
+  `/api/tags`, ComfyUI through its saved-workflow route (`/userdata`) and/or a
+  configured workflow directory. The two halves never share a failure path, so one
+  engine being down cannot hide the other's results.
+- `src/comfy/scan.ts` turns a saved workflow document into a public contract,
+  structurally: which node holds the prompt, which carries the image, which one is
+  the deliverable. That inference is the only thing that makes a workflow saved in
+  the ComfyUI editor usable without hand-written JSON, and it exposes a prompt, an
+  image, a seed and dimensions — never a weight file or a node id.
+- Runnable workflows are published through `ModelHub.publishScannedModels`, which
+  republishes the catalog as `static + scanned + discovered`. A repeated scan
+  *replaces* the scanned half rather than growing it, so ids derived from source
+  locations make a rescan a refresh and never a duplicate. Static configuration
+  still wins the id collision, exactly as it does for automatic discovery.
+
+The boundary the previous section states is unchanged and is what the scan is
+built to respect: **a ComfyUI checkpoint is not a provider; a workflow is.**
 
 ### 5. Machine ↔ Router — measured resources
 

@@ -389,10 +389,42 @@ is it running, and what is inside it.
 | Row | Where it comes from |
 |---|---|
 | Installed at | The launch command's `cwd`, then a short list of well-known install directories |
-| Listens on / running | A live probe of the catalog's endpoint (`Check now`), or the last known state |
-| Models | The engine itself where it has an API — Ollama's `/api/tags` — otherwise the files in its model store |
+| Listens on / running | A live probe of the catalog's endpoint (`Scan`), or the last known state |
 | Hub can start it | The descriptor's `startable`, after the deployment's `allowProcessLaunch` |
 | Catalog models / capabilities | The same live hub the tools read, so the page cannot disagree with behaviour |
+
+**Scan** is the page's main action, and it produces one list of two kinds of
+thing, each row labelled with what it is:
+
+| Kind | What it is | Where it comes from |
+|---|---|---|
+| **Ollama Model** | An installed model | The instance's own `/api/tags` |
+| **ComfyUI Workflow** | One complete, selectable workflow | ComfyUI's saved workflows (`/userdata`) and/or a configured workflow directory |
+
+A ComfyUI workflow is the smallest thing the list exposes. Its checkpoints,
+LoRAs, VAEs, text encoders, ControlNets and individual nodes are **not** listed —
+they are the workflow's own business, which is why changing what a workflow loads
+never changes anything an agent or a user has to know.
+
+The two halves are discovered independently, so an Ollama instance that is down
+cannot hide the workflows and a ComfyUI that is down cannot hide the models; each
+source reports its own status. Scanning twice refreshes the list rather than
+growing it, because every entry's id comes from its source location.
+
+Workflows are shown with the one status that actually matters:
+
+| Status | Meaning |
+|---|---|
+| `ready` | Saved in API format — the hub queues it as it stands |
+| `needs_conversion` | Saved in the editor's UI format. It is listed and converted for execution, but it is not the same as an API export |
+| `invalid` | Readable, but produces nothing a caller can keep. The reason is shown |
+| `unavailable` | The engine needed to interpret it could not be reached |
+
+Runnable workflows are published to the hub as workflow-backed providers, so the
+agent can route to them with the existing `invoke_model` tool by pinning the
+workflow's id — the same harness, no second execution path. The public parameters
+a workflow exposes (prompt, negative prompt, image, seed, steps, CFG, width,
+height) are inferred from its graph and are the only fields a caller may set.
 
 Engines the catalog does **not** declare are still listed — `a1111`, `comfyui`, and
 `ollama` are known by name — with the directories that were checked, so "Forge is
@@ -403,12 +435,26 @@ Two halves, both dependency-free:
 - `dsh-plugin/inventory.ts` builds the answer and serves it on
   `GET /dsh-ai-model-hub/inventory`. Every probe is bounded and failures are
   contained; the route is injected on demand, so a headless profile with no web
-  server keeps every tool and simply serves no page.
+  server keeps every tool and simply serves no page. The scan itself lives in
+  `dsh-plugin/scan.ts`, and the graph → public-contract inference it uses is in
+  `src/comfy/scan.ts`.
 - `dsh-plugin/client.js` is the browser half. DSH loads plugin clients through
   `window.__ModuleLoader__` as plain side-effect scripts — no top-level
   `import`/`export`, React handed in through the factory's `require` — so this is
   hand-written JavaScript with **no bundler and no build step**, matching the rest
   of the project. It registers one `settings.section` contribution.
+
+Configure a workflow directory when your workflows live beside the catalog rather
+than inside ComfyUI:
+
+```yaml
+config:
+  comfyuiWorkflowDir: 'C:/workflows/comfy'   # every *.json under it, recursively
+  scanTimeoutMs: 4000                        # budget for one scan request
+```
+
+The directory is a source of workflows only — nothing in it enumerates weights or
+custom nodes.
 
 ### Pointing the hub at your engines
 
@@ -585,6 +631,8 @@ dsh-ai-model-hub/
 │   │                             and 3D container sniffing/measurement
 │   ├── discovery/                engine introspection: ollama · comfyui · a1111 ·
 │   │                             three_d, and the merge that keeps static first
+│   ├── comfy/                    the workflow contract (bindings + typed outputs)
+│   │                             and the scan that infers one from a saved graph
 │   ├── config/                   catalog discovery and loading
 │   ├── util/                     process guardrails, primitive validators
 │   ├── machine.ts                RAM/VRAM/GPU/disk probing, free figures included
@@ -597,6 +645,7 @@ dsh-ai-model-hub/
 │   ├── types.ts                  the DSH API bridge — where a breaking change lands
 │   ├── skills.ts                 the bundled agent skill: one provider, one file
 │   ├── inventory.ts              engine discovery + the route the settings page reads
+│   ├── scan.ts                   the Scan pass: Ollama models + complete ComfyUI workflows
 │   ├── client.js                 the browser half: the "Local models" settings page
 │   └── tools/                    discovery · lifecycle · invoke
 ├── skills/dsh-ai-model-hub/

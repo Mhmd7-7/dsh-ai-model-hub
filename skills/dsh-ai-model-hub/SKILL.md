@@ -52,13 +52,30 @@ calls answer everything:
 
 ### When a model you expect is missing
 
-A model the machine already has — a freshly pulled Ollama model, a new ComfyUI
-checkpoint — may not be in the catalog yet, either because the deployment
-configures models by hand or because the discovery cache has not expired.
-`refresh_model_discovery` re-reads every configured engine and republishes the
-catalog; it reports what each engine contributed and warns about any it could not
-reach. Run it before concluding a capability is unavailable, and say plainly if
+A model the machine already has — a freshly pulled Ollama model, a ComfyUI
+workflow saved in the editor — may not be in the catalog yet, either because the
+deployment configures models by hand or because the discovery cache has not
+expired. `refresh_model_discovery` re-reads every configured engine and republishes
+the catalog; it reports what each engine contributed and warns about any it could
+not reach. Run it before concluding a capability is unavailable, and say plainly if
 it reports that runtime discovery is disabled in this deployment.
+
+When you have a human in front of the GUI, the **Local models** settings page is
+the other path, and the more informative one: its **Scan** button lists the
+machine's installed Ollama models and its *complete ComfyUI workflows*, each
+labelled, and publishes the runnable workflows so `invoke_model` can pin them by
+id. Two things are worth knowing about it when you are diagnosing a machine:
+
+- A ComfyUI workflow is the smallest unit on that list. Checkpoints, LoRAs, VAEs
+  and individual nodes are deliberately never shown — never ask a user to pick one.
+- A workflow is labelled `ready` (saved in API format), `needs_conversion` (saved
+  in the editor's UI format and converted for execution), `invalid` (it produces
+  nothing a caller can keep) or `unavailable` (ComfyUI could not be reached). Only
+  the first two can run, and the row says which.
+
+Ollama and ComfyUI are scanned independently there, so a page showing no Ollama
+models does *not* mean the workflows failed, or the reverse. Read each source's
+own status line before reporting a capability as unavailable.
 
 ## Invoking
 

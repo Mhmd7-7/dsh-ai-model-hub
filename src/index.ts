@@ -280,6 +280,33 @@ export type {
   ParsedComfyWorkflow,
   WorkflowInference,
 } from './discovery/comfyui-workflow.ts';
+// The ComfyUI workflow contract and its scanner: what makes a saved workflow a
+// runnable provider with a public surface, rather than a pile of nodes.
+export {
+  PUBLIC_INPUTS,
+  loadComfyGraph,
+  readContract,
+  validateComfyGraph,
+} from './comfy/workflow.ts';
+export type {
+  ComfyGraph,
+  InputBinding,
+  OutputBinding,
+  WorkflowContract,
+} from './comfy/workflow.ts';
+export {
+  looksLikeEditorWorkflow,
+  scanWorkflowDocument,
+  scannedOllamaModelId,
+  scannedWorkflowId,
+  workflowModelTypeFor,
+} from './comfy/scan.ts';
+export type {
+  ScanWorkflowInput,
+  ScannedWorkflow,
+  ScannedWorkflowFormat,
+  ScannedWorkflowReadiness,
+} from './comfy/scan.ts';
 export {
   THREE_D_ENGINE,
   THREE_D_ENGINE_ALIASES,

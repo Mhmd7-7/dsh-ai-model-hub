@@ -96,3 +96,18 @@
       #   # Budget for one engine's discovery pass. Raise it if ComfyUI's
       #   # /object_info is slow on your machine.
       #   discoveryTimeoutMs: 5000
+      #
+      #   # A directory of ComfyUI workflow JSON files for the Local models scan.
+      #   # The scan already reads the workflows ComfyUI has saved, through the
+      #   # engine's own /userdata route; this is the second source, and the one
+      #   # that works while ComfyUI is down or when workflows are kept beside the
+      #   # catalog. Every *.json file under it is read, recursively.
+      #   #
+      #   # It is a source of WORKFLOWS only. Nothing here (or anywhere else on
+      #   # that page) enumerates checkpoints, LoRAs, VAEs or custom nodes: those
+      #   # belong to the workflow that uses them.
+      #   comfyuiWorkflowDir: ''
+      #
+      #   # Budget for one scan request, in milliseconds. Raise it on a slow disk
+      #   # with a large workflow directory.
+      #   scanTimeoutMs: 4000
