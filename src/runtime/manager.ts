@@ -175,6 +175,10 @@ export class RuntimeManager {
     for (const [modelId, state] of [...this.states]) {
       if (present.has(modelId)) continue;
       if (state.process !== undefined) continue;
+      // An engine record is not in the catalog by design, so a discovery pass
+      // must not read its absence as "this model went away" while a scan is
+      // still between starting it and waiting for it to answer.
+      if (this.engineRecords.has(modelId)) continue;
       this.states.delete(modelId);
     }
   }
@@ -313,7 +317,7 @@ export class RuntimeManager {
    * @throws ModelHubError with `MODEL_NOT_FOUND` when unknown.
    */
   getModelStatus(modelId: string): ModelRuntimeStatus {
-    this.catalog.requireModel(modelId);
+    this.resolveById(modelId);
     const state = this.states.get(modelId);
     if (state === undefined) {
       throw new ModelHubError('MODEL_NOT_FOUND', `no runtime state for model "${modelId}"`, { modelId });
@@ -369,7 +373,7 @@ export class RuntimeManager {
    * @returns the probe result.
    */
   async probeHealth(modelId: string): Promise<HealthReport> {
-    const model = this.catalog.requireModel(modelId);
+    const model = this.resolveById(modelId);
     const state = this.states.get(modelId);
     if (state === undefined) {
       throw new ModelHubError('MODEL_NOT_FOUND', `no runtime state for model "${modelId}"`, { modelId });
@@ -655,6 +659,12 @@ export class RuntimeManager {
   async startEngineRecord(
     model: ResolvedModel,
   ): Promise<{ started: boolean; alreadyRunning: boolean; health: HealthReport }> {
+    // Held here, not in the catalog: the record describes a *process*, and
+    // publishing it would make it a routing candidate for a capability nothing
+    // serves. Every later step of the launch — the endpoint probe, the health
+    // wait, the stop — looks the model up by id, so an id the catalog has never
+    // heard of has to resolve from this map or the launch fails halfway.
+    this.engineRecords.set(model.id, model);
     if (!this.states.has(model.id)) {
       this.states.set(model.id, {
         lifecycle: model.lifecycle.startable ? 'not_running' : 'external',
@@ -869,7 +879,7 @@ export class RuntimeManager {
     modelId: string,
     options: { readonly force?: boolean } = {},
   ): Promise<{ stopped: boolean; wasRunning: boolean }> {
-    const model = this.catalog.requireModel(modelId);
+    const model = this.resolveById(modelId);
     const state = this.requireState(modelId);
 
     return this.serializeTransition(state, async () => {
@@ -1087,6 +1097,25 @@ export class RuntimeManager {
    * @param modelId - the model id.
    * @returns the mutable state.
    */
+  /**
+   * Resolve a model id the runtime is responsible for.
+   *
+   * A catalog model comes from the catalog; an engine record — a process the scan
+   * asked for, which deliberately has no catalog entry — comes from the map that
+   * launch populated. Everything that touches a process goes through this, so an
+   * engine the hub owns is stoppable and probeable without being routable.
+   *
+   * @param modelId - the id to resolve.
+   * @returns the resolved model.
+   * @throws ModelHubError with `MODEL_NOT_FOUND` when neither source knows it.
+   */
+  private resolveById(modelId: string): ResolvedModel {
+    return this.engineRecords.get(modelId) ?? this.catalog.requireModel(modelId);
+  }
+
+  /** Engine records a scan asked for: real processes with no catalog entry. */
+  private readonly engineRecords = new Map<string, ResolvedModel>();
+
   private requireState(modelId: string): ModelState {
     const state = this.states.get(modelId);
     if (state === undefined) {

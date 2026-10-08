@@ -824,6 +824,58 @@ describe('Local models scan', () => {
     }
   });
 
+  it('launches an engine for a host that carries no catalog model', async () => {
+    // The regression this exists for: the scan has to start ComfyUI before it can
+    // discover the first workflow, so at that moment the host has no model to hang
+    // a launch on. The launch resolves an engine record instead — and every later
+    // step (the endpoint probe, the health wait, the stop) looks the model up by
+    // id, so an id the catalog has never heard of must still resolve, or the launch
+    // fails halfway with MODEL_NOT_FOUND. A fake hub could not have caught this.
+    const hub = ModelHub.fromConfig(
+      {
+        version: '1',
+        hosts: [
+          {
+            id: 'comfyui',
+            name: 'ComfyUI',
+            adapter: 'comfyui',
+            // A deliberately dead port: the endpoint is never live, so the only
+            // way past this point is the launch itself.
+            runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint: 'http://127.0.0.1:9' },
+            lifecycle: {
+              startable: true,
+              stoppable: true,
+              startupTimeoutMs: 3_000,
+              awaitHealthOnStart: true,
+              start: { command: 'python', args: ['-c', 'import time; time.sleep(0.3)'] },
+            },
+          },
+        ],
+        models: [],
+      },
+      { manageTimers: false, probeResources: false, log: () => {} },
+    );
+    try {
+      let failure: { code?: string } | undefined;
+      try {
+        await hub.startEngineForHost('comfyui');
+      } catch (error) {
+        failure = error as { code?: string };
+      }
+      // Any failure is acceptable except "that id does not exist": the point is
+      // that the launch reached the engine, not that a stub process came up.
+      assert.notEqual(failure?.code, 'MODEL_NOT_FOUND', 'an engine record must resolve without a catalog entry');
+
+      // And the id stays addressable, which is what lets a scan that started the
+      // engine wait on it and shut it down again.
+      assert.equal(hub.getModelStatus('engine-comfyui').modelId, 'engine-comfyui');
+      assert.doesNotThrow(() => hub.activeInvocationsFor('engine-comfyui'));
+      await hub.stopModel('engine-comfyui');
+    } finally {
+      await hub.dispose();
+    }
+  });
+
   it('builds several candidate retrieval URLs, the documented one first', () => {
     const urls = workflowUrls('http://h:8188', '3d/model.json');
     assert.equal(urls[0], 'http://h:8188/userdata/workflows%2F3d%2Fmodel.json');
