@@ -68,6 +68,7 @@ import type { Capability, IoType, ModelType } from '../catalog/capabilities.ts';
 import { isCapability } from '../catalog/capabilities.ts';
 import type { ModelDescriptor, ModelHost } from '../catalog/descriptor.ts';
 import { fetchJson, isRecordLike, readArray, readString, slugifyModelId, stableDigest } from './http.ts';
+import { flattenUiSubgraphs } from './comfyui-subgraph.ts';
 import { DISCOVERED_PRIORITY, ioForCapabilities } from './types.ts';
 
 /** The route that lists a user's saved workflows. */
@@ -329,6 +330,16 @@ export interface ComfyGraphNode {
   readonly classType: string;
   /** Input name → literal value or `[nodeId, slot]` link. */
   readonly inputs: Readonly<Record<string, unknown>>;
+  /**
+   * The author's label for the node, when the export carried one.
+   *
+   * Carried through conversion because it is the only evidence that separates a
+   * control an author meant a caller to use from an internal constant — including
+   * a subgraph input, whose instance label is the name the author gave it. It is
+   * *not* copied into the executable graph: ComfyUI is queued `class_type` and
+   * `inputs` only.
+   */
+  readonly title?: string;
 }
 
 /** How a workflow document was stored. */
@@ -536,7 +547,15 @@ export function parseComfyWorkflow(
     const classType = readString(value, 'class_type');
     if (classType === undefined) continue;
     recognised += 1;
-    nodes[id] = { classType, inputs: isRecordLike(value['inputs']) ? value['inputs'] : {} };
+    // An API export may carry its label as `_meta.title`, which is where the
+    // editor writes it when saving in API format.
+    const meta = isRecordLike(value['_meta']) ? value['_meta'] : undefined;
+    const title = readString(value, 'title') ?? (meta === undefined ? undefined : readString(meta, 'title'));
+    nodes[id] = {
+      classType,
+      inputs: isRecordLike(value['inputs']) ? value['inputs'] : {},
+      ...(title === undefined ? {} : { title }),
+    };
   }
   if (recognised === 0) {
     throw new ComfyWorkflowError(
@@ -577,16 +596,17 @@ function convertUiWorkflow(
   name: string,
   io: ComfyNodeIndex,
 ): ParsedComfyWorkflow {
-  const uiNodes = readArray(document, 'nodes');
+  // Subgraph instances are resolved first, so everything below sees real node
+  // classes and ids unique across the whole graph. Nothing downstream needs to
+  // know a subgraph was ever involved, which is what lets a UI workflow with
+  // collapsed sections run without the operator exporting an API file.
+  const flattened = flattenUiSubgraphs(document);
+  const uiNodes = flattened.nodes;
   const links = new Map<number, readonly [string, number]>();
-  for (const link of readArray(document, 'links')) {
-    if (!Array.isArray(link)) continue;
-    const id = link[0];
-    const originId = link[1];
-    const originSlot = link[2];
-    if (typeof id === 'number' && (typeof originId === 'string' || typeof originId === 'number')) {
-      links.set(id, [String(originId), typeof originSlot === 'number' ? originSlot : 0]);
-    }
+  for (const link of flattened.links) {
+    const [id, originId, originSlot] = link;
+    if (typeof id !== 'number') continue;
+    links.set(id, [String(originId), typeof originSlot === 'number' ? originSlot : 0]);
   }
 
   const nodes: Record<string, ComfyGraphNode> = {};
@@ -647,6 +667,16 @@ function convertUiWorkflow(
       }
     }
 
+    // Newer revisions also record the values by *name*, which is authoritative:
+    // an author reordering a port would silently mis-bind a positional array, and
+    // a promoted subgraph override arrives this way. Read it first.
+    const namedValues = entry['widgets_values_named'];
+    if (isRecordLike(namedValues)) {
+      for (const [key, value] of Object.entries(namedValues)) {
+        if (inputs[key] === undefined) inputs[key] = value;
+      }
+    }
+
     // `widgets_values` is either a positional array or, on some nodes, an object
     // keyed by input name. Both are read; the positional form is the common one.
     const widgetValues = entry['widgets_values'];
@@ -660,8 +690,11 @@ function convertUiWorkflow(
       for (const fieldName of order) {
         if (cursor >= widgetValues.length) break;
         // A `undefined` slot consumes its value without assigning it; see
-        // {@link widgetInputOrder}.
-        if (fieldName !== undefined) inputs[fieldName] = widgetValues[cursor];
+        // {@link widgetInputOrder}. A field already given an explicit value is
+        // never overwritten by a positional guess, so a named value and a link
+        // both outrank the array — only the slot still advances, keeping every
+        // later value aligned.
+        if (fieldName !== undefined && inputs[fieldName] === undefined) inputs[fieldName] = widgetValues[cursor];
         cursor += 1;
       }
     }
@@ -677,7 +710,11 @@ function convertUiWorkflow(
       if (fallback !== undefined) inputs[field] = fallback;
     }
 
-    nodes[String(id)] = { classType, inputs };
+    nodes[String(id)] = {
+      classType,
+      inputs,
+      ...(readString(entry, 'title') === undefined ? {} : { title: readString(entry, 'title') as string }),
+    };
   }
 
   if (missingSchema.length > 0) {
@@ -704,7 +741,8 @@ function convertUiWorkflow(
         ? ''
         : ` ${unique(skippedAnnotations).length} annotation node class(es) were dropped because they carry no ` +
           `execution semantics and are connected to nothing (${unique(skippedAnnotations).slice(0, 5).join(', ')}); ` +
-          'they do not affect what runs.'),
+          'they do not affect what runs.') +
+      (flattened.notes.length === 0 ? '' : ` ${flattened.notes.join(' ')}`),
   };
 }
 

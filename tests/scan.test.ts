@@ -876,6 +876,50 @@ describe('Local models scan', () => {
     }
   });
 
+  it('updates a registration when the saved workflow changes, without adding a second one', async () => {
+    // The id comes from the source location, so editing a workflow refreshes the
+    // entry rather than leaving a stale contract behind or registering the changed
+    // graph under a new id.
+    let published: readonly { id: string; adapterConfig: Readonly<Record<string, unknown>> }[] = [];
+    const hub = {
+      catalog: { listModels: () => [] },
+      activeInvocationsFor: () => 0,
+      publishScannedModels: (descriptors: readonly never[]) => {
+        published = descriptors as never;
+        return descriptors.length;
+      },
+      startEngineForHost: async () => ({
+        modelId: 'engine-comfyui',
+        started: false,
+        alreadyRunning: true,
+        health: { healthy: true },
+      }),
+      stopEngine: async () => ({ stopped: false, wasRunning: false }),
+    } as unknown as ModelHub;
+
+    const before = probesFor({ ollama: { models: [] }, systemStats: {}, objectInfo, workflows: { 'a.json': textToImage } });
+    const first = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes: before });
+    const firstWorkflow = first.resources.find((entry) => entry.kind === 'comfyui_workflow');
+    assert.equal(firstWorkflow?.status, 'ready');
+    const firstSteps = (published[0]?.adapterConfig['workflow'] as Record<string, { inputs: Record<string, unknown> }>)?.['5']
+      ?.inputs['steps'];
+    assert.equal(firstSteps, 20);
+
+    // The same file, saved again after an edit.
+    const edited = JSON.parse(JSON.stringify(textToImage)) as Record<string, { inputs: Record<string, unknown> }>;
+    edited['5']!.inputs['steps'] = 4;
+    const after = probesFor({ ollama: { models: [] }, systemStats: {}, objectInfo, workflows: { 'a.json': edited } });
+    const second = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes: after });
+
+    const secondWorkflow = second.resources.find((entry) => entry.kind === 'comfyui_workflow');
+    assert.equal(secondWorkflow?.id, firstWorkflow?.id, 'the edit refreshed the same registration');
+    assert.equal(second.resources.filter((entry) => entry.kind === 'comfyui_workflow').length, 1, 'no duplicate was added');
+    assert.equal(published.length, 1, 'one provider was published, not two');
+
+    const graph = published[0]?.adapterConfig['workflow'] as Record<string, { inputs: Record<string, unknown> }>;
+    assert.equal(graph['5']?.inputs['steps'], 4, 'the registered graph reflects the saved edit');
+  });
+
   it('builds several candidate retrieval URLs, the documented one first', () => {
     const urls = workflowUrls('http://h:8188', '3d/model.json');
     assert.equal(urls[0], 'http://h:8188/userdata/workflows%2F3d%2Fmodel.json');

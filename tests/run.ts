@@ -40,4 +40,5 @@ import './discovery-a1111.test.ts';
 import './discovery-comfyui.test.ts';
 import './discovery-comfyui-workflow.test.ts';
 import './comfy-workflow-boundary.test.ts';
+import './subgraph.test.ts';
 import './scan.test.ts';

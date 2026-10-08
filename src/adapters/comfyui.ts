@@ -853,6 +853,14 @@ export const THREE_D_SOURCE_KINDS: Readonly<Record<string, 'image' | 'text'>> = 
 function bindPublicInputs(template: ComfyGraph, contract: WorkflowContract, invocation: AdapterInvocation, imageName?: string): ComfyGraph {
   const graph = structuredClone(template);
   const supplied: Record<string, unknown> = { ...invocation.options, prompt: invocation.prompt, image: imageName };
+  // A workflow whose prompt box the author named something else still has exactly
+  // one text binding, and a caller's prompt is what belongs there. Without this a
+  // request could route to the workflow and then have its prompt discarded — the
+  // failure mode where an image comes back looking nothing like what was asked for.
+  if (contract.bindings['prompt'] === undefined && invocation.prompt !== undefined) {
+    const textual = Object.keys(contract.bindings).filter((name) => contract.inputKinds?.[name] === 'text');
+    if (textual.length === 1) supplied[textual[0] as string] = invocation.prompt;
+  }
   // A public binding is a typed scalar; no option can mutate a graph path, class or loader.
   // Defaults in the trusted API graph remain unchanged unless a bound value is supplied.
   for (const [name, binding] of Object.entries(contract.bindings)) {

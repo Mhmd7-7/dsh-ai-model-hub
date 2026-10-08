@@ -270,6 +270,38 @@ function literalField(node: GraphNode, fields: readonly string[]): string | unde
 }
 
 /**
+ * The public name for an author-labelled control.
+ *
+ * Usually the label, slugified. The exception is a text control the author named
+ * like a user prompt: a workflow whose prompt arrives through a `PrimitiveString`
+ * called "Text String (User Prompt)" would otherwise expose it under that name
+ * and advertise no capability, because routing and invocation both speak in terms
+ * of a `prompt`. Naming it `prompt` is what makes "generate a cat" reach it, and
+ * the label is still shown as the human-facing description.
+ *
+ * Only the *user* prompt is renamed: a sibling "System Prompt" control keeps its
+ * own name, so the two cannot be confused for one another.
+ *
+ * @param title - the author's label.
+ * @param fallback - used when the label has nothing usable.
+ * @param kind - the value kind the control carries.
+ * @param existing - the inputs established so far.
+ * @returns the parameter name.
+ */
+function controlName(
+  title: string | undefined,
+  fallback: string,
+  kind: PublicInputKind,
+  existing: readonly PublicInput[],
+): string {
+  const slug = parameterName(title, fallback);
+  if (kind !== 'text') return slug;
+  if (existing.some((input) => input.name === 'prompt')) return slug;
+  const looksLikePrompt = title !== undefined && /(^|[^a-z])user[ _-]?prompt([^a-z]|$)|^prompt$/i.test(title.trim());
+  return looksLikePrompt ? 'prompt' : slug;
+}
+
+/**
  * A stable parameter name derived from a node's title.
  *
  * The title is what the author called the control, so it is the best available
@@ -452,7 +484,7 @@ function collectInputs(
       );
       continue;
     }
-    const name = parameterName(node.title, `value_${node.id}`);
+    const name = controlName(node.title, `value_${node.id}`, kind, inputs);
     if (inputs.some((input) => input.name === name)) continue;
     add({ name, label: node.title, kind, node: node.id, input: 'value', required: false });
     evidence.push(`control "${node.title}" (${node.classType})`);
@@ -678,7 +710,14 @@ export function scanWorkflowDocument(input: ScanWorkflowInput): ScannedWorkflow 
     graph[id] = { class_type: node.classType, inputs: { ...node.inputs } };
   }
 
-  const titles = editorNodeTitles(raw);
+  // Titles reach the analysis from two places, because the two serializations put
+  // them in different ones: a UI export keeps them on the raw nodes, and a
+  // conversion — subgraph flattening included, which synthesizes a label for every
+  // promoted input — keeps them on the parsed nodes. Neither alone is complete.
+  const titles = new Map(editorNodeTitles(raw));
+  for (const [id, node] of Object.entries(parsed.nodes)) {
+    if (node.title !== undefined) titles.set(id, node.title);
+  }
   const nodes = graphNodes(graph, titles);
   const diagnostics: string[] = [];
 
