@@ -360,6 +360,63 @@ window.__ModuleLoader__.load({
               })
             : null,
 
+          data && data.error
+            ? h('div', {
+                style: {
+                  border: '1px solid ' + text.error,
+                  borderRadius: '12px',
+                  padding: '10px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px',
+                },
+                children: [
+                  h('div', {
+                    style: { fontSize: '13px', fontWeight: 500, color: text.error },
+                    children: 'The model hub is not loaded',
+                  }),
+                  h('div', {
+                    style: { fontSize: '12px', color: text.primary, lineHeight: '18px', userSelect: 'text' },
+                    children: data.error,
+                  }),
+                  h('div', {
+                    style: { fontSize: '12px', color: text.tertiary, lineHeight: '18px' },
+                    children:
+                      'Fix the catalog file named below and reload the plugin, or restart DeepSeek Harness. ' +
+                      'Until then no model tools are available.',
+                  }),
+                ],
+              })
+            : null,
+
+          data && !data.error && data.diagnostics && data.diagnostics.length > 0
+            ? h('div', {
+                style: {
+                  border: '1px solid ' + text.border,
+                  borderRadius: '12px',
+                  padding: '10px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px',
+                },
+                children: [
+                  h('div', { style: { fontSize: '13px', fontWeight: 500 }, children: 'Catalog notes' }),
+                  ...data.diagnostics.map((entry, index) =>
+                    h('div', {
+                      key: 'diagnostic-' + index,
+                      style: {
+                        fontSize: '12px',
+                        lineHeight: '18px',
+                        color: entry.severity === 'error' ? text.error : text.secondary,
+                        userSelect: 'text',
+                      },
+                      children: entry.message,
+                    }),
+                  ),
+                ],
+              })
+            : null,
+
           data
             ? h('div', {
                 style: {

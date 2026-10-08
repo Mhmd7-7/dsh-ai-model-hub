@@ -348,6 +348,49 @@ describe('the inventory route (host half)', () => {
     }
   });
 
+  it('serves an explained page, not a 404, when the model hub is not loaded', async () => {
+    // The regression this exists for: a catalog that fails to load used to take
+    // the route down with it, so the settings page answered an opaque HTTP 404 on
+    // the one screen whose job is to explain what is wrong.
+    let handler: ((req: IncomingMessage, res: ServerResponse) => void | Promise<void>) | undefined;
+    const { lines, logger } = recordingLogger();
+    const ctx = {
+      inject: (names: string[], callback: (scope: unknown) => void) => {
+        assert.deepEqual(names, ['webServer']);
+        callback({
+          webServer: {
+            register(route: { handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) {
+              handler = route.handler;
+              return () => {};
+            },
+          },
+        });
+      },
+    } as unknown as Context;
+
+    registerInventoryRoute(ctx, logger, {
+      catalogPath: 'C:/catalog/models.json',
+      artifactRoot: '',
+      allowProcessLaunch: false,
+      catalogError: 'model hub disabled — INVALID_DESCRIPTOR: models[0].type: is required',
+    });
+    assert.notEqual(handler, undefined, 'the route is registered even without a hub');
+    assert.deepEqual(lines.filter((line) => line.startsWith('warn')), [], 'a missing hub is reported, not warned about');
+
+    const { captured, res } = fakeResponse();
+    await (handler as never as (req: IncomingMessage, res: ServerResponse) => Promise<void>)(
+      { method: 'GET', url: `${INVENTORY_ROUTE}?scan=1` } as IncomingMessage,
+      res,
+    );
+
+    assert.equal(captured.status, 200, 'the page is served, not a 404');
+    const parsed = JSON.parse(captured.body ?? '{}') as Inventory;
+    assert.match(parsed.error ?? '', /model hub disabled/);
+    assert.deepEqual(parsed.resources, []);
+    assert.deepEqual(parsed.engines, []);
+    assert.match(parsed.scan.warnings.join(' '), /model hub disabled/);
+  });
+
   it('refuses anything but GET', async () => {
     const instance = hub();
     try {

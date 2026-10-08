@@ -306,4 +306,12 @@ export interface CatalogOptions {
   readonly machine?: MachineProfile;
   /** Emit diagnostic lines. Defaults to silence. */
   readonly log?: (message: string) => void;
+  /**
+   * Entries that were read successfully but deliberately not published.
+   *
+   * Distinct from {@link ModelCatalog.loadDiagnostics} errors on purpose: a
+   * warning means the catalog loaded and this one entry was dropped, which is a
+   * working deployment the operator should tidy, not a failure.
+   */
+  readonly warnings?: readonly string[];
 }

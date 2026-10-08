@@ -67,6 +67,13 @@ export class ModelCatalog {
 
     this.build(config.models);
 
+    // After `build`, which resets the diagnostics list: these warnings describe
+    // the *document* that was loaded, so they belong beside its model count.
+    for (const warning of options.warnings ?? []) {
+      this.diagnostics.push({ severity: 'warning', message: warning });
+      this.log(`catalog: ${warning}`);
+    }
+
     this.log(
       `catalog: ${this.models.size} model(s), ${this.byCapability.size} capability(ies) from ${this.hosts.size} host(s)`,
     );
@@ -162,7 +169,7 @@ export class ModelCatalog {
         >[],
       });
     }
-    return new ModelCatalog(parsed.config, options);
+    return new ModelCatalog(parsed.config, { ...options, warnings: parsed.warnings });
   }
 
   /**

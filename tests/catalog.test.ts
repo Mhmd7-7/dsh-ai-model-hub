@@ -93,6 +93,140 @@ describe('descriptor validation', () => {
     if (!result.ok) return;
     assert.equal(result.config.models.length, 1);
     assert.equal(result.config.models[0]?.id, 'test_model');
+    assert.deepEqual(result.warnings, []);
+  });
+
+  it('drops a ComfyUI weight-file leftover instead of failing the whole catalog', () => {
+    // The shape an older discovery pass wrote into models.json: a synthesized
+    // graph and a `discovery` block, with no bindings or outputs. One stale entry
+    // must cost that entry — not every other model, every tool, and the settings
+    // page, which is what a hard validation error used to cause.
+    const document = {
+      version: '1',
+      hosts: [
+        {
+          id: 'comfyui',
+          name: 'ComfyUI',
+          adapter: 'comfyui',
+          runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint: 'http://127.0.0.1:8188' },
+        },
+      ],
+      models: [
+        ...(baseCatalog()['models'] as unknown[]),
+        {
+          id: 'comfyui-legacy-weight',
+          name: 'z_image_turbo.safetensors',
+          type: 'image_generation',
+          host: 'comfyui',
+          capabilities: ['text_to_image'],
+          adapterConfig: { workflow: { '1': { class_type: 'SaveImage', inputs: {} } }, discovery: { weightKind: 'checkpoint' } },
+        },
+      ],
+    };
+    const result = parseModelCatalogConfig(document, 'test');
+    assert.equal(result.ok, true, 'the document is accepted');
+    if (!result.ok) return;
+    assert.deepEqual(
+      result.config.models.map((model) => model.id),
+      ['test_model'],
+      'the weight-file entry is not published',
+    );
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0] ?? '', /comfyui-legacy-weight/);
+    assert.match(result.warnings[0] ?? '', /weight-file provider/);
+  });
+
+  it('drops a ComfyUI workflow entry that declares no public contract, and says what is missing', () => {
+    const document = {
+      version: '1',
+      hosts: [
+        {
+          id: 'comfyui',
+          name: 'ComfyUI',
+          adapter: 'comfyui',
+          runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint: 'http://127.0.0.1:8188' },
+        },
+      ],
+      models: [
+        {
+          id: 'comfyui_no_contract',
+          name: 'Z-Image Turbo',
+          type: 'image_generation',
+          host: 'comfyui',
+          capabilities: ['text_to_image'],
+          adapterConfig: { workflowPath: 'workflows/z-image-turbo.api.json' },
+        },
+      ],
+    };
+    const result = parseModelCatalogConfig(document, 'test');
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(result.config.models, []);
+    assert.match(result.warnings[0] ?? '', /no `bindings` and `outputs`/);
+  });
+
+  it('keeps a ComfyUI workflow provider that has a contract but predates the providerKind label', () => {
+    // `providerKind`/`workflowId` describe a workflow; they are not what makes it
+    // runnable. An entry with a graph and a contract is a working provider and
+    // must not be discarded over a missing label.
+    const document = {
+      version: '1',
+      hosts: [
+        {
+          id: 'comfyui',
+          name: 'ComfyUI',
+          adapter: 'comfyui',
+          runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint: 'http://127.0.0.1:8188' },
+        },
+      ],
+      models: [
+        {
+          id: 'comfyui_workflow_ok',
+          name: 'Flux Text to Image',
+          type: 'image_generation',
+          host: 'comfyui',
+          capabilities: ['text_to_image'],
+          adapterConfig: {
+            workflowPath: 'workflows/flux.api.json',
+            bindings: { prompt: { node: '6', input: 'text' } },
+            outputs: { image: { node: '42', type: 'image' } },
+          },
+        },
+      ],
+    };
+    const result = parseModelCatalogConfig(document, 'test');
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(result.config.models.map((model) => model.id), ['comfyui_workflow_ok']);
+    assert.deepEqual(result.warnings, []);
+  });
+
+  it('reports an unusable ComfyUI contract as a real error, not a warning', () => {
+    const document = {
+      version: '1',
+      hosts: [
+        {
+          id: 'comfyui',
+          name: 'ComfyUI',
+          adapter: 'comfyui',
+          runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint: 'http://127.0.0.1:8188' },
+        },
+      ],
+      models: [
+        {
+          id: 'comfyui_bad_contract',
+          name: 'Broken',
+          type: 'image_generation',
+          host: 'comfyui',
+          capabilities: ['text_to_image'],
+          // Declares a contract, so it is kept — and then fails validation for
+          // having no prompt binding for a prompt-driven capability.
+          adapterConfig: { workflowPath: 'w.api.json', bindings: {}, outputs: { image: { node: '42', type: 'image' } } },
+        },
+      ],
+    };
+    const result = parseModelCatalogConfig(document, 'test');
+    assert.equal(result.ok, false, 'a declared-but-incoherent contract is an operator error');
   });
 
   it('reports every problem at once rather than the first', () => {

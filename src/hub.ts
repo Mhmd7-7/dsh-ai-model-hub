@@ -91,6 +91,15 @@ export interface ModelHubOptions {
   /** Machine profile override, for tests and for operators who know better. */
   readonly machine?: MachineProfile;
   /**
+   * Catalog entries that were read and then deliberately not published.
+   *
+   * Passed through to the catalog so {@link ModelHub.loadDiagnostics} and the
+   * settings page can report a superseded entry — a ComfyUI weight-file provider
+   * written by an older discovery pass, say — without the entry taking the whole
+   * deployment down with it.
+   */
+  readonly catalogWarnings?: readonly string[];
+  /**
    * Probe this machine's resources before routing, rather than trusting totals.
    *
    * **On by default.** The probe is what turns "this model needs 8 GiB VRAM and
@@ -354,6 +363,7 @@ export class ModelHub {
 
     this.catalog = new ModelCatalog(options.config, {
       ...(options.machine === undefined ? {} : { machine: options.machine }),
+      ...(options.catalogWarnings === undefined ? {} : { warnings: options.catalogWarnings }),
       log: (message) => this.log(message),
     });
 
@@ -460,7 +470,7 @@ export class ModelHub {
         issues: parsed.issues.map((issue) => ({ path: issue.path, message: issue.message })) as unknown as Record<string, unknown>[],
       });
     }
-    return new ModelHub({ ...options, config: parsed.config });
+    return new ModelHub({ ...options, config: parsed.config, catalogWarnings: parsed.warnings });
   }
 
   /**
@@ -500,6 +510,7 @@ export class ModelHub {
     const hub = new ModelHub({
       ...options,
       config: mergeCatalogConfig(parsed.config, discovery.descriptors),
+      catalogWarnings: parsed.warnings,
       // The merged catalog is already in `config`, and the registry has already
       // run its first pass. Handing the registry over rather than re-creating it
       // keeps its cache warm for a later `refreshDiscovery()` and stops a second

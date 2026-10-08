@@ -111,7 +111,7 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
   // to one warning and never affects the tools below.
   registerModelHubSkill(ctx, log);
 
-  let hub: ModelHub;
+  let hub: ModelHub | undefined;
   // The catalog's own facts, carried out of the try block for the settings page:
   // the hub deliberately does not republish them, because a hub built from a live
   // service is not the same object as the document it was built from.
@@ -122,12 +122,13 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
       ...(config.configPath.length === 0 ? {} : { configPath: config.configPath }),
       anchors: catalogAnchors(config),
     });
-    hub = buildHub(loaded.config, config, log, loaded.path);
+    hub = buildHub(loaded.config, config, log, loaded.path, loaded.warnings);
     catalogPath = loaded.path;
     catalogHosts = loaded.config.hosts ?? [];
     log.info(
       `model hub ready: ${hub.catalog.listModels().length} model(s), ${hub.catalog.listCapabilities().length} capability(ies) from ${loaded.path}`,
     );
+    for (const warning of loaded.warnings) log.warn(`catalog: ${warning}`);
     if (loaded.searched.length > 1) {
       log.debug(`catalog anchors tried, in order: ${loaded.searched.join(', ')}`);
     }
@@ -137,8 +138,19 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
     if (config.onConfigError === 'throw') throw new ModelHubError(hubError.code, message, hubError.details);
     log.warn(message);
     log.warn(
-      'No model tools were registered. Fix the catalog and restart, or reload the plugin after editing it.',
+      'No model tools were registered. The Local models page is still served, and reports this error, so the ' +
+        'problem is visible in the settings UI rather than as a missing route.',
     );
+    // The settings page is registered on the failure path too. It is the surface
+    // whose whole job is to explain the state of this machine, so leaving it
+    // unregistered would turn "your catalog has a bad entry" into an unexplained
+    // HTTP 404 — which is exactly the confusion this branch exists to remove.
+    registerInventoryRoute(ctx, log, {
+      catalogPath,
+      artifactRoot: config.artifactRoot,
+      allowProcessLaunch: config.allowProcessLaunch,
+      catalogError: message,
+    });
     return;
   }
 
@@ -246,6 +258,7 @@ function buildHub(
   config: ResolvedPluginConfig,
   log: { info: (message: string) => void; warn: (message: string) => void },
   catalogPath: string,
+  catalogWarnings: readonly string[] = [],
 ): ModelHub {
   const effectiveConfig: ModelCatalogConfig = config.allowProcessLaunch
     ? catalogConfig
@@ -270,6 +283,7 @@ function buildHub(
     // Where this catalog lives. A catalog's relative paths are relative to the
     // catalog, and a long-lived host's working directory says nothing about that.
     catalogPath,
+    catalogWarnings,
     ...(config.artifactRoot.length === 0 ? {} : { artifactRoot: config.artifactRoot }),
     healthIntervalMs: config.healthIntervalMs,
     idleSweepIntervalMs: config.idleSweepIntervalMs,

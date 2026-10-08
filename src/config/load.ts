@@ -25,6 +25,15 @@ export interface LoadedCatalog {
   readonly raw: unknown;
   /** The validated configuration. */
   readonly config: ModelCatalogConfig;
+  /**
+   * Entries that were read and then deliberately not published.
+   *
+   * Carried out of the loader rather than logged and forgotten: the plugin hands
+   * these to the hub, which reports them in `loadDiagnostics` and on the settings
+   * page, so an operator learns their catalog holds a superseded entry without
+   * that entry having disabled the deployment.
+   */
+  readonly warnings: readonly string[];
 }
 
 /** Options for configuration discovery. */
@@ -175,7 +184,7 @@ function readCatalogAt(path: string): LoadedCatalog {
     });
   }
 
-  return { path, raw, config: parsed.config };
+  return { path, raw, config: parsed.config, warnings: parsed.warnings };
 }
 
 /**
@@ -271,6 +280,11 @@ export function loadHubFromDisk(
   // The catalog's own path travels with it: a relative path written in a catalog
   // (`adapterConfig.workflowPath`) is relative to the catalog, and this is the one
   // place that knows where it was read from.
-  const hub = new Hub({ ...hubOptions, config: loaded.config, catalogPath: loaded.path });
+  const hub = new Hub({
+    ...hubOptions,
+    config: loaded.config,
+    catalogPath: loaded.path,
+    catalogWarnings: loaded.warnings,
+  });
   return { hub, configPath: loaded.path, config: loaded.config };
 }

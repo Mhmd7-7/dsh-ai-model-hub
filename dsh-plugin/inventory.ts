@@ -171,6 +171,21 @@ export interface Inventory {
   readonly capabilities: readonly { readonly capability: string; readonly models: number }[];
   /** Capabilities nothing here serves. */
   readonly unavailable: readonly { readonly capability: string; readonly reason: string }[];
+  /**
+   * Configuration problems found while loading the catalog.
+   *
+   * Includes the entries that were read and deliberately dropped, so a catalog
+   * carrying a superseded entry says so here instead of silently losing a model.
+   */
+  readonly diagnostics?: readonly { readonly severity: string; readonly message: string }[];
+  /**
+   * Why the hub is not loaded at all, when it is not.
+   *
+   * Present only on the degraded inventory the page is served when the catalog
+   * could not be read. Without it the page would have to guess, and without the
+   * page there would be nothing to guess *from*.
+   */
+  readonly error?: string;
 }
 
 /**
@@ -441,6 +456,14 @@ export async function buildInventory(
     resources: scan.resources,
     scan: { sources: scan.sources, warnings: scan.warnings, registered: scan.registered },
     catalogPath: options.catalogPath,
+    ...(hub.catalog.loadDiagnostics.length === 0
+      ? {}
+      : {
+          diagnostics: hub.catalog.loadDiagnostics.map((entry) => ({
+            severity: String(entry.severity),
+            message: entry.message,
+          })),
+        }),
     ...(options.artifactRoot === undefined || options.artifactRoot.length === 0
       ? {}
       : { artifactRoot: options.artifactRoot }),
@@ -651,11 +674,21 @@ export function registerInventoryRoute(
   ctx: Context,
   log: PluginLogger,
   options: {
-    readonly hub: ModelHub;
-    readonly hosts: readonly ModelHost[];
+    /**
+     * The live hub, when there is one.
+     *
+     * Optional so the route can be registered even when the catalog failed to
+     * load. The page then reports that failure instead of the whole route
+     * vanishing, which is the difference between an explained problem and a bare
+     * 404 on the very screen that exists to explain things.
+     */
+    readonly hub?: ModelHub;
+    readonly hosts?: readonly ModelHost[];
     readonly catalogPath: string;
     readonly artifactRoot: string;
     readonly allowProcessLaunch: boolean;
+    /** Why the hub is not loaded, when it is not. Served as the page's error. */
+    readonly catalogError?: string;
     /** Machine probes; overridable so a test can describe a machine it does not own. */
     readonly probes?: InventoryProbes;
     /** A directory of ComfyUI workflow JSON files to scan, when configured. */
@@ -670,10 +703,53 @@ export function registerInventoryRoute(
     }).webServer;
     if (server === undefined) return;
 
+    const respond = (res: ServerResponse, inventory: Inventory): void => {
+      const body = JSON.stringify(inventory, null, 2);
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        'cache-control': 'no-store',
+      });
+      res.end(body);
+    };
+
+    /**
+     * The page as it looks when the hub could not be built.
+     *
+     * Everything the page normally reads from the hub is empty, and the reason is
+     * in `error`, because "the hub is not loaded" is itself the answer a user
+     * opening this screen needs — not a 404 and not a blank list that implies the
+     * machine has no models.
+     *
+     * @returns the degraded inventory.
+     */
+    const degraded = (): Inventory => ({
+      generatedAt: new Date().toISOString(),
+      resources: [],
+      scan: {
+        sources: [],
+        warnings: options.catalogError === undefined ? [] : [options.catalogError],
+        registered: 0,
+      },
+      catalogPath: options.catalogPath,
+      ...(options.artifactRoot.length === 0 ? {} : { artifactRoot: options.artifactRoot }),
+      allowProcessLaunch: options.allowProcessLaunch,
+      machine: { ramGb: 0, vramGb: 0, hasGpu: false, notes: 'not probed — the model hub is not loaded' },
+      engines: [],
+      models: [],
+      capabilities: [],
+      unavailable: [],
+      error: options.catalogError ?? 'the model hub is not loaded',
+    });
+
     const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       if (req.method !== 'GET') {
         res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', allow: 'GET' });
         res.end(JSON.stringify({ error: 'method not allowed' }));
+        return;
+      }
+      if (options.hub === undefined) {
+        respond(res, degraded());
         return;
       }
       try {
@@ -684,7 +760,7 @@ export function registerInventoryRoute(
         // the engines have" are different questions and may diverge.
         const scan = params.get('scan') === '1';
         const inventory = await buildInventory(options.hub, {
-          hosts: options.hosts,
+          hosts: options.hosts ?? [],
           catalogPath: options.catalogPath,
           artifactRoot: options.artifactRoot,
           allowProcessLaunch: options.allowProcessLaunch,
@@ -694,13 +770,7 @@ export function registerInventoryRoute(
           probe: probe || scan,
           log: (message) => log.debug(message),
         });
-        const body = JSON.stringify(inventory, null, 2);
-        res.writeHead(200, {
-          'content-type': 'application/json; charset=utf-8',
-          'content-length': Buffer.byteLength(body),
-          'cache-control': 'no-store',
-        });
-        res.end(body);
+        respond(res, inventory);
       } catch (error) {
         log.warn(`the engine inventory route failed: ${error instanceof Error ? error.message : String(error)}`);
         res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
