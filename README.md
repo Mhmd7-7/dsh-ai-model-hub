@@ -126,7 +126,7 @@ List the available AI model capabilities.
 | What you want | Command |
 |---|---|
 | Another profile | `dsh plugin --profile hubtest add github:Mhmd7-7/dsh-ai-model-hub` |
-| A pinned release | `dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub#v0.3.0` |
+| A pinned release | `dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub#v0.3.1` |
 | A published copy | `dsh plugin --profile web add dsh-ai-model-hub` |
 | A checkout you are editing | `node --no-deprecation scripts/install-plugin.mjs --profile web` |
 

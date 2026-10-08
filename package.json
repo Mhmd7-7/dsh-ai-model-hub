@@ -1,6 +1,6 @@
 {
   "name": "dsh-ai-model-hub",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "DeepSeek Harness plugin and library for local AI models: a capability catalog, router, runtime manager, and real engine adapters. The agent names a capability; the hub selects, starts, and calls a suitable model.",
   "type": "module",

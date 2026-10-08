@@ -65,7 +65,7 @@
 
 .EXAMPLE
     # A different profile, from a pinned tag.
-    .\install.ps1 -Profile hubtest -Ref v0.3.0
+    .\install.ps1 -Profile hubtest -Ref v0.3.1
 
 .EXAMPLE
     # Piped form: parameters are unavailable, so use the environment.
