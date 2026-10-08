@@ -32,8 +32,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ModelHub } from '../src/hub.ts';
 import type { ModelHost } from '../src/index.ts';
-import { scanLocalResources } from './scan.ts';
-import type { LocalResource, ScanSourceReport } from './scan.ts';
+import { scanLocalResources, readyPathFor } from './scan.ts';
+import type { LocalResource, ScanProbes, ScanSourceReport } from './scan.ts';
 import type { PluginLogger } from './types.ts';
 
 /** The route the settings page reads. Absolute, no trailing slash. */
@@ -218,7 +218,13 @@ export interface InventoryProbes {
 export const DEFAULT_PROBES: InventoryProbes = {
   fetchJson: async (url, timeoutMs) => {
     const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      // The status travels with the error, so a caller can tell "the engine said
+      // no" from "the engine is not there" without parsing a message string.
+      const failure = new Error(`HTTP ${response.status}`) as Error & { status?: number };
+      failure.status = response.status;
+      throw failure;
+    }
     return await response.json();
   },
   isDirectory: async (path) => {
@@ -379,7 +385,9 @@ export async function buildInventory(
     hosts: declaredHosts,
     ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
     ...(options.scanTimeoutMs === undefined ? {} : { timeoutMs: options.scanTimeoutMs }),
-    probes,
+    // Only an injected probe set is adapted; otherwise the scan keeps its own
+    // status-aware fetch, which is the one that can tell a 404 from bad JSON.
+    ...(options.probes === undefined ? {} : { probes: scanProbesFrom(options.probes) }),
     ...(options.log === undefined ? {} : { log: options.log }),
   });
 
@@ -405,7 +413,7 @@ export async function buildInventory(
       adapter: host.adapter,
       configured: true,
       ...(endpoint === undefined ? {} : { endpoint }),
-      ...(await describeEndpoint(probes, endpoint, options.probe === true)),
+      ...(await describeEndpoint(probes, host, options.probe === true)),
       startable: lifecycle?.startable === true,
       ...(start === undefined
         ? {}
@@ -436,7 +444,11 @@ export async function buildInventory(
       adapter: known.adapter,
       configured: false,
       endpoint: known.endpoint,
-      ...(await describeEndpoint(probes, known.endpoint, options.probe === true)),
+      ...(await describeEndpoint(
+        probes,
+        { runtime: { engine: known.id, adapter: known.adapter as ModelHost['adapter'], endpoint: known.endpoint } },
+        options.probe === true,
+      )),
       startable: false,
       installSource: install.source,
       ...(install.path === undefined ? { checkedPaths: install.checked } : { installPath: install.path }),
@@ -528,25 +540,70 @@ async function resolveInstall(
 }
 
 /**
- * Probe one endpoint.
+ * Probe one engine's endpoint for readiness, on the route *that engine* answers.
+ *
+ * The bare root is not a health check and never was. Ollama replies to `/` with
+ * the plain text `Ollama is running` and ComfyUI replies with the editor's HTML,
+ * so a probe that fetched the root and parsed it as JSON reported both engines as
+ * stopped while they were serving requests perfectly. Each engine is asked the
+ * route it actually implements, and the response is checked for a status *before*
+ * anything is parsed.
+ *
  * @param probes - the probes.
- * @param endpoint - the endpoint, when the engine has one.
+ * @param host - the declared host, whose engine label selects the readiness route.
  * @param live - whether to probe now; when false the report says it was not probed.
  * @returns the running flag and a human-readable detail.
  */
 async function describeEndpoint(
   probes: InventoryProbes,
-  endpoint: string | undefined,
+  host: Pick<ModelHost, 'runtime'>,
   live: boolean,
 ): Promise<{ running: boolean; statusDetail: string }> {
+  const endpoint = host.runtime.endpoint;
   if (endpoint === undefined) return { running: true, statusDetail: 'no endpoint: runs in process' };
-  if (!live) return { running: false, statusDetail: 'not probed yet — press Check' };
+  if (!live) return { running: false, statusDetail: 'not probed yet — press Scan' };
+  const path = readyPathFor(host.runtime.engine);
+  const base = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
   try {
-    await probes.fetchJson(endpoint, PROBE_TIMEOUT_MS);
-    return { running: true, statusDetail: 'answering' };
+    await probes.fetchJson(`${base}${path}`, PROBE_TIMEOUT_MS);
+    return { running: true, statusDetail: `${path} answered` };
   } catch (error) {
-    return { running: false, statusDetail: error instanceof Error ? error.message : String(error) };
+    const status = (error as { status?: number }).status;
+    if (typeof status === 'number') {
+      return { running: false, statusDetail: `${path} answered HTTP ${status}` };
+    }
+    return { running: false, statusDetail: `${path} unreachable: ${error instanceof Error ? error.message : String(error)}` };
   }
+}
+
+/**
+ * Adapt the inventory's probes to the scan's.
+ *
+ * The scan needs richer outcomes than `fetchJson` gives — a connection refusal,
+ * an HTTP error and a 200 that is not JSON are different problems — but a test
+ * that injects `fetchJson` is describing a machine, not a transport, so its
+ * throws are mapped to the closest meaning rather than ignored. When no probes
+ * were injected at all the scan keeps its own status-aware fetch.
+ *
+ * @param probes - the injected probes.
+ * @returns the scan-side effects.
+ */
+function scanProbesFrom(probes: InventoryProbes): Partial<ScanProbes> {
+  return {
+    request: async (url, timeoutMs) => {
+      try {
+        return { ok: true, status: 200, body: await probes.fetchJson(url, timeoutMs) };
+      } catch (error) {
+        const status = (error as { status?: number }).status;
+        const detail = error instanceof Error ? error.message : String(error);
+        return typeof status === 'number'
+          ? { ok: false, kind: 'http', status, detail: `${url} answered HTTP ${status}` }
+          : { ok: false, kind: 'connection', detail: `${url} could not be reached: ${detail}` };
+      }
+    },
+    isDirectory: probes.isDirectory,
+    listDir: probes.listDir,
+  };
 }
 
 /**

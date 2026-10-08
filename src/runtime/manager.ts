@@ -631,7 +631,60 @@ export class RuntimeManager {
   async startModel(
     modelId: string,
   ): Promise<{ started: boolean; alreadyRunning: boolean; health: HealthReport }> {
-    const model = this.catalog.requireModel(modelId);
+    return this.startResolved(this.catalog.requireModel(modelId));
+  }
+
+  /**
+   * Start an engine the catalog does not carry a model for.
+   *
+   * A host can be startable while nothing on it is registered yet — the settings
+   * page's first scan of a ComfyUI that has no configured workflow is exactly
+   * that case, and it cannot discover any workflow until the engine is up. So the
+   * launch path has to be reachable from the *host* rather than from a model,
+   * without inventing a routable catalog entry for a capability nothing serves.
+   *
+   * The process is tracked under the supplied model's id, so it is owned in
+   * exactly the same way as any other hub-launched engine: `stopModel` stops it,
+   * `activeInvocations` guards it, and dispose shuts it down. `syncCatalog` never
+   * collects a state entry that still holds a process, so the record survives
+   * until the process is gone.
+   *
+   * @param model - a resolved record describing the engine: runtime, lifecycle, resources.
+   * @returns a summary of what happened.
+   */
+  async startEngineRecord(
+    model: ResolvedModel,
+  ): Promise<{ started: boolean; alreadyRunning: boolean; health: HealthReport }> {
+    if (!this.states.has(model.id)) {
+      this.states.set(model.id, {
+        lifecycle: model.lifecycle.startable ? 'not_running' : 'external',
+        availability: 'stopped',
+        health: undefined,
+        process: undefined,
+        startedAt: undefined,
+        lastUsedAt: undefined,
+        activeInvocations: 0,
+        reason: undefined,
+        transition: Promise.resolve(),
+      });
+    }
+    // An engine record describes a *process*, not a servable model, so the
+    // adapter's `supports` contract — "could this model answer this capability" —
+    // does not apply to it.
+    return this.startResolved(model, { engineOnly: true });
+  }
+
+  /**
+   * The shared launch path, once a model record is in hand.
+   *
+   * @param model - the resolved model or engine record to start.
+   * @returns a summary of what happened.
+   */
+  private async startResolved(
+    model: ResolvedModel,
+    options: { readonly engineOnly?: boolean } = {},
+  ): Promise<{ started: boolean; alreadyRunning: boolean; health: HealthReport }> {
+    const modelId = model.id;
     const state = this.requireState(modelId);
 
     return this.serializeTransition(state, async () => {
@@ -641,7 +694,7 @@ export class RuntimeManager {
         });
       }
       const support = this.adapters.require(model.adapter).supports(model);
-      if (!support.ok) {
+      if (!support.ok && options.engineOnly !== true) {
         throw new ModelHubError('UNSUPPORTED_OPERATION', `model "${modelId}" cannot run: ${support.reason}`, {
           modelId,
         });

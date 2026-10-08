@@ -1,38 +1,41 @@
 /**
  * Tests for the Local models scan: Ollama models and ComfyUI workflows.
  *
- * The scan is exercised through injected probes, so no Ollama and no ComfyUI has
- * to be running, and one end-to-end case drives a real (fake) ComfyUI HTTP server
- * so the whole path — discover a saved workflow, publish it, queue it, collect the
- * output — is covered rather than only its parts.
+ * The scan is driven through injected probes, so no Ollama and no ComfyUI has to
+ * be running. The probes are deliberately *transport*-shaped — they answer with a
+ * status, a content type and a body, or with a classified failure — because the
+ * behaviour under test is precisely the difference between "the engine refused",
+ * "the engine answered 404" and "the engine answered 200 with something that is
+ * not JSON". A helper that only threw would be unable to express the bug.
  *
- * The assertions that matter most are the negative ones: a ComfyUI install full of
- * checkpoints, LoRAs and VAEs must contribute *workflows* and nothing else.
+ * The ComfyUI node metadata in the fixtures is copied from what a real ComfyUI
+ * reports through `/object_info`, including the fields that matter
+ * (`output_node`, declared output types, required inputs), so the analysis is
+ * exercised against the same evidence it sees in production.
  *
  * @module dsh-ai-model-hub/tests/scan.test
  */
 
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
-import { describe, it } from 'node:test';
+import { beforeEach, describe, it } from 'node:test';
 
 import { ModelHub, renderMockPng } from '../src/index.ts';
 import type { ModelCatalogConfig, ModelHost } from '../src/index.ts';
-import { buildInventory } from '../dsh-plugin/inventory.ts';
-import { scanLocalResources } from '../dsh-plugin/scan.ts';
-import type { ScanProbes } from '../dsh-plugin/scan.ts';
+import { scanLocalResources, resetScanCache, workflowUrls } from '../dsh-plugin/scan.ts';
+import type { HttpProbeResult, ScanProbes } from '../dsh-plugin/scan.ts';
 
-/** The fake ComfyUI install: it has weights, and it has node classes. */
+/**
+ * Node metadata as `/object_info` really reports it.
+ *
+ * `output_node` and the declared output types are the two facts the analysis
+ * leans on, and both are reproduced here exactly as ComfyUI emits them.
+ */
 const objectInfo = {
-  CheckpointLoaderSimple: { input: { required: { ckpt_name: [['A.safetensors', 'B.safetensors'], {}] } } },
+  CheckpointLoaderSimple: { input: { required: { ckpt_name: [['A.safetensors'], {}] } } },
   LoraLoader: { input: { required: { lora_name: [['C.safetensors'], {}] } } },
   VAELoader: { input: { required: { vae_name: [['D.safetensors'], {}] } } },
-  ControlNetLoader: { input: { required: { control_net_name: [['E.safetensors'], {}] } } },
-  CLIPLoader: { input: { required: { clip_name: [['F.safetensors'], {}] } } },
-  CLIPTextEncode: {
-    input: { required: { clip: ['CLIP', {}], text: ['STRING', {}] } },
-    output: ['CONDITIONING'],
-  },
+  CLIPTextEncode: { input: { required: { clip: ['CLIP', {}], text: ['STRING', {}] } }, output: ['CONDITIONING'] },
   EmptyLatentImage: {
     input: { required: { width: ['INT', {}], height: ['INT', {}], batch_size: ['INT', {}] } },
     output: ['LATENT'],
@@ -52,70 +55,115 @@ const objectInfo = {
     output: ['LATENT'],
   },
   VAEDecode: { input: { required: { samples: ['LATENT', {}], vae: ['VAE', {}] } }, output: ['IMAGE'] },
-  SaveImage: { input: { required: { images: ['IMAGE', {}], filename_prefix: ['STRING', {}] } }, output: [] },
+  SaveImage: {
+    input: { required: { images: ['IMAGE', {}], filename_prefix: ['STRING', {}] } },
+    output: ['IMAGE'],
+    output_node: true,
+  },
+  PreviewImage: { input: { required: { images: ['IMAGE', {}] } }, output: [], output_node: true },
   LoadImage: { input: { required: { image: [['input.png'], {}] } }, output: ['IMAGE', 'MASK'] },
+  // ── the 3D families, as a real install reports them ──────────────────────
+  VoxelToMesh: { input: { required: { voxel: ['VOXEL', {}] } }, output: ['MESH'] },
+  MeshToFile3D: { input: { required: { mesh: ['MESH', {}] } }, output: ['FILE_3D_GLB'], output_node: false },
+  Save3DAdvanced: {
+    input: {
+      required: {
+        model_3d: ['MESH', {}],
+        filename_prefix: ['STRING', {}],
+        viewport_state: ['LOAD3D_VIEWPORT_STATE', {}],
+        width: ['INT', {}],
+        height: ['INT', {}],
+      },
+    },
+    output: ['FILE_3D', 'LOAD3D_MODEL_INFO', 'LOAD3D_CAMERA', 'INT', 'INT'],
+    output_node: true,
+  },
+  Preview3DAdvanced: {
+    input: {
+      required: {
+        model_3d: ['MESH', {}],
+        viewport_state: ['LOAD3D_VIEWPORT_STATE', {}],
+        width: ['INT', {}],
+        height: ['INT', {}],
+      },
+    },
+    output: ['FILE_3D', 'LOAD3D_MODEL_INFO', 'LOAD3D_CAMERA', 'INT', 'INT'],
+    output_node: true,
+  },
+  // ── author controls ─────────────────────────────────────────────────────
+  PrimitiveBoolean: { input: { required: { value: ['BOOLEAN', {}] } }, output: ['BOOLEAN'] },
+  PrimitiveInt: { input: { required: { value: ['INT', {}] } }, output: ['INT'] },
+  Note: { input: {}, output: [] },
 };
 
-/** A complete text-to-image workflow, in API format. */
+/** A complete text-to-image workflow in API format. */
 const textToImage = {
   '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'A.safetensors' } },
-  '2': { class_type: 'LoraLoader', inputs: { model: ['1', 0], clip: ['1', 1], lora_name: 'C.safetensors' } },
-  '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 1], text: 'a red fox' } },
-  '4': { class_type: 'CLIPTextEncode', inputs: { clip: ['2', 1], text: '' } },
-  '5': { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
-  '6': {
+  '2': { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: 'a red fox' } },
+  '3': { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: '' } },
+  '4': { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
+  '5': {
     class_type: 'KSampler',
     inputs: {
-      model: ['2', 0],
-      positive: ['3', 0],
-      negative: ['4', 0],
-      latent_image: ['5', 0],
+      model: ['1', 0],
+      positive: ['2', 0],
+      negative: ['3', 0],
+      latent_image: ['4', 0],
       seed: 1,
       steps: 20,
       cfg: 7,
     },
   },
-  '7': { class_type: 'VAEDecode', inputs: { samples: ['6', 0], vae: ['1', 2] } },
-  '8': { class_type: 'SaveImage', inputs: { images: ['7', 0], filename_prefix: 'x' } },
+  '6': { class_type: 'VAEDecode', inputs: { samples: ['5', 0], vae: ['1', 2] } },
+  '7': { class_type: 'SaveImage', inputs: { images: ['6', 0], filename_prefix: 'x' } },
 };
 
-/** A graph whose only terminal node previews, so it delivers nothing. */
-const previewOnly = {
-  '1': { class_type: 'CLIPTextEncode', inputs: { text: 'a red fox' } },
-  '2': { class_type: 'PreviewImage', inputs: { images: ['1', 0] } },
+/**
+ * A 3D workflow shaped like the Trellis2/Pixal3D family.
+ *
+ * Not a copy of any one template — a graph using the same *node contracts* that
+ * family uses, so the analysis is tested against the shape rather than against a
+ * filename: an image loader, a mesh-producing chain, a `MeshToFile3D` converter
+ * that is not flagged as an output node, a flagged `Save3DAdvanced` deliverable,
+ * a flagged preview that must not be mistaken for one, and two titled controls.
+ */
+const imageToThreeD = {
+  '10': { class_type: 'LoadImage', inputs: { image: 'subject.png' } },
+  '11': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'A.safetensors' } },
+  '12': { class_type: 'VAELoader', inputs: { vae_name: 'D.safetensors' } },
+  '13': { class_type: 'EmptyLatentImage', inputs: { width: 1024, height: 1024, batch_size: 1 } },
+  '14': {
+    class_type: 'KSampler',
+    inputs: { model: ['11', 0], positive: ['10', 0], negative: ['10', 0], latent_image: ['13', 0], seed: 3, steps: 12, cfg: 1 },
+  },
+  '15': { class_type: 'VAEDecode', inputs: { samples: ['14', 0], vae: ['12', 0] } },
+  '16': { class_type: 'VoxelToMesh', inputs: { voxel: ['15', 0] } },
+  '17': { class_type: 'MeshToFile3D', inputs: { mesh: ['16', 0] } },
+  '18': {
+    class_type: 'Save3DAdvanced',
+    inputs: { model_3d: ['16', 0], filename_prefix: 'trellis/capture', viewport_state: '{"cam":1}', width: 1024, height: 1024 },
+  },
+  '19': {
+    class_type: 'Preview3DAdvanced',
+    inputs: { model_3d: ['16', 0], viewport_state: '{}', width: 512, height: 512 },
+  },
+  '20': { class_type: 'PrimitiveBoolean', inputs: { value: false } },
+  '21': { class_type: 'PrimitiveInt', inputs: { value: 4096 } },
 };
 
-/** A complete workflow saved in the editor's UI format. */
-const editorWorkflow = {
+/** A UI-format export of the same graph, with titles on the two controls. */
+const editorThreeD = {
   nodes: [
-    { id: 1, type: 'CLIPTextEncode', inputs: [], widgets_values: { text: 'a red fox' } },
-    { id: 2, type: 'EmptyLatentImage', inputs: [], widgets_values: { width: 512, height: 512, batch_size: 1 } },
-    {
-      id: 3,
-      type: 'KSampler',
-      inputs: [
-        { name: 'positive', link: 10 },
-        { name: 'negative', link: 11 },
-        { name: 'latent_image', link: 12 },
-      ],
-      widgets_values: { seed: 5, steps: 20, cfg: 7 },
-    },
-    { id: 4, type: 'VAEDecode', inputs: [{ name: 'samples', link: 13 }], widgets_values: {} },
-    { id: 5, type: 'SaveImage', inputs: [{ name: 'images', link: 14 }], widgets_values: { filename_prefix: 'x' } },
+    { id: 10, type: 'LoadImage', inputs: [], widgets_values: { image: 'subject.png' } },
+    { id: 16, type: 'VoxelToMesh', inputs: [{ name: 'voxel', link: 1 }], widgets_values: {} },
+    { id: 18, type: 'Save3DAdvanced', inputs: [{ name: 'model_3d', link: 2 }], widgets_values: { filename_prefix: 'x', viewport_state: '{}', width: 1024, height: 1024 } },
+    { id: 20, type: 'PrimitiveBoolean', title: 'Switch to Trellis2', inputs: [], widgets_values: { value: false } },
+    { id: 21, type: 'PrimitiveInt', title: 'Texture Resolution', inputs: [], widgets_values: { value: 4096 } },
   ],
   links: [
-    [10, 1, 0, 3, 0, 'CONDITIONING'],
-    [11, 1, 0, 3, 1, 'CONDITIONING'],
-    [12, 2, 0, 3, 2, 'LATENT'],
-    [13, 3, 0, 4, 0, 'LATENT'],
-    [14, 4, 0, 5, 0, 'IMAGE'],
+    [1, 10, 0, 16, 0, 'VOXEL'],
+    [2, 16, 0, 18, 0, 'MESH'],
   ],
-};
-
-/** An editor export naming a node class this install does not have. */
-const uninterpretableEditorWorkflow = {
-  nodes: [{ id: 1, type: 'TotallyUnknownNode', inputs: [], widgets_values: {} }],
-  links: [],
 };
 
 /** One Ollama instance's answer to `/api/tags`. */
@@ -139,12 +187,7 @@ function catalog(endpoint: string): ModelCatalogConfig {
         id: 'ollama',
         name: 'Ollama',
         adapter: 'openai_compatible',
-        runtime: {
-          engine: 'ollama',
-          adapter: 'openai_compatible',
-          endpoint: 'http://127.0.0.1:11434',
-          path: '/v1/chat/completions',
-        },
+        runtime: { engine: 'ollama', adapter: 'openai_compatible', endpoint: 'http://127.0.0.1:11434', path: '/v1/chat/completions' },
       },
       {
         id: 'comfyui',
@@ -167,71 +210,113 @@ function hostsOf(endpoint = 'http://127.0.0.1:8188'): readonly ModelHost[] {
 }
 
 /**
- * A hub over the fixture catalog, with no timers, no background discovery, and no
- * machine probing — the scan under test is the only thing that touches a machine.
+ * A hub over the fixture catalog, with no timers, no discovery, no probing.
  * @param endpoint - the ComfyUI endpoint.
  * @returns the hub.
  */
 function hubFor(endpoint = 'http://127.0.0.1:8188'): ModelHub {
-  return ModelHub.fromConfig(catalog(endpoint), {
-    manageTimers: false,
-    probeResources: false,
-    log: () => {},
-  });
+  return ModelHub.fromConfig(catalog(endpoint), { manageTimers: false, probeResources: false, log: () => {} });
 }
 
-/**
- * A machine description: what each source answers, before it becomes probes.
- *
- * `undefined` for a source means "refused the connection", which is how a test
- * says an engine is down without a second code path.
- */
-interface ProbeSpec {
-  readonly ollama?: unknown;
-  readonly objectInfo?: unknown;
+/** How a fake machine answers. */
+interface Spec {
+  /** Raw body for `/api/tags`, `'offline'` to refuse, or a function re-read per call. */
+  readonly ollama?: unknown | 'offline';
+  /**
+   * Raw body for `/system_stats`, `'offline'` to refuse, or a function.
+   *
+   * A function is what makes "the engine was down and then this scan started it"
+   * expressible: the same probe answers differently once the fake hub has run.
+   */
+  readonly systemStats?: unknown | 'offline' | (() => unknown | 'offline');
+  /** Raw body for `/object_info`, or `'offline'`. */
+  readonly objectInfo?: unknown | 'offline';
+  /** Saved workflows, keyed by their path relative to the workflows directory. */
   readonly workflows?: Record<string, unknown>;
+  /** HTTP status for the *listing* route, when it should fail. */
+  readonly listingStatus?: number;
+  /** HTTP status for an individual workflow *fetch*, when it should fail. */
+  readonly workflowStatus?: number;
+  /** Files on disk, keyed by absolute path. */
   readonly files?: Record<string, string>;
+  /** Accept only the documented encoded single-segment workflow URL. */
+  readonly strictWorkflowUrl?: boolean;
+  /** Record every URL requested. */
+  readonly seen?: string[];
 }
 
 /**
- * Build the probes for a machine description.
- * @param spec - what each source answers.
+ * Build probes for a described machine.
+ *
+ * The router is deliberately keyed by the *route*, not by the whole URL, because
+ * several of the behaviours under test are about which URL the scan chose — the
+ * encoded workflow path in particular.
+ *
+ * @param spec - what each route answers.
  * @returns the probes.
  */
-function probesFor(spec: ProbeSpec): ScanProbes {
+function probesFor(spec: Spec): ScanProbes {
   const files = spec.files ?? {};
   const norm = (path: string): string => path.replace(/\\/g, '/');
   const parentOf = (path: string): string => path.slice(0, path.lastIndexOf('/'));
   const baseOf = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
-
   const dirs = new Set<string>();
   for (const file of Object.keys(files)) {
     const parts = norm(file).split('/');
     for (let index = 2; index < parts.length; index += 1) dirs.add(parts.slice(0, index).join('/'));
   }
 
+  const offline = (url: string): HttpProbeResult => ({
+    ok: false,
+    kind: 'connection',
+    detail: `${url} could not be reached: connect ECONNREFUSED`,
+  });
+
   return {
-    fetchJson: async (url) => {
+    request: async (url) => {
+      spec.seen?.push(url);
       if (url.includes('/api/tags')) {
-        if (spec.ollama === undefined) throw new Error('connect ECONNREFUSED');
-        return spec.ollama;
+        return spec.ollama === undefined || spec.ollama === 'offline'
+          ? offline(url)
+          : { ok: true, status: 200, body: spec.ollama, contentType: 'application/json' };
+      }
+      if (url.endsWith('/system_stats')) {
+        const answer = typeof spec.systemStats === 'function' ? spec.systemStats() : spec.systemStats;
+        return answer === undefined || answer === 'offline'
+          ? offline(url)
+          : { ok: true, status: 200, body: answer, contentType: 'application/json' };
       }
       if (url.endsWith('/object_info')) {
-        if (spec.objectInfo === undefined) throw new Error('connect ECONNREFUSED');
-        return spec.objectInfo;
+        return spec.objectInfo === undefined || spec.objectInfo === 'offline'
+          ? offline(url)
+          : { ok: true, status: 200, body: spec.objectInfo, contentType: 'application/json' };
       }
       if (url.includes('/userdata?')) {
-        if (spec.workflows === undefined) throw new Error('connect ECONNREFUSED');
-        return Object.keys(spec.workflows);
+        if (spec.workflows === undefined) return offline(url);
+        if (spec.listingStatus !== undefined) {
+          return { ok: false, kind: 'http', status: spec.listingStatus, detail: `${url} answered HTTP ${spec.listingStatus}` };
+        }
+        return { ok: true, status: 200, body: Object.keys(spec.workflows), contentType: 'application/json' };
       }
       const match = /\/userdata\/(.+)$/.exec(url);
-      if (match !== null) {
-        if (spec.workflows === undefined) throw new Error('connect ECONNREFUSED');
-        const name = decodeURIComponent(match[1] as string);
-        if (!Object.hasOwn(spec.workflows, name)) throw new Error('HTTP 404');
-        return spec.workflows[name];
+      if (match !== null && spec.workflows !== undefined) {
+        const encoded = match[1] as string;
+        const decoded = decodeURIComponent(encoded);
+        const relative = decoded.replace(/^workflows\//, '');
+        // A build that only serves the documented shape: the directory inside a
+        // single encoded segment. Anything else 404s, which is exactly the bug.
+        if (spec.strictWorkflowUrl === true && encoded !== encodeURIComponent(`workflows/${relative}`)) {
+          return { ok: false, kind: 'http', status: 404, detail: `${url} answered HTTP 404` };
+        }
+        if (spec.workflowStatus !== undefined) {
+          return { ok: false, kind: 'http', status: spec.workflowStatus, detail: `${url} answered HTTP ${spec.workflowStatus}` };
+        }
+        if (!Object.hasOwn(spec.workflows, relative)) {
+          return { ok: false, kind: 'http', status: 404, detail: `${url} answered HTTP 404` };
+        }
+        return { ok: true, status: 200, body: spec.workflows[relative], contentType: 'application/json' };
       }
-      throw new Error('connect ECONNREFUSED');
+      return offline(url);
     },
     isDirectory: async (path) => dirs.has(norm(path)),
     listDir: async (path) => {
@@ -255,255 +340,440 @@ function probesFor(spec: ProbeSpec): ScanProbes {
   };
 }
 
+/**
+ * A hub stand-in that records engine lifecycle calls without spawning anything.
+ *
+ * `state.running` is what the injected probes read, so "the engine comes up when
+ * this scan starts it" is modelled by the fake hub flipping the same flag the
+ * readiness probe consults.
+ */
+function lifecycleHub(options: {
+  readonly running?: boolean;
+  readonly startable?: boolean;
+  readonly startResult?: { started: boolean; alreadyRunning: boolean };
+  readonly busy?: number;
+}): { hub: ModelHub; calls: string[]; state: { running: boolean } } {
+  const calls: string[] = [];
+  const state = { running: options.running ?? false };
+  const hub = {
+    catalog: { listModels: () => [] },
+    activeInvocationsFor: () => options.busy ?? 0,
+    publishScannedModels: (descriptors: readonly unknown[]) => {
+      calls.push(`publish:${descriptors.length}`);
+      return descriptors.length;
+    },
+    startEngineForHost: async () => {
+      calls.push('start');
+      if (options.startable === false) throw new Error('UNSAFE_OPERATION: process launch is disabled');
+      const started = options.startResult ?? { started: true, alreadyRunning: false };
+      state.running = true;
+      return { modelId: 'engine-comfyui', ...started, health: { healthy: true } };
+    },
+    stopEngine: async () => {
+      calls.push('stop');
+      state.running = false;
+      return { stopped: true, wasRunning: true };
+    },
+  } as unknown as ModelHub;
+  return { hub, calls, state };
+}
+
 describe('Local models scan', () => {
-  it('lists installed Ollama models and complete ComfyUI workflows, and no weight files', async () => {
-    const hub = hubFor();
-    try {
-      const result = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        probes: probesFor({
-          ollama: ollamaTags,
-          objectInfo,
-          workflows: { 'saved/t2i.json': textToImage },
-        }),
-      });
-
-      assert.deepEqual(
-        result.resources.map((resource) => resource.kind),
-        ['ollama_model', 'ollama_model', 'comfyui_workflow'],
-      );
-
-      const models = result.resources.filter((resource) => resource.kind === 'ollama_model');
-      assert.deepEqual(models.map((resource) => resource.typeLabel), ['Ollama Model', 'Ollama Model']);
-      assert.deepEqual(models.map((resource) => resource.name), ['llama3:8b', 'qwen2.5:3b']);
-      assert.match(models[0]?.detail ?? '', /8B/);
-      assert.equal(models[0]?.status, 'ready');
-
-      const workflows = result.resources.filter((resource) => resource.kind === 'comfyui_workflow');
-      assert.equal(workflows.length, 1);
-      assert.equal(workflows[0]?.typeLabel, 'ComfyUI Workflow');
-      assert.equal(workflows[0]?.name, 't2i');
-      assert.equal(workflows[0]?.status, 'ready');
-      assert.equal(workflows[0]?.runnable, true);
-
-      // The boundary this whole feature exists for: the install's weights are
-      // nowhere in the scan output, and neither is any node class.
-      const serialized = JSON.stringify(result.resources);
-      for (const weight of ['safetensors']) {
-        assert.doesNotMatch(serialized, new RegExp(weight), `${weight} must not be listed`);
-      }
-      for (const nodeClass of [
-        'CheckpointLoaderSimple',
-        'LoraLoader',
-        'VAELoader',
-        'CLIPTextEncode',
-        'KSampler',
-        'SaveImage',
-      ]) {
-        assert.doesNotMatch(serialized, new RegExp(nodeClass), `${nodeClass} must not be listed`);
-      }
-    } finally {
-      await hub.dispose();
-    }
+  // The discovery cache is what makes a temporary failure non-destructive, so it
+  // is deliberately process-wide. That also means one test's successful scan
+  // would otherwise be visible to the next, so it is cleared between them.
+  beforeEach(() => {
+    resetScanCache();
   });
 
-  it('exposes only the public parameters a workflow needs', async () => {
-    const hub = hubFor();
-    try {
-      const result = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        probes: probesFor({ ollama: { models: [] }, objectInfo, workflows: { 'saved/t2i.json': textToImage } }),
-      });
-      const workflow = result.resources[0];
-      assert.deepEqual(workflow?.inputs, ['prompt', 'negative_prompt', 'seed', 'steps', 'cfg', 'width', 'height']);
-      assert.deepEqual(workflow?.outputs, ['image']);
-      assert.deepEqual(workflow?.capabilities, ['text_to_image']);
-      assert.equal(workflow?.format, 'api');
-      assert.equal(workflow?.modelId, workflow?.id);
-    } finally {
-      await hub.dispose();
-    }
+  it('treats both engines as running, using the route each one actually answers', async () => {
+    // The regression: Ollama answers `/` with the text "Ollama is running" and
+    // ComfyUI answers `/` with the editor's HTML, so a probe that fetched the root
+    // and parsed JSON reported both as stopped while they were serving fine.
+    const seen: string[] = [];
+    const { hub } = lifecycleHub({ running: true });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      probes: probesFor({
+        ollama: ollamaTags,
+        systemStats: { system: { comfyui_version: '1' } },
+        objectInfo,
+        workflows: {},
+        seen,
+      }),
+    });
+
+    assert.ok(seen.includes('http://127.0.0.1:11434/api/tags'), 'Ollama is asked /api/tags');
+    assert.ok(seen.includes('http://127.0.0.1:8188/system_stats'), 'ComfyUI is asked /system_stats');
+    assert.ok(!seen.includes('http://127.0.0.1:8188'), 'the bare ComfyUI root is never used as a health check');
+    assert.ok(!seen.some((url) => /:11434\/?$/.test(url)), 'the bare Ollama root is never used as a health check');
+
+    assert.equal(result.resources.filter((entry) => entry.kind === 'ollama_model').length, 2);
+    assert.ok(result.sources.every((source) => source.ok), 'both engines answered');
   });
 
-  it('reports an editor-format workflow as needing conversion instead of dropping it', async () => {
-    const hub = hubFor();
-    try {
-      const result = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        probes: probesFor({
-          ollama: { models: [] },
-          objectInfo,
-          workflows: {
-            'saved/editor.json': editorWorkflow,
-            'saved/unknown-node.json': uninterpretableEditorWorkflow,
-          },
-        }),
-      });
-
-      assert.equal(result.resources.length, 2, 'both editor exports are listed');
-      const converted = result.resources.find((resource) => resource.name === 'editor');
-      assert.equal(converted?.status, 'needs_conversion', 'editor format is not reported as ready');
-      assert.equal(converted?.runnable, true, 'a convertible workflow is still executable');
-      assert.equal(converted?.format, 'ui');
-      assert.match(converted?.detail ?? '', /editor \(UI\) format/);
-      assert.deepEqual(converted?.capabilities, ['text_to_image']);
-
-      const unconvertible = result.resources.find((resource) => resource.name === 'unknown-node');
-      assert.equal(unconvertible?.status, 'needs_conversion');
-      assert.equal(unconvertible?.runnable, false);
-      assert.match(unconvertible?.detail ?? '', /could not be converted/);
-    } finally {
-      await hub.dispose();
-    }
+  it('reports a non-JSON 200 as a content problem, not as an unreachable engine', async () => {
+    const probes: ScanProbes = {
+      ...probesFor({ workflows: {}, objectInfo }),
+      request: async (url) =>
+        url.endsWith('/system_stats')
+          ? { ok: false, kind: 'not-json', status: 200, detail: `${url} answered 200 with text/html, which is not JSON` }
+          : url.includes('/api/tags')
+            ? { ok: true, status: 200, body: ollamaTags }
+            : { ok: false, kind: 'connection', detail: `${url} refused` },
+    };
+    const { hub } = lifecycleHub({});
+    const result = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes });
+    const comfy = result.sources.find((source) => source.id === 'comfyui');
+    assert.equal(comfy?.ok, false);
+    assert.match(comfy?.detail ?? '', /not JSON/);
+    assert.match(result.warnings.join(' '), /not JSON|did not answer/);
+    assert.equal(result.resources.filter((entry) => entry.kind === 'ollama_model').length, 2, 'Ollama still resolves');
   });
 
-  it('reports a workflow that produces nothing as invalid, with the reason', async () => {
-    const hub = hubFor();
-    try {
-      const result = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        probes: probesFor({ ollama: { models: [] }, objectInfo, workflows: { 'saved/preview.json': previewOnly } }),
-      });
-      assert.equal(result.resources.length, 1, 'the workflow is listed, not silently dropped');
-      assert.equal(result.resources[0]?.status, 'invalid');
-      assert.equal(result.resources[0]?.runnable, false);
-      assert.match(result.resources[0]?.detail ?? '', /saving node|preview/);
-    } finally {
-      await hub.dispose();
-    }
+  it('retrieves a workflow from a nested path using the URL the API actually serves', async () => {
+    const seen: string[] = [];
+    const { hub } = lifecycleHub({ running: true });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      probes: probesFor({
+        ollama: { models: [] },
+        systemStats: {},
+        objectInfo,
+        // A nested name with a space, so both the directory and the encoding matter.
+        workflows: { '3d/image to model_trellis2.json': textToImage },
+        strictWorkflowUrl: true,
+        seen,
+      }),
+    });
+
+    const workflow = result.resources.find((entry) => entry.kind === 'comfyui_workflow');
+    assert.ok(workflow, 'the nested workflow was retrieved');
+    assert.equal(workflow.status, 'ready');
+    assert.equal(workflow.name, 'image to model_trellis2');
+    // The documented shape: the workflows directory inside ONE encoded segment.
+    assert.ok(
+      seen.includes('http://127.0.0.1:8188/userdata/workflows%2F3d%2Fimage%20to%20model_trellis2.json'),
+      `expected the encoded single-segment URL, saw: ${seen.filter((u) => u.includes('/userdata/')).join(', ')}`,
+    );
   });
 
-  it('scans a configured workflow directory, preferring the metadata name', async () => {
-    const hub = hubFor();
-    const named = { ...textToImage, name: 'Cinematic Text To Image' };
-    try {
-      const result = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        workflowDir: '/workflows/comfy',
-        probes: probesFor({
-          ollama: { models: [] },
-          objectInfo,
-          workflows: {},
-          files: {
-            '/workflows/comfy/flux-t2i.json': JSON.stringify(named),
-            '/workflows/comfy/nested/broken.json': '{ not json',
-            '/workflows/comfy/notes.txt': 'ignored',
-          },
-        }),
-      });
+  it('reports an unreadable workflow as unreadable, with the status, instead of invalid JSON', async () => {
+    const { hub } = lifecycleHub({ running: true });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      probes: probesFor({
+        ollama: { models: [] },
+        systemStats: {},
+        objectInfo,
+        workflows: { '3d_image_to_model_trellis2_pixal3d.json': textToImage },
+        workflowStatus: 404,
+      }),
+    });
 
-      assert.deepEqual(
-        result.resources.map((resource) => resource.name).sort(),
-        ['Cinematic Text To Image', 'broken'],
-      );
-      const namedResource = result.resources.find((resource) => resource.name === 'Cinematic Text To Image');
-      assert.equal(namedResource?.status, 'ready');
-      assert.match(namedResource?.source ?? '', /flux-t2i\.json$/);
-      const broken = result.resources.find((resource) => resource.name === 'broken');
-      assert.equal(broken?.status, 'invalid');
-      assert.ok(result.sources.some((source) => source.id === 'workflow-dir' && source.ok));
-    } finally {
-      await hub.dispose();
+    const workflow = result.resources.find((entry) => entry.kind === 'comfyui_workflow');
+    assert.ok(workflow, 'the workflow is still listed');
+    assert.equal(workflow.status, 'unreadable', 'a fetch failure is not an invalid workflow');
+    assert.equal(workflow.runnable, false);
+    assert.match(workflow.detail, /would not return its contents/);
+    assert.match(workflow.detail, /HTTP 404/, 'the actual status is reported');
+    assert.doesNotMatch(workflow.detail, /invalid JSON/i, 'the document was never seen, so it is not called invalid');
+  });
+
+  it('exposes the image input, the titled controls and the one real deliverable of a 3D workflow', async () => {
+    const { hub } = lifecycleHub({ running: true });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      probes: probesFor({
+        ollama: { models: [] },
+        systemStats: {},
+        objectInfo,
+        workflows: { 'image_to_model.json': imageToThreeD },
+      }),
+    });
+
+    const workflow = result.resources.find((entry) => entry.kind === 'comfyui_workflow');
+    assert.ok(workflow);
+    assert.equal(workflow.status, 'ready');
+    assert.deepEqual(workflow.capabilities, ['image_to_3d'], 'an image-driven graph is image_to_3d');
+
+    const inputNames = (workflow.inputs ?? []).map((input) => input.name);
+    assert.ok(inputNames.includes('image'), `image input missing from ${inputNames.join(', ')}`);
+    assert.deepEqual(workflow.outputs?.map((output) => output.type), ['model_3d']);
+
+    // The deliverable is the flagged Save3DAdvanced, not the unflagged
+    // MeshToFile3D converter and not the flagged Preview3DAdvanced — a preview
+    // writes to ComfyUI's temp directory.
+    assert.equal(workflow.outputs?.[0]?.nodeClass, 'Save3DAdvanced');
+
+    assert.ok(
+      !(workflow.diagnostics ?? []).some((note) => note.includes('MeshToFile3D')),
+      'the unflagged converter is not a diagnostic',
+    );
+  });
+
+  it('names author-titled controls and withholds untitled ones with an actionable note', async () => {
+    const titled = { ...imageToThreeD, '20': { class_type: 'PrimitiveBoolean', inputs: { value: false } } };
+    const { hub } = lifecycleHub({ running: true });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      probes: probesFor({
+        ollama: { models: [] },
+        systemStats: {},
+        objectInfo,
+        // The UI export carries the titles; the API graph alone cannot.
+        workflows: { 'demo.json': editorThreeD },
+      }),
+    });
+    void titled;
+
+    const workflow = result.resources.find((entry) => entry.kind === 'comfyui_workflow');
+    assert.ok(workflow);
+    const byName = new Map((workflow.inputs ?? []).map((input) => [input.name, input]));
+    assert.ok(byName.has('switch_to_trellis2'), `expected the titled boolean control: ${[...byName.keys()].join(', ')}`);
+    assert.ok(byName.has('texture_resolution'), 'expected the titled integer control');
+    assert.equal(byName.get('switch_to_trellis2')?.kind, 'boolean');
+    assert.equal(byName.get('texture_resolution')?.kind, 'number');
+    assert.equal(byName.get('switch_to_trellis2')?.label, 'Switch to Trellis2');
+  });
+
+  it('does not let an unreachable Ollama hide the workflows', async () => {
+    const { hub } = lifecycleHub({ running: true });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      probes: probesFor({ ollama: 'offline', systemStats: {}, objectInfo, workflows: { 'a.json': textToImage } }),
+    });
+    assert.equal(result.resources.filter((entry) => entry.kind === 'ollama_model').length, 0);
+    assert.equal(result.resources.filter((entry) => entry.kind === 'comfyui_workflow').length, 1);
+    assert.ok(result.sources.some((source) => source.kind === 'ollama_model' && !source.ok));
+  });
+
+  it('does not let an unreachable ComfyUI hide the models, and still reads a directory', async () => {
+    const { hub } = lifecycleHub({ running: false });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      workflowDir: '/workflows/comfy',
+      probes: probesFor({
+        ollama: ollamaTags,
+        systemStats: 'offline',
+        objectInfo: 'offline',
+        files: { '/workflows/comfy/local.json': JSON.stringify(textToImage) },
+      }),
+    });
+    assert.equal(result.resources.filter((entry) => entry.kind === 'ollama_model').length, 2);
+    const local = result.resources.filter((entry) => entry.kind === 'comfyui_workflow');
+    assert.equal(local.length, 1, 'a directory workflow is found while ComfyUI is down');
+    assert.equal(local[0]?.status, 'ready', 'an API workflow needs no engine to be understood');
+    assert.equal(local[0]?.engineRunning, false);
+  });
+
+  it('starts a stopped engine for the scan and stops only the instance it started', async () => {
+    const { hub, calls, state } = lifecycleHub({ running: false, startResult: { started: true, alreadyRunning: false } });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      probes: probesFor({
+        ollama: { models: [] },
+        systemStats: () => (state.running ? {} : 'offline'),
+        objectInfo,
+        workflows: { 'a.json': textToImage },
+        seen: [],
+      }),
+    });
+
+    assert.ok(calls.includes('start'), 'the engine was started through the hub');
+    assert.ok(calls.includes('stop'), 'the instance this scan started was shut down again');
+    assert.equal(result.registered >= 1, true, 'the workflow found while the engine was up was registered');
+  });
+
+  it('leaves an already-running engine alone', async () => {
+    const { hub, calls, state } = lifecycleHub({ running: true, startResult: { started: false, alreadyRunning: true } });
+    await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      probes: probesFor({
+        ollama: { models: [] },
+        systemStats: () => (state.running ? {} : 'offline'),
+        objectInfo,
+        workflows: { 'a.json': textToImage },
+      }),
+    });
+    assert.deepEqual(calls.filter((call) => call === 'stop'), [], 'a pre-existing engine is never stopped');
+  });
+
+  it('defers shutdown while a graph is queued or running', async () => {
+    const { hub, calls, state } = lifecycleHub({ running: false, busy: 1 });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      probes: probesFor({
+        ollama: { models: [] },
+        systemStats: () => (state.running ? {} : 'offline'),
+        objectInfo,
+        workflows: { 'a.json': textToImage },
+      }),
+    });
+    assert.ok(calls.includes('start'));
+    assert.deepEqual(calls.filter((call) => call === 'stop'), [], 'a busy engine is not interrupted');
+    assert.match(result.warnings.join(' '), /queued or running/);
+  });
+
+  it('refuses to start anything when the deployment forbids process launch, and says so', async () => {
+    const { hub, calls, state } = lifecycleHub({ running: false, startable: false });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      probes: probesFor({
+        ollama: { models: [] },
+        systemStats: () => (state.running ? {} : 'offline'),
+        objectInfo,
+        workflows: {},
+      }),
+    });
+    assert.deepEqual(calls.filter((call) => call === 'stop'), []);
+    assert.match(result.warnings.join(' '), /process launch is disabled/);
+  });
+
+  it('shares one pass between concurrent scans so no second engine is started', async () => {
+    let starts = 0;
+    const state = { running: false };
+    const base = probesFor({
+      ollama: { models: [] },
+      systemStats: () => (state.running ? {} : 'offline'),
+      objectInfo,
+      workflows: { 'a.json': textToImage },
+    });
+    const probes: ScanProbes = {
+      ...base,
+      request: async (url, timeoutMs) => {
+        // Hold the graph request open long enough for the second scan to join.
+        if (url.endsWith('/object_info')) await new Promise((resolve) => setTimeout(resolve, 40));
+        return base.request(url, timeoutMs);
+      },
+    };
+    const hub = {
+      catalog: { listModels: () => [] },
+      activeInvocationsFor: () => 0,
+      publishScannedModels: () => 1,
+      startEngineForHost: async () => {
+        starts += 1;
+        state.running = true;
+        return { modelId: 'engine-comfyui', started: true, alreadyRunning: false, health: { healthy: true } };
+      },
+      stopEngine: async () => ({ stopped: true, wasRunning: true }),
+    } as unknown as ModelHub;
+
+    const [first, second] = await Promise.all([
+      scanLocalResources(hub, { hosts: hostsOf(), probes }),
+      scanLocalResources(hub, { hosts: hostsOf(), probes }),
+    ]);
+    assert.equal(starts, 1, 'two concurrent scans started one engine between them');
+    assert.equal(first.resources.length, second.resources.length);
+  });
+
+  it('keeps previously discovered workflows visible after the engine goes away', async () => {
+    const online = probesFor({ ollama: { models: [] }, systemStats: {}, objectInfo, workflows: { 'a.json': textToImage } });
+    const first = await scanLocalResources(lifecycleHub({ running: true }).hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      probes: online,
+    });
+    assert.equal(first.resources.filter((entry) => entry.kind === 'comfyui_workflow').length, 1);
+
+    // ComfyUI stops, and is not allowed to be started for this pass.
+    const offline = probesFor({ ollama: { models: [] }, systemStats: 'offline', objectInfo: 'offline' });
+    const published: unknown[][] = [];
+    const hub = {
+      catalog: { listModels: () => [] },
+      activeInvocationsFor: () => 0,
+      publishScannedModels: (descriptors: readonly unknown[]) => {
+        published.push([...descriptors]);
+        return descriptors.length;
+      },
+      startEngineForHost: async () => {
+        throw new Error('not startable');
+      },
+      stopEngine: async () => ({ stopped: false, wasRunning: false }),
+    } as unknown as ModelHub;
+
+    const second = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes: offline });
+    const workflow = second.resources.find((entry) => entry.kind === 'comfyui_workflow');
+    assert.ok(workflow, 'the workflow discovered earlier is still listed');
+    assert.equal(workflow.engineRunning, false, 'and is reported as belonging to a stopped engine');
+    assert.equal(workflow.runnable, true, 'it can still run by starting the engine on demand');
+    assert.match(workflow.detail, /not running/);
+    assert.ok(
+      (workflow.diagnostics ?? []).some((note) => /not answering|could not be reached|ECONNREFUSED/i.test(note)),
+      'the reason is attached',
+    );
+  });
+
+  it('lists installed Ollama models and complete workflows, and never a weight file or a node class', async () => {
+    const { hub } = lifecycleHub({ running: true });
+    const result = await scanLocalResources(hub, {
+      hosts: hostsOf(),
+      startEngine: false,
+      probes: probesFor({ ollama: ollamaTags, systemStats: {}, objectInfo, workflows: { 'demo.json': textToImage } }),
+    });
+
+    assert.deepEqual(
+      result.resources.map((entry) => entry.typeLabel).sort(),
+      ['ComfyUI Workflow', 'Ollama Model', 'Ollama Model'],
+    );
+    assert.deepEqual(
+      result.resources.filter((entry) => entry.kind === 'ollama_model').map((entry) => entry.name),
+      ['llama3:8b', 'qwen2.5:3b'],
+    );
+
+    const serialized = JSON.stringify(result.resources);
+    assert.doesNotMatch(serialized, /safetensors/, 'no checkpoint, LoRA or VAE is listed');
+    for (const nodeClass of ['CheckpointLoaderSimple', 'LoraLoader', 'VAELoader', 'KSampler']) {
+      assert.doesNotMatch(serialized, new RegExp(nodeClass), `${nodeClass} must not be listed`);
     }
   });
 
   it('refreshes on a second scan instead of duplicating entries', async () => {
-    const hub = hubFor();
     const probes = probesFor({
       ollama: ollamaTags,
+      systemStats: {},
       objectInfo,
-      workflows: { 'saved/t2i.json': textToImage, 'saved/editor.json': editorWorkflow },
+      workflows: { 'a.json': textToImage, 'b.json': imageToThreeD },
     });
-    try {
-      const first = await scanLocalResources(hub, { hosts: hostsOf(), probes });
-      const second = await scanLocalResources(hub, { hosts: hostsOf(), probes });
-
-      assert.deepEqual(
-        second.resources.map((resource) => resource.id),
-        first.resources.map((resource) => resource.id),
-      );
-      assert.equal(second.resources.length, first.resources.length);
-      assert.equal(new Set(second.resources.map((resource) => resource.id)).size, second.resources.length);
-      // The published half is replaced wholesale, so a rescan cannot accumulate.
-      assert.deepEqual([...hub.scannedProviderIds].sort(), ['comfy-wf-editor', 'comfy-wf-t2i']);
-    } finally {
-      await hub.dispose();
-    }
+    const hub = lifecycleHub({ running: true }).hub;
+    const first = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes });
+    const second = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes });
+    assert.deepEqual(
+      second.resources.map((entry) => entry.id).sort(),
+      first.resources.map((entry) => entry.id).sort(),
+    );
+    assert.equal(new Set(second.resources.map((entry) => entry.id)).size, second.resources.length);
   });
 
-  it('keeps the two engines independent when one is down', async () => {
-    const hub = hubFor();
-    try {
-      const ollamaDown = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        probes: probesFor({ objectInfo, workflows: { 'saved/t2i.json': textToImage } }),
-      });
-      assert.equal(ollamaDown.resources.filter((resource) => resource.kind === 'ollama_model').length, 0);
-      assert.equal(ollamaDown.resources.filter((resource) => resource.kind === 'comfyui_workflow').length, 1);
-      assert.ok(ollamaDown.sources.some((source) => source.kind === 'ollama_model' && !source.ok));
-
-      const comfyDown = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        workflowDir: '/workflows/comfy',
-        probes: probesFor({
-          ollama: ollamaTags,
-          files: { '/workflows/comfy/local.json': JSON.stringify(textToImage) },
-        }),
-      });
-      assert.equal(comfyDown.resources.filter((resource) => resource.kind === 'ollama_model').length, 2);
-      const local = comfyDown.resources.filter((resource) => resource.kind === 'comfyui_workflow');
-      assert.equal(local.length, 1, 'a directory workflow is still found while ComfyUI is down');
-      assert.equal(local[0]?.status, 'ready', 'an API workflow needs no engine to be understood');
-      assert.ok(comfyDown.warnings.some((warning) => /object_info/.test(warning)));
-    } finally {
-      await hub.dispose();
-    }
-  });
-
-  it('publishes runnable workflows as providers the hub can route', async () => {
-    const hub = hubFor();
-    try {
-      const result = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        probes: probesFor({ ollama: ollamaTags, objectInfo, workflows: { 'saved/t2i.json': textToImage } }),
-      });
-      assert.equal(result.registered, 1);
-
-      const view = hub.listModels({ includeDisabled: true }).find((entry) => entry.model.id === 'comfy-wf-t2i');
-      assert.ok(view, 'the scanned workflow is a registered provider');
-      assert.equal(view.model.providerKind, 'workflow');
-      assert.equal(view.model.workflowId, 'comfy-wf-t2i');
-      assert.deepEqual([...view.model.capabilities], ['text_to_image']);
-
-      const decision = await hub.route({ capability: 'text_to_image', prompt: 'a fox' });
-      assert.equal(decision.modelId, 'comfy-wf-t2i');
-    } finally {
-      await hub.dispose();
-    }
-  });
-
-  it('runs a scanned workflow end to end through the existing ComfyUI harness', async () => {
-    const png = renderMockPng(24, 16, 'scan');
-    const requests: string[] = [];
+  it('runs a discovered workflow end to end, with the bindings the scan inferred', async () => {
+    const png = renderMockPng(20, 12, 'scanned');
+    const queued: string[] = [];
     const http = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const url = req.url ?? '/';
-        requests.push(url);
         if (url.startsWith('/view')) {
           res.writeHead(200, { 'content-type': 'image/png' });
           res.end(Buffer.from(png));
           return;
         }
+        if (url === '/prompt') queued.push(Buffer.concat(chunks).toString('utf8'));
         const body =
-          url === '/object_info'
-            ? objectInfo
-            : url === '/system_stats'
-              ? { system: {} }
+          url === '/system_stats'
+            ? { system: {} }
+            : url === '/object_info'
+              ? objectInfo
               : url.startsWith('/userdata?')
                 ? ['t2i.json']
-                : url === '/userdata/t2i.json'
+                : url.includes('/userdata/')
                   ? textToImage
                   : url === '/prompt'
                     ? { prompt_id: 'p-1' }
@@ -511,10 +781,10 @@ describe('Local models scan', () => {
                       ? {
                           'p-1': {
                             status: { status_str: 'success' },
-                            outputs: { '8': { images: [{ filename: 'out.png', subfolder: '', type: 'output' }] } },
+                            outputs: { '7': { images: [{ filename: 'out.png', subfolder: '', type: 'output' }] } },
                           },
                         }
-                      : [];
+                      : {};
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(body));
       });
@@ -526,23 +796,12 @@ describe('Local models scan', () => {
 
     const hub = hubFor(endpoint);
     try {
-      // Only the HTTP effect is stubbed, and only to keep Ollama out of the test:
-      // ComfyUI is reached over the real socket, through the fake server above.
-      const scan = await scanLocalResources(hub, {
-        hosts: hostsOf(endpoint),
-        timeoutMs: 2_000,
-        probes: {
-          fetchJson: async (url, timeoutMs) => {
-            if (url.includes('/api/tags')) throw new Error('no Ollama in this test');
-            const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return await response.json();
-          },
-        },
-      });
-      const workflow = scan.resources.find((resource) => resource.kind === 'comfyui_workflow');
+      // No injected probes: the scan talks to the fake engine over a real socket,
+      // so retrieval, analysis, registration and invocation run as they would.
+      const scan = await scanLocalResources(hub, { hosts: hostsOf(endpoint), startEngine: false, timeoutMs: 5_000 });
+      const workflow = scan.resources.find((entry) => entry.kind === 'comfyui_workflow');
       assert.equal(workflow?.status, 'ready');
-      assert.ok(workflow?.modelId);
+      assert.deepEqual(workflow?.inputs?.map((input) => input.name), ['prompt', 'negative_prompt', 'seed', 'steps', 'cfg', 'width', 'height']);
 
       const result = await hub.invokeModel({
         capability: 'text_to_image',
@@ -553,53 +812,22 @@ describe('Local models scan', () => {
       assert.equal(result.modelId, workflow?.modelId);
       assert.equal(result.outputs.length, 1);
       assert.equal(result.outputs[0]?.type, 'image');
-      assert.ok(requests.includes('/prompt'), 'the complete workflow was queued on ComfyUI');
+
+      const sent = JSON.parse(queued[0] ?? '{}') as { prompt: Record<string, { inputs: Record<string, unknown> }> };
+      assert.equal(sent.prompt['2']?.inputs['text'], 'a futuristic city', 'the prompt went to the node the scan found');
+      assert.equal(sent.prompt['4']?.inputs['width'], 256, 'the width went to the size node the scan found');
+      assert.equal(sent.prompt['4']?.inputs['height'], 128);
+      assert.equal(sent.prompt['1']?.inputs['ckpt_name'], 'A.safetensors', 'the graph is otherwise untouched');
     } finally {
       await hub.dispose();
       await new Promise<void>((resolve) => http.close(() => resolve()));
     }
   });
 
-  it('surfaces both kinds through the inventory the settings page reads', async () => {
-    const hub = hubFor();
-    try {
-      const inventory = await buildInventory(hub, {
-        hosts: hostsOf(),
-        catalogPath: '/catalog/models.json',
-        artifactRoot: '/artifacts',
-        allowProcessLaunch: false,
-        probes: probesFor({ ollama: ollamaTags, objectInfo, workflows: { 'saved/t2i.json': textToImage } }),
-        scanTimeoutMs: 1_000,
-        log: () => {},
-      });
-
-      assert.deepEqual(
-        inventory.resources.map((resource) => resource.typeLabel),
-        ['Ollama Model', 'Ollama Model', 'ComfyUI Workflow'],
-      );
-      assert.equal(inventory.scan.registered, 1);
-      assert.ok(inventory.scan.sources.length >= 2);
-      assert.doesNotMatch(JSON.stringify(inventory.resources), /safetensors/);
-      for (const model of inventory.models) {
-        assert.doesNotMatch(model.id, /safetensors/, `${model.id} must not be a weight file`);
-      }
-    } finally {
-      await hub.dispose();
-    }
-  });
-
-  it('reports an empty machine as empty rather than as an error', async () => {
-    const hub = hubFor();
-    try {
-      const result = await scanLocalResources(hub, {
-        hosts: hostsOf(),
-        probes: probesFor({ ollama: { models: [] }, objectInfo, workflows: {} }),
-      });
-      assert.deepEqual(result.resources, []);
-      assert.equal(result.registered, 0);
-      assert.ok(result.sources.every((source) => source.ok), 'both engines answered');
-    } finally {
-      await hub.dispose();
-    }
+  it('builds several candidate retrieval URLs, the documented one first', () => {
+    const urls = workflowUrls('http://h:8188', '3d/model.json');
+    assert.equal(urls[0], 'http://h:8188/userdata/workflows%2F3d%2Fmodel.json');
+    assert.ok(urls.includes('http://h:8188/userdata/workflows/3d/model.json'));
+    assert.equal(new Set(urls).size, urls.length, 'no duplicate attempts');
   });
 });

@@ -293,8 +293,9 @@ export type {
   InputBinding,
   OutputBinding,
   WorkflowContract,
-} from './comfy/workflow.ts';
-export {
+} from './comfy/workflow.ts';export {
+  conversionGaps,
+  editorNodeTitles,
   looksLikeEditorWorkflow,
   scanWorkflowDocument,
   scannedOllamaModelId,
@@ -302,10 +303,14 @@ export {
   workflowModelTypeFor,
 } from './comfy/scan.ts';
 export type {
+  PublicInput,
+  PublicInputKind,
+  PublicOutput,
   ScanWorkflowInput,
   ScannedWorkflow,
   ScannedWorkflowFormat,
   ScannedWorkflowReadiness,
+  WorkflowAnalysis,
 } from './comfy/scan.ts';
 export {
   THREE_D_ENGINE,

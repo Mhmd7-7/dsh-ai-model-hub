@@ -148,16 +148,40 @@ in front of them.
   `/api/tags`, ComfyUI through its saved-workflow route (`/userdata`) and/or a
   configured workflow directory. The two halves never share a failure path, so one
   engine being down cannot hide the other's results.
-- `src/comfy/scan.ts` turns a saved workflow document into a public contract,
-  structurally: which node holds the prompt, which carries the image, which one is
-  the deliverable. That inference is the only thing that makes a workflow saved in
-  the ComfyUI editor usable without hand-written JSON, and it exposes a prompt, an
-  image, a seed and dimensions — never a weight file or a node id.
+- **Readiness is engine-specific, and status precedes parsing.** A bare `GET /` is
+  not a health check: Ollama answers it with the plain text `Ollama is running` and
+  ComfyUI answers it with the editor's HTML, so probing the root and parsing JSON
+  reports two healthy engines as stopped. Each engine is asked the route it
+  implements, and a connection refusal, an HTTP error and a 200 that is not JSON
+  are three separately reported failures.
+- **A workflow is addressed, not guessed.** ComfyUI lists saved workflows as paths
+  relative to a directory and serves one back through a single path segment, so the
+  directory is part of the address and the whole relative path is percent-encoded
+  (`/userdata/workflows%2F3d%2Fmodel.json`). Contents that could not be fetched are
+  reported as `unreadable` with the status actually received — never as an invalid
+  document nobody has seen.
+- `src/comfy/scan.ts` turns a saved workflow into a public contract from the graph
+  **and from ComfyUI's own node metadata**: `output_node` says which nodes are
+  terminal, the declared `output` types say what a deliverable is, `input.required`
+  says whether a conversion is complete, and a declared `default` fills a widget the
+  editor omitted. Inputs come from evidence — a prompt that reaches a sampler, an
+  image loader, a titled scalar control, a lone sampler or size node — and anything
+  the metadata cannot support is withheld with a diagnostic naming the reason.
 - Runnable workflows are published through `ModelHub.publishScannedModels`, which
   republishes the catalog as `static + scanned + discovered`. A repeated scan
   *replaces* the scanned half rather than growing it, so ids derived from source
   locations make a rescan a refresh and never a duplicate. Static configuration
   still wins the id collision, exactly as it does for automatic discovery.
+- **Discovery owns only the engine it started.** A ComfyUI that is already
+  answering is used and left alone; a stopped one is launched through the hub's own
+  policy-gated path, waited for on its readiness route, and shut down afterwards
+  only if this pass started it, no other scan still needs it, and nothing is queued
+  or running. Concurrent scans share one pass, so they cannot start a second engine
+  or stop each other's.
+- **Discovered results outlive the engine.** The last successful pass per host is
+  cached, so a later failure reports the same workflows with the engine marked down
+  — they stay listed, stay registered, and run by starting the engine on demand —
+  rather than emptying the page because a socket was refused.
 
 The boundary the previous section states is unchanged and is what the scan is
 built to respect: **a ComfyUI checkpoint is not a provider; a workflow is.**

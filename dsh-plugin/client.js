@@ -238,10 +238,30 @@ window.__ModuleLoader__.load({
             ? h(Row, { label: 'capabilities', value: resource.capabilities.join(', ') })
             : null,
           resource.inputs && resource.inputs.length > 0
-            ? h(Row, { label: 'inputs', value: resource.inputs.join(', ') })
+            ? h(Row, {
+                label: 'inputs',
+                value: resource.inputs
+                  .map((input) =>
+                    input.name +
+                    ' (' + input.kind + ')' +
+                    (input.label && input.label !== input.name ? ' — ' + input.label : ''),
+                  )
+                  .join(', '),
+              })
             : null,
           resource.outputs && resource.outputs.length > 0
-            ? h(Row, { label: 'outputs', value: resource.outputs.join(', ') })
+            ? h(Row, {
+                label: 'outputs',
+                value: resource.outputs.map((output) => output.name + ' (' + output.type + ')').join(', '),
+              })
+            : null,
+          // Why something was not exposed. Shown rather than hidden: a workflow
+          // missing an input it plausibly has is a question the page should answer.
+          resource.diagnostics && resource.diagnostics.length > 0
+            ? h('div', {
+                style: { fontSize: '12px', lineHeight: '18px', color: text.tertiary, userSelect: 'text' },
+                children: resource.diagnostics.join(' '),
+              })
             : null,
           resource.format ? h(Row, { label: 'format', value: resource.format === 'ui' ? 'editor (UI)' : 'API' }) : null,
           resource.sizeBytes ? h(Row, { label: 'size', value: formatBytes(resource.sizeBytes) }) : null,

@@ -194,6 +194,20 @@ export class ModelCatalog {
   }
 
   /**
+   * Every declared host, in configuration order.
+   *
+   * A host is startable in its own right — the settings page's scan has to bring
+   * ComfyUI up before it can discover any workflow, and at that moment the host
+   * may carry no model at all. Exposing the declarations lets that launch path
+   * resolve an engine without needing a routable catalog entry to hang it on.
+   *
+   * @returns the hosts.
+   */
+  listHosts(): readonly ModelHost[] {
+    return [...this.hosts.values()];
+  }
+
+  /**
    * Look up one model by id.
    * @param modelId - the model id.
    * @returns the resolved model, or `undefined`.

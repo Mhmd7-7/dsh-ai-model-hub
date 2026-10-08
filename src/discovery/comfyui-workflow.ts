@@ -180,6 +180,35 @@ export interface ComfyNodeIo {
   readonly inputs: Readonly<Record<string, readonly string[]>>;
   /** Output type names, in declaration order. */
   readonly outputs: readonly string[];
+  /**
+   * Input fields the node declares as **required**, in declaration order.
+   *
+   * Needed to judge a conversion: a reconstructed graph is only usable if every
+   * required field of every node it contains was actually filled in, and which
+   * fields are required is something only the engine can say.
+   */
+  readonly requiredInputs?: readonly string[];
+  /**
+   * The default each input declares, when it declares one.
+   *
+   * The editor omits a widget from `widgets_values` when it is hidden behind an
+   * "advanced" panel, so a required field can legitimately have no value in the
+   * export. ComfyUI states the value it would use in that case, which is the only
+   * correct thing to fill in — and it is what keeps such a node from being
+   * reported as an unreconstructable graph.
+   */
+  readonly defaults?: Readonly<Record<string, unknown>>;
+  /**
+   * ComfyUI's own statement that this node is a terminal output.
+   *
+   * This is the primary signal for "what does this workflow produce" — far
+   * stronger than guessing from a class name. It is not sufficient on its own:
+   * `Preview3DAdvanced` and `PreviewImage` are output nodes too, and a preview
+   * writes to ComfyUI's temp directory rather than to a deliverable file. So it
+   * is combined with the declared output types and the preview convention rather
+   * than trusted alone.
+   */
+  readonly outputNode?: boolean;
 }
 
 /** Every node class's readable IO contract, keyed by class name. */
@@ -202,6 +231,8 @@ export function readComfyNodeIo(raw: unknown): ComfyNodeIndex {
 
   for (const [className, spec] of Object.entries(raw)) {
     const inputs: Record<string, string[]> = {};
+    const requiredInputs: string[] = [];
+    const defaults: Record<string, unknown> = {};
     const inputBlock = isRecordLike(spec) ? spec['input'] : undefined;
     const required = isRecordLike(inputBlock) ? inputBlock['required'] : undefined;
     const optional = isRecordLike(inputBlock) ? inputBlock['optional'] : undefined;
@@ -210,12 +241,38 @@ export function readComfyNodeIo(raw: unknown): ComfyNodeIndex {
       for (const [fieldName, fieldSpec] of Object.entries(fields)) {
         const types = inputTypeNames(fieldSpec);
         if (types.length > 0) inputs[fieldName] = types;
+        if (fields === required) requiredInputs.push(fieldName);
+        const declared = declaredDefault(fieldSpec);
+        if (declared !== undefined) defaults[fieldName] = declared;
       }
     }
     const outputs = outputTypeNames(isRecordLike(spec) ? spec['output'] : undefined);
-    index[className] = { inputs, outputs };
+    const outputNode = isRecordLike(spec) && spec['output_node'] === true;
+    index[className] = {
+      inputs,
+      outputs,
+      requiredInputs,
+      outputNode,
+      ...(Object.keys(defaults).length === 0 ? {} : { defaults }),
+    };
   }
   return index;
+}
+
+/**
+ * The default ComfyUI declares for one input, when it declares one.
+ *
+ * A field spec is `[typeOrOptions, options]`, and the options object is where a
+ * framework or custom node states the value it uses when nothing is supplied.
+ *
+ * @param fieldSpec - the field's spec value.
+ * @returns the default, or `undefined` when the node declares none.
+ */
+function declaredDefault(fieldSpec: unknown): unknown {
+  if (!Array.isArray(fieldSpec)) return undefined;
+  const options = fieldSpec[1];
+  if (!isRecordLike(options)) return undefined;
+  return options['default'];
 }
 
 /**
@@ -534,6 +591,26 @@ function convertUiWorkflow(
 
   const nodes: Record<string, ComfyGraphNode> = {};
   const missingSchema: string[] = [];
+  const skippedAnnotations: string[] = [];
+
+  // Which nodes participate in the data flow. A node class the engine does not
+  // describe is only fatal when dropping it would change what runs; an
+  // annotation attached to nothing cannot.
+  const linkOrigins = new Set<string>();
+  for (const link of readArray(document, 'links')) {
+    if (!Array.isArray(link)) continue;
+    const originId = link[1];
+    if (typeof originId === 'string' || typeof originId === 'number') linkOrigins.add(String(originId));
+  }
+  const linkedTargets = new Set<string>();
+  for (const entry of uiNodes) {
+    if (!isRecordLike(entry)) continue;
+    const id = entry['id'];
+    if (typeof id !== 'string' && typeof id !== 'number') continue;
+    for (const port of readArray(entry, 'inputs')) {
+      if (isRecordLike(port) && typeof port['link'] === 'number') linkedTargets.add(String(id));
+    }
+  }
 
   for (const entry of uiNodes) {
     if (!isRecordLike(entry)) continue;
@@ -542,6 +619,16 @@ function convertUiWorkflow(
     if (classType === undefined || (typeof id !== 'string' && typeof id !== 'number')) continue;
     const spec = io[classType];
     if (spec === undefined) {
+      // A class the engine does not describe *and* which neither feeds nor is fed
+      // by anything is inert — a note, a comment, a frame. ComfyUI keeps such
+      // nodes in the document but never reports them through `/object_info`,
+      // because they have no execution semantics at all, so refusing the whole
+      // workflow over one is how a perfectly runnable graph becomes unreadable.
+      const key = String(id);
+      if (!linkOrigins.has(key) && !linkedTargets.has(key)) {
+        skippedAnnotations.push(classType);
+        continue;
+      }
       missingSchema.push(classType);
       continue;
     }
@@ -579,6 +666,17 @@ function convertUiWorkflow(
       }
     }
 
+    // Fill anything the export did not carry from the engine's own declared
+    // default. A widget hidden behind an "advanced" panel is absent from
+    // `widgets_values` while remaining required, and ComfyUI states the value it
+    // would use — filling it is reconstruction, whereas omitting it produces a
+    // graph that is rejected for a reason the caller never caused.
+    for (const field of spec.requiredInputs ?? []) {
+      if (inputs[field] !== undefined) continue;
+      const fallback = spec.defaults?.[field];
+      if (fallback !== undefined) inputs[field] = fallback;
+    }
+
     nodes[String(id)] = { classType, inputs };
   }
 
@@ -601,7 +699,12 @@ function convertUiWorkflow(
       `This workflow was saved in ComfyUI's *UI* format and was converted to an API-format graph at discovery ` +
       `time, using each node's declared inputs from /object_info. Widget values on node classes this hub does not ` +
       `know how to order may be off; if ComfyUI rejects the graph, export the workflow with "Save (API Format)" ` +
-      `or set adapterConfig.workflow explicitly.`,
+      `or set adapterConfig.workflow explicitly.` +
+      (skippedAnnotations.length === 0
+        ? ''
+        : ` ${unique(skippedAnnotations).length} annotation node class(es) were dropped because they carry no ` +
+          `execution semantics and are connected to nothing (${unique(skippedAnnotations).slice(0, 5).join(', ')}); ` +
+          'they do not affect what runs.'),
   };
 }
 
