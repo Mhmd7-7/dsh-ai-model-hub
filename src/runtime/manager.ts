@@ -17,6 +17,8 @@
 import { Socket } from 'node:net';
 import type { ModelCatalog } from '../catalog/registry.ts';
 import type { ResolvedModel } from '../catalog/descriptor.ts';
+import type { Capability } from '../catalog/capabilities.ts';
+import type { PolicyOptionState } from '../policy/capability-policy.ts';
 import type { AdapterLogger } from '../adapters/types.ts';
 import { AdapterRegistry, silentLogger } from '../adapters/types.ts';
 import type { AvailabilityState, HealthReport, LifecycleState, ModelRuntimeStatus } from '../types.ts';
@@ -71,6 +73,26 @@ export interface RuntimeManagerOptions {
    * model unhealthy.
    */
   readonly catalogDir?: string;
+  /**
+   * Whether one capability option is permitted to run at all.
+   *
+   * Injected rather than imported so the runtime manager stays free of policy
+   * knowledge — it asks a question and obeys the answer. It is consulted
+   * **immediately before a launch**, which is what makes a toggle flipped during
+   * a long cold start take effect instead of being lost to the race.
+   *
+   * Omitted means "nothing has forbidden anything", the behaviour every existing
+   * caller and test already relies on.
+   */
+  readonly isPermitted?: (modelId: string) => PermissionVerdict;
+}
+
+/** Whether a capability option may run, and why not when it may not. */
+export interface PermissionVerdict {
+  /** Whether it is permitted. */
+  readonly enabled: boolean;
+  /** Why it is forbidden; empty when it is permitted. */
+  readonly reason: string;
 }
 
 /** Per-model mutable state. */
@@ -103,6 +125,8 @@ export class RuntimeManager {
   private readonly idleSweepIntervalMs: number;
   /** The catalog's directory, handed to adapters that resolve a catalog-relative file. */
   private readonly catalogDir: string | undefined;
+  /** The policy gate consulted before any launch, when the deployment supplied one. */
+  private readonly isPermitted: (modelId: string) => PermissionVerdict;
   private readonly states = new Map<string, ModelState>();
   private healthTimer: NodeJS.Timeout | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
@@ -119,6 +143,9 @@ export class RuntimeManager {
     this.healthIntervalMs = options.healthIntervalMs ?? 30_000;
     this.idleSweepIntervalMs = options.idleSweepIntervalMs ?? 15_000;
     this.catalogDir = options.catalogDir;
+    // Absent means "nothing is forbidden": every caller that passes no gate —
+    // every existing test, every headless embed — keeps its behaviour exactly.
+    this.isPermitted = options.isPermitted ?? ((): PermissionVerdict => ({ enabled: true, reason: '' }));
 
     this.syncCatalog();
   }
@@ -736,6 +763,10 @@ export class RuntimeManager {
             this.log(`runtime: ${modelId} is already served by a live endpoint; not starting a second instance`, {
               modelId,
             });
+            // `alreadyRunning`, not a cold start: the hub started nothing, and the
+            // caller's "did you boot this for me?" answer has to be no — that flag
+            // is what tells an operator whether the VRAM now in use is theirs to
+            // release, and what tells the idle sweeper whether it owns the process.
             return { started: false, alreadyRunning: true, health: existing };
           }
         }
@@ -749,6 +780,16 @@ export class RuntimeManager {
           { modelId, endpoint: model.runtime.endpoint },
         );
       }
+
+      // The last check before a process exists. Everything above this line is
+      // reversible; this is the point of no return, so the policy is consulted
+      // here and not merely at routing time. That ordering matters for a real
+      // race: an operator who disables an option while a three-minute ComfyUI
+      // cold start is in flight expects the toggle to win, and — because a
+      // concurrent request for the same engine joins the *same* transition rather
+      // than starting its own — a check done only at routing time would let the
+      // disabled option proceed on someone else's launch.
+      this.assertLaunchPermitted(model);
 
       if (state.process !== undefined) {
         // A process exists. If it is answering, there is nothing to do; otherwise
@@ -1009,8 +1050,7 @@ export class RuntimeManager {
 
     if (status.availability === 'disabled') {
       throw new ModelHubError('MODEL_UNAVAILABLE', `model "${modelId}" is disabled in configuration`, { modelId });
-    }
-    if (status.availability === 'unsupported') {
+    }    if (status.availability === 'unsupported') {
       throw new ModelHubError(
         'INSUFFICIENT_RESOURCES',
         `model "${modelId}" cannot run here: ${status.reason ?? 'unsupported'}`,
@@ -1042,18 +1082,25 @@ export class RuntimeManager {
 
     if (status.availability === 'starting') {
       // Another caller is already starting it; wait on the same transition.
+      // Whether *this* call is a cold start depends on whether it was ever
+      // stopped: joining someone else's launch is not the same as being the one
+      // who paid for it.
       const state = this.requireState(modelId);
+      const wasRunning = state.process !== undefined;
       await state.transition.catch(() => undefined);
       const after = await this.probeHealth(modelId);
-      if (after.healthy) return { allowed: true, coldStart: true };
+      if (after.healthy) return { allowed: true, coldStart: !wasRunning && this.requireState(modelId).process !== undefined };
       throw new ModelHubError('START_FAILED', `model "${modelId}" failed to become available`, {
         modelId,
         health: after.detail,
       });
     }
 
-    await this.startModel(modelId);
-    return { allowed: true, coldStart: true };
+    const started = await this.startModel(modelId);
+    // A caller's own launch is a cold start; adopting one that was already up is
+    // not, and reporting it as one would be a lie about a process the hub does
+    // not own and must not stop.
+    return { allowed: true, coldStart: started.started };
   }
 
   /**
@@ -1093,10 +1140,27 @@ export class RuntimeManager {
   }
 
   /**
-   * Fetch a model's state, failing loudly when it is absent.
-   * @param modelId - the model id.
-   * @returns the mutable state.
+   * Refuse to launch a model the capability policy forbids.
+   *
+   * Called immediately before `spawnProcess`, so it is the last thing that
+   * happens before a process exists. It reports `POLICY_DISABLED` rather than
+   * `START_FAILED` because those are different answers: a launch that failed is
+   * worth retrying or investigating, and a launch that is forbidden is a decision
+   * — retrying it, or routing around it, would be disobeying the operator.
+   *
+   * @param model - the model about to be launched.
+   * @throws ModelHubError with `POLICY_DISABLED` when the policy forbids it.
    */
+  private assertLaunchPermitted(model: ResolvedModel): void {
+    const verdict = this.isPermitted(model.id);
+    if (verdict.enabled) return;
+    throw new ModelHubError(
+      'POLICY_DISABLED',
+      `refusing to start "${model.id}": ${verdict.reason.length > 0 ? verdict.reason : 'it is disabled by the capability policy'}`,
+      { modelId: model.id, reason: verdict.reason },
+    );
+  }
+
   /**
    * Resolve a model id the runtime is responsible for.
    *
@@ -1115,6 +1179,52 @@ export class RuntimeManager {
 
   /** Engine records a scan asked for: real processes with no catalog entry. */
   private readonly engineRecords = new Map<string, ResolvedModel>();
+
+  /**
+   * Describe one catalog option for a capability plan.
+   *
+   * This is the bridge between the runtime's own vocabulary and the policy's, and
+   * it exists so the settings page and the router describe an option the same
+   * way. Three facts are kept apart on purpose:
+   *
+   * - {@link PermissionVerdict} answers "may this run", and is the policy's.
+   * - the availability state answers "is it usable now", and is the runtime's.
+   * - `startable` answers "can the hub still bring it up", which is what keeps a
+   *   *stopped but permitted* local engine ahead of a ready remote backend
+   *   instead of being demoted for the crime of not being loaded yet.
+   *
+   * Disabled is reported as `disabled` here too, so a UI cannot accidentally
+   * render a forbidden option as merely "stopped" and offer to start it.
+   *
+   * @param modelId - the catalog model id.
+   * @param capability - the capability being planned for, used for the reason text
+   *   so a per-capability disable reads as one.
+   * @returns the state, a reason, and whether a launch is possible.
+   */
+  describeOption(
+    modelId: string,
+    capability: Capability,
+  ): { readonly state: PolicyOptionState; readonly reason: string; readonly startable: boolean } {
+    void capability;
+    const model = this.catalog.getModel(modelId);
+    if (model === undefined) {
+      return {
+        state: 'unavailable',
+        reason: 'Unavailable: it is not in the catalog any more, but its saved settings are kept.',
+        startable: false,
+      };
+    }
+    const permission = this.isPermitted(modelId);
+    if (!permission.enabled) {
+      return { state: 'disabled', reason: permission.reason, startable: false };
+    }
+    const status = this.getModelStatus(modelId);
+    return {
+      state: toPolicyState(status.availability),
+      reason: describeAvailability(model, status),
+      startable: status.availability === 'stopped' && model.lifecycle.startable && model.lifecycle.start !== undefined,
+    };
+  }
 
   private requireState(modelId: string): ModelState {
     const state = this.states.get(modelId);
@@ -1137,6 +1247,83 @@ export class RuntimeManager {
       () => undefined,
     );
     return run;
+  }
+}
+
+/**
+ * Translate a runtime availability into the policy vocabulary.
+ *
+ * The mapping is deliberately total and lossless: `stopped` stays `stopped`
+ * rather than collapsing into `unavailable`, because that distinction is the
+ * whole reason a startable-but-cold local engine outranks a ready remote one.
+ *
+ * @param availability - the runtime's state.
+ * @returns the policy's state.
+ */
+export function toPolicyState(availability: AvailabilityState): PolicyOptionState {
+  switch (availability) {
+    case 'available':
+      return 'ready';
+    case 'stopped':
+      return 'stopped';
+    case 'starting':
+      return 'starting';
+    case 'unhealthy':
+      return 'unhealthy';
+    case 'disabled':
+      return 'disabled';
+    case 'unsupported':
+      return 'unsupported';
+    case 'error':
+      return 'unavailable';
+    default: {
+      const exhaustive: never = availability;
+      throw new ModelHubError('MODEL_UNAVAILABLE', `unhandled availability state ${String(exhaustive)}`, {
+        availability: String(exhaustive),
+      });
+    }
+  }
+}
+
+/**
+ * Say, in words, why a model is in the state it is in.
+ *
+ * The runtime's own reason wins whenever it recorded one, because it is the
+ * sentence that names the shortfall or the failing check. Otherwise the state is
+ * described from the model's own declaration, so "stopped" always says whether
+ * the hub *could* start it — the difference between "start it and it works" and
+ * "nothing here can bring this up".
+ *
+ * @param model - the resolved model.
+ * @param status - its live status.
+ * @returns a reason sentence.
+ */
+function describeAvailability(model: ResolvedModel, status: ModelRuntimeStatus): string {
+  switch (status.availability) {
+    case 'available':
+      return status.lifecycle === 'external'
+        ? 'Ready: an engine started outside the hub is answering its readiness check. The hub will not restart it.'
+        : 'Ready: answering its readiness check.';
+    case 'stopped':
+      return status.lifecycle === 'starting'
+        ? 'Starting: a startup is already in progress; this request joins it rather than spawning a second engine.'
+        : model.lifecycle.startable && model.lifecycle.start !== undefined
+          ? 'Stopped: not running, and the hub is permitted to start it on demand.'
+          : 'Stopped: not running, and this deployment cannot start it — start it yourself and it will be detected.';
+    case 'starting':
+      return 'Starting: a launch is in progress.';
+    case 'unhealthy':
+      return `Unhealthy: running but failing its readiness check${status.reason === undefined ? '' : ` — ${status.reason}`}`;
+    case 'disabled':
+      return 'Disabled in the catalog.';
+    case 'unsupported':
+      return `Unsupported on this machine: ${status.reason ?? 'its declared needs exceed what is available'}`;
+    case 'error':
+      return `Unavailable: ${status.reason ?? 'its descriptor or adapter is broken'}`;
+    default: {
+      const exhaustive: never = status.availability;
+      return `Unavailable (${String(exhaustive)})`;
+    }
   }
 }
 
@@ -1199,11 +1386,21 @@ export function probeTcp(
 }
 
 /**
- * Probe a model's HTTP endpoint.
+ * Probe a model's HTTP endpoint and, when the descriptor asks for it, verify
+ * that the answer is a *readiness* answer rather than merely a live socket.
  *
- * Any 2xx/3xx counts as healthy: engines disagree about whether `/` returns 200,
- * 404, or a redirect, and all three mean "something is listening and speaking
- * HTTP", which is the question being asked.
+ * The default remains permissive — any 2xx/3xx counts, because engines disagree
+ * about whether `/` returns 200, 404, or a redirect and all three mean "something
+ * is listening and speaking HTTP". That question, however, is not the question a
+ * cold start needs answered, and this project has already been bitten by the
+ * difference: a plain page answering 200 was accepted as proof that ComfyUI was
+ * ready, generation was submitted into a still-loading graph, and the failure
+ * looked like a model bug rather than a readiness bug.
+ *
+ * So a descriptor may now demand the shape of a real answer through
+ * {@link HealthCheckSpec.expect}. A body that does not match is *unhealthy*, with
+ * the observed content in the detail, which is what makes the failure explainable
+ * instead of mysterious.
  *
  * @param model - the resolved model.
  * @param signal - cancellation.
@@ -1239,12 +1436,55 @@ async function probeHttp(
       redirect: 'manual',
       headers: { accept: '*/*' },
     });
-    const healthy = response.status >= 200 && response.status < 400;
+    const statusOk = response.status >= 200 && response.status < 400;
+    if (!statusOk) {
+      return {
+        healthy: false,
+        checkedAt: started,
+        latencyMs: Date.now() - started,
+        detail: `${url} responded ${response.status}`,
+      };
+    }
+
+    const expectation = model.health.expect ?? 'any';
+    if (expectation === 'any') {
+      return {
+        healthy: true,
+        checkedAt: started,
+        latencyMs: Date.now() - started,
+        detail: `${url} responded ${response.status}`,
+      };
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    let body: string;
+    try {
+      body = await response.text();
+    } catch (error) {
+      return {
+        healthy: false,
+        checkedAt: started,
+        latencyMs: Date.now() - started,
+        detail: `${url} responded ${response.status} but its body could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    const inspected = inspectJsonReadiness(body, model.health.expectKeys ?? []);
+    if (!inspected.ok) {
+      return {
+        healthy: false,
+        checkedAt: started,
+        latencyMs: Date.now() - started,
+        detail:
+          `${url} responded ${response.status} but is not ready: ${inspected.reason}` +
+          (contentType.length === 0 ? '' : ` (content-type ${contentType})`) +
+          ` — observed ${describeBody(body)}`,
+      };
+    }
     return {
-      healthy,
+      healthy: true,
       checkedAt: started,
       latencyMs: Date.now() - started,
-      detail: `${url} responded ${response.status}`,
+      detail: `${url} responded ${response.status} with ${inspected.reason}`,
     };
   } catch (error) {
     return {
@@ -1257,6 +1497,57 @@ async function probeHttp(
     clearTimeout(timer);
     signal.removeEventListener('abort', onAbort);
   }
+}
+
+/**
+ * Decide whether a health-check body satisfies the descriptor's expectation.
+ *
+ * Kept as a small pure function so the rule can be tested without a server, and
+ * so "what counts as ready" is stated in exactly one place.
+ *
+ * @param body - the response body as text.
+ * @param expectKeys - top-level keys, at least one of which must be present.
+ * @returns whether the body qualifies, and why.
+ */
+export function inspectJsonReadiness(
+  body: string,
+  expectKeys: readonly string[],
+): { readonly ok: true; readonly reason: string } | { readonly ok: false; readonly reason: string } {
+  const trimmed = body.trim();
+  if (trimmed.length === 0) return { ok: false, reason: 'the response body was empty' };
+  if (/^</.test(trimmed)) {
+    return { ok: false, reason: 'the response body is markup, not JSON (this is a page, not the engine API)' };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { ok: false, reason: 'the response body is not valid JSON' };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: `JSON parsed as ${Array.isArray(parsed) ? 'an array' : typeof parsed}, not an object` };
+  }
+  if (expectKeys.length === 0) return { ok: true, reason: 'a JSON object' };
+  const keys = Object.keys(parsed as Record<string, unknown>);
+  const present = expectKeys.filter((key) => keys.includes(key));
+  if (present.length === 0) {
+    return {
+      ok: false,
+      reason: `none of the expected keys (${expectKeys.join(', ')}) were present; got ${keys.length === 0 ? 'no keys' : keys.slice(0, 8).join(', ')}`,
+    };
+  }
+  return { ok: true, reason: `a JSON object carrying ${present.join(', ')}` };
+}
+
+/**
+ * Render a response body for a diagnostic line, bounded and single-line.
+ * @param body - the raw body.
+ * @returns a short, printable excerpt.
+ */
+function describeBody(body: string): string {
+  const flattened = body.replace(/\s+/g, ' ').trim();
+  if (flattened.length === 0) return 'an empty body';
+  return `"${flattened.length > 120 ? `${flattened.slice(0, 117)}...` : flattened}"`;
 }
 
 /** A logger that discards everything, for runtimes constructed without one. */

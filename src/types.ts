@@ -270,6 +270,64 @@ export interface InvocationResult {
   readonly durationMs: number;
   /** Whether the model was started as part of this invocation. */
   readonly coldStart: boolean;
+  /**
+   * How each option the plan walked actually turned out.
+   *
+   * Recorded for every attempt, in order, so a caller can tell "the first choice
+   * was forbidden", "the engine would not start", and "the model ran and failed"
+   * apart — three situations that used to collapse into one stack of messages.
+   */
+  readonly attempts?: readonly InvocationAttempt[];
+  /**
+   * Set when the outcome after submission is genuinely unknown.
+   *
+   * A timeout or a dropped connection *after* the request reached the backend
+   * leaves one question that cannot be answered from here: did it generate? The
+   * cost of guessing wrong is a duplicate — a second paid image, a second
+   * three-minute render — so the hub refuses to guess, reports this flag, and
+   * hands the caller the identifiers needed to check rather than starting over.
+   */
+  readonly unresolved?: UnresolvedOutcome;
+}
+
+/** One option's outcome within an invocation's ordered plan. */
+export interface InvocationAttempt {
+  /** The option that was attempted. */
+  readonly optionId: string;
+  /** Position in the permitted order, 1-based. */
+  readonly order: number;
+  /** What happened. */
+  readonly outcome: 'succeeded' | 'failed' | 'unresolved';
+  /** The stage that decided the outcome. */
+  readonly stage: 'readiness' | 'launch' | 'dispatch';
+  /** Whether the hub started this option's engine for this attempt. */
+  readonly coldStart: boolean;
+  /** How long the attempt took, in milliseconds. */
+  readonly durationMs: number;
+  /** Stable failure code, when it failed. */
+  readonly code?: string;
+  /** Why it failed, in words. */
+  readonly reason: string;
+}
+
+/**
+ * An outcome that could not be determined, with whatever can be used to resolve
+ * it rather than regenerate it.
+ */
+export interface UnresolvedOutcome {
+  /** Why the outcome is unknown. */
+  readonly reason: string;
+  /** The backend that may or may not have produced something. */
+  readonly modelId: string;
+  /**
+   * Identifiers a caller can use to look the work up instead of resubmitting:
+   * a provider request id, a ComfyUI `prompt_id`, a job name.
+   */
+  readonly jobIds?: Readonly<Record<string, string>>;
+  /** Whether the request is known to have reached the backend. */
+  readonly submitted: boolean;
+  /** What the caller should do next, in one sentence. */
+  readonly guidance: string;
 }
 
 /**
@@ -286,6 +344,24 @@ export interface RoutingDecision {
   readonly candidates: readonly RoutingCandidate[];
   /** Why the chosen model won, in one line. */
   readonly rationale: string;
+  /**
+   * The capability policy revision this decision was made under.
+   *
+   * Present on a routed decision; absent when the decision came from the router
+   * alone (a direct `routeRequest` call in a test, say), which is itself
+   * information — it says no operator policy was applied.
+   */
+  readonly policyRevision?: number;
+  /**
+   * The full permitted order execution will walk: first choice first.
+   *
+   * Longer than one entry is normal and is the point of a fallback chain; it is
+   * reported so "which options were permitted, in what order?" has one answer
+   * instead of being reconstructed from a stack of failure messages.
+   */
+  readonly permittedOptions?: readonly string[];
+  /** Every option that was left out, with the switch or fact that left it out. */
+  readonly skippedOptions?: readonly { readonly id: string; readonly reason: string }[];
 }
 
 /** One model's fate during routing, kept for explainability. */

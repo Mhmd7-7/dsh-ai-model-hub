@@ -16,7 +16,9 @@
       "health": {
         "kind": "http",
         "path": "/api/tags",
-        "timeoutMs": 2000
+        "timeoutMs": 2000,
+        "expect": "json-key",
+        "expectKeys": ["models"]
       },
       "lifecycle": {
         "startable": false,
@@ -26,7 +28,7 @@
         "vramGb": 0,
         "ramGb": 0
       },
-      "notes": "External process. The hub only ever probes /api/tags and posts to /v1/chat/completions."
+      "notes": "External process. The hub probes /api/tags and posts to /v1/chat/completions. `expect: json-key` with `expectKeys: [\"models\"]` is readiness, not just liveness: a 200 carrying anything other than Ollama's own tags document does not count as ready."
     },
     {
       "$comment": "ComfyUI providers are explicit API-format workflows, not automatically discovered checkpoint or saved-workflow entries. The configured workflow declares exact input bindings and output selector; graph internals are opaque to the hub.",
@@ -42,7 +44,9 @@
       "health": {
         "kind": "http",
         "path": "/system_stats",
-        "timeoutMs": 3000
+        "timeoutMs": 3000,
+        "expect": "json-key",
+        "expectKeys": ["system", "devices"]
       },
       "lifecycle": {
         "startable": true,

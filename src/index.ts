@@ -101,8 +101,8 @@ export {
 export type { ResolvedRequest, RoutingContext, RoutingPolicy } from './router/router.ts';
 
 // ── Runtime ─────────────────────────────────────────────────────────────────
-export { RuntimeManager, parseHostPort, probeTcp } from './runtime/manager.ts';
-export type { GateDecision, RuntimeManagerOptions } from './runtime/manager.ts';
+export { RuntimeManager, parseHostPort, probeTcp, toPolicyState } from './runtime/manager.ts';
+export type { GateDecision, PermissionVerdict, RuntimeManagerOptions } from './runtime/manager.ts';
 
 // ── Execution safety ────────────────────────────────────────────────────────
 export {
@@ -142,6 +142,7 @@ export type {
   CatalogOptions,
   GpuInfo,
   HealthReport,
+  InvocationAttempt,
   InvocationRequest,
   InvocationResult,
   LifecycleState,
@@ -151,6 +152,7 @@ export type {
   ModelView,
   RoutingCandidate,
   RoutingDecision,
+  UnresolvedOutcome,
 } from './types.ts';
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -335,6 +337,50 @@ export {
 } from './config/load.ts';
 export type { AnchorLoadOptions, AnchorLoadedCatalog, LoadedCatalog, LoadOptions } from './config/load.ts';
 
+// ── The capability policy ───────────────────────────────────────────────────
+// The operator's saved order and enablement, separate from the runtime's live
+// state and from the catalog's declared defaults.
+export {
+  CAPABILITY_POLICY_VERSION,
+  CATALOG_DEFAULTS,
+  CapabilityPolicy,
+  CatalogBaselineDefaults,
+  DENY_BY_DEFAULT,
+  disabledReason,
+  emptyPolicyDocument,
+  isUsableState,
+  modelOptionFacts,
+  parseCapabilityPolicy,
+  serializeCapabilityPolicy,
+} from './policy/capability-policy.ts';
+export type {
+  CapabilityPlan,
+  CapabilityPolicyDocument,
+  CapabilityPolicyEntry,
+  ModelFactsInput,
+  OptionLiveState,
+  OptionSource,
+  PlanInputs,
+  PolicyDefaults,
+  PolicyEntry,
+  PolicyOptionFacts,
+  PolicyOptionState,
+  PolicyParseResult,
+  PolicyRuntimeView,
+  PolicyValidationIssue,
+  ResolvedPolicyOption,
+} from './policy/capability-policy.ts';
+
 // ── The hub ─────────────────────────────────────────────────────────────────
 export { ModelHub, defaultArtifactRoot } from './hub.ts';
-export type { HubEvent, HubEventListener, InvokeOptions, ModelHubOptions } from './hub.ts';
+export type {
+  CapabilityOption,
+  CapabilityOptionInvocation,
+  CapabilityOptionListEntry,
+  HubEvent,
+  HubEventListener,
+  InvokeOptions,
+  ModelHubOptions,
+  PlannedInvocation,
+  PlannedOption,
+} from './hub.ts';

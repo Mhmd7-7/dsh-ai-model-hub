@@ -186,6 +186,37 @@ export interface PluginConfig {
   comfyuiWorkflowDir?: string;
   /** Budget for one scan request, in milliseconds. Defaults to 4000. */
   scanTimeoutMs?: number;
+  /**
+   * Where the saved capability policy lives.
+   *
+   * The policy — the per-capability order and enable/disable decisions made on
+   * the Local models page — is the operator's data, so it is stored in its own
+   * versioned document rather than being derived from the catalog or written into
+   * the profile's generated configuration. Omitted means
+   * `~/.dsh/plugins/dsh-ai-model-hub/capability-policy.json`; the harness home is
+   * the one place a third-party plugin can own durable state.
+   */
+  policyPath?: string;
+  /**
+   * The most capability options one request may attempt.
+   *
+   * Omitted — the shipping default — walks the **whole** permitted list, so a
+   * saved order of ten options really is ten attempts. Setting it is an explicit
+   * admission that some permitted options will go untried, and the failure
+   * message then says how many and why rather than implying they failed.
+   */
+  attemptBudget?: number;
+  /**
+   * Whether to offer the subscription plugin's image, video, and conversational
+   * backends as capability options.
+   *
+   * True by default, and harmless when that plugin is absent: a profile without
+   * it registers nothing and logs one line. Every subscription option is
+   * **disabled until enabled explicitly**, which is what keeps discovery,
+   * catalog presence, and a descriptor's own flags from authorizing spend on
+   * someone's subscription.
+   */
+  integrateSubscriptions?: boolean;
 }
 
 /** Schemastery schema for {@link PluginConfig}. */
@@ -208,6 +239,9 @@ export const Config = z.object({
   discoveryTimeoutMs: z.number().step(1).min(1).default(5_000),
   comfyuiWorkflowDir: z.string().default(''),
   scanTimeoutMs: z.number().step(1).min(1).default(4_000),
+  policyPath: z.string().default(''),
+  attemptBudget: z.number().step(1).min(1).default(0),
+  integrateSubscriptions: z.boolean().default(true),
 });
 
 /** Apply defaults for direct callers that bypass Loader validation. */
@@ -231,7 +265,13 @@ export function resolvePluginConfig(config: Partial<PluginConfig> | undefined): 
     discoveryTimeoutMs: config?.discoveryTimeoutMs ?? 5_000,
     comfyuiWorkflowDir: config?.comfyuiWorkflowDir ?? '',
     scanTimeoutMs: config?.scanTimeoutMs ?? 4_000,
-  };
+    policyPath: config?.policyPath ?? '',
+    // `0` is the schema's "not configured" spelling for an absent budget, since
+    // schemastery's numeric default cannot be `undefined`. It is normalized away
+    // here so the hub sees the honest shape: absent means "no budget".
+    ...(config?.attemptBudget === undefined || config.attemptBudget <= 0 ? {} : { attemptBudget: config.attemptBudget }),
+    integrateSubscriptions: config?.integrateSubscriptions ?? true,
+  } as ResolvedPluginConfig;
 }
 
 /**
@@ -240,5 +280,14 @@ export function resolvePluginConfig(config: Partial<PluginConfig> | undefined): 
  * `apply` receives this shape: the Loader validates against {@link Config}, whose
  * schemastery defaults fill every field, so no field is `undefined` by the time
  * the plugin body runs.
+ *
+ * One field is deliberately *absent* rather than defaulted — {@link PluginConfig.attemptBudget}.
+ * "No budget" and "a budget of three" are different policies, and schemastery's
+ * numeric default cannot express the difference, so the schema spells "not
+ * configured" as `0` and resolution drops it. A consumer therefore sees the
+ * honest shape: the property is present only when the operator set a budget.
  */
-export type ResolvedPluginConfig = Required<PluginConfig>;
+export type ResolvedPluginConfig = Required<Omit<PluginConfig, 'attemptBudget'>> & {
+  /** Present only when the operator configured an attempt budget. */
+  readonly attemptBudget?: number;
+};

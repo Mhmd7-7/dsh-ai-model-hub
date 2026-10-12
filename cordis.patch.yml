@@ -111,3 +111,26 @@
       #   # Budget for one scan request, in milliseconds. Raise it on a slow disk
       #   # with a large workflow directory.
       #   scanTimeoutMs: 4000
+      #
+      #   # Where the saved capability policy lives. The policy — the per-capability
+      #   # order and enable/disable decisions made on the Local models page — is
+      #   # YOUR data, so it is stored in its own versioned document rather than
+      #   # being derived from the catalog or written into the profile's generated
+      #   # configuration. Omitted => ~/.dsh/plugins/dsh-ai-model-hub/
+      #   # capability-policy.json.
+      #   policyPath: ''
+      #
+      #   # The most capability options ONE request may attempt. Omitted (the
+      #   # shipping default) walks the WHOLE permitted list, so a saved order of
+      #   # ten options really is ten attempts. Set it only if you want a smaller
+      #   # budget, and note that the failure message then reports how many options
+      #   # went untried instead of implying they failed.
+      #   attemptBudget: 0
+      #
+      #   # Offer the subscription plugin's image, video and conversational backends
+      #   # as capability options. Harmless when that plugin is absent: a profile
+      #   # without it registers nothing and logs one line. Every subscription
+      #   # option is DISABLED until you enable it, which is what keeps discovery,
+      #   # catalog presence and a descriptor's own flags from authorizing spend on
+      #   # your subscription.
+      #   integrateSubscriptions: true

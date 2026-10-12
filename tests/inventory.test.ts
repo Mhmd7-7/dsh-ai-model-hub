@@ -439,11 +439,43 @@ describe('the settings page (browser half)', () => {
     }
     const element = node as { type?: unknown; props?: { children?: unknown } };
     if (typeof element.type === 'function' && element.props !== undefined) {
-      flatten((element.type as (props: unknown) => unknown)(element.props), out);
+      // A function component is rendered *instead of* its element, so its
+      // `children` prop is never also traversed — walking both would render every
+      // subtree twice.
+      flatten(callComponent(element.type as (props: unknown) => unknown, element.props), out);
+      return out;
     }
-    if (element.props !== undefined) flatten(element.props.children, out);
+    // `children` is wrapped so an array of elements is *recurred into* rather than
+    // spread into the output as text.
+    if (element.props !== undefined) flatten([element.props.children], out);
     return out;
   }
+
+  /**
+   * Invoke one component function with the hook cursor pointing at it.
+   *
+   * A real React tracks hooks per component instance; this stands in for that by
+   * resetting the cursor and recording which component is running, so two sibling
+   * components with their own `useState` cannot read each other's slots.
+   *
+   * @param component - the component function.
+   * @param props - its props.
+   * @returns its rendered output.
+   */
+  let callComponent: (component: (props: unknown) => unknown, props: unknown) => unknown = (component, props) =>
+    component(props);
+
+  /** Hook slots per component function, surviving across render passes. */
+  let slotsByComponent = new Map<unknown, { value: unknown }[]>();
+
+  /** Components whose effects have already run. */
+  let effectsRun = new Set<unknown>();
+
+  /** The hook cursor for the current render pass. */
+  let slotIndex = 0;
+
+  /** The component currently being rendered. */
+  let currentComponent: unknown;
 
   /**
    * The module loader's captured output, filled on the first import.
@@ -484,7 +516,25 @@ describe('the settings page (browser half)', () => {
         },
       };
     }
-    globals.fetch = (async () => ({ ok: true, status: 200, json: async () => inventoryJson })) as unknown;
+    // Route-aware, because the page now reads two host routes: the inventory it
+    // renders, and the capability policy it edits. A single canned body would make
+    // the priorities section render inventory data as if it were policy.
+    globals.fetch = (async (url: unknown) => {
+      const target = String(url);
+      if (target.includes('/priorities')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            policyPath: 'C:/policy/capability-policy.json',
+            revision: 1,
+            globalEnabled: true,
+            capabilities: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => inventoryJson };
+    }) as unknown;
 
     try {
       if (capturedFactory === undefined) {
@@ -496,11 +546,26 @@ describe('the settings page (browser half)', () => {
 
       // A minimal React with hooks that actually hold state, so the page's
       // loading -> ready transition can be replayed.
-      let slotIndex = 0;
-      const slots: { value: unknown }[] = [];
-      let effectsRun = false;
+      //
+      // State is keyed per *component function*, because the settings section is
+      // now two components — the inventory report and the priorities editor, which
+      // fetch from two different routes — and a single flat slot array would let
+      // one component's `useState` read the other's value. Both the slots and the
+      // "already ran" effect set live *outside* this function so they survive
+      // between render passes; only the hook cursor is per pass, which is what lets
+      // the settled fetch result reach the second render.
+      slotsByComponent = new Map();
+      effectsRun = new Set();
+      callComponent = (component, props) => {
+        currentComponent = component;
+        slotIndex = 0;
+        return component(props);
+      };
       const react = {
         useState: (initial: unknown) => {
+          const key = currentComponent;
+          const slots = slotsByComponent.get(key) ?? [];
+          if (!slotsByComponent.has(key)) slotsByComponent.set(key, slots);
           const index = slotIndex;
           slotIndex += 1;
           if (slots.length <= index) {
@@ -515,10 +580,11 @@ describe('the settings page (browser half)', () => {
           ];
         },
         useEffect: (effect: () => void) => {
-          if (!effectsRun) {
-            effectsRun = true;
-            effect();
-          }
+          // Effects run once per component, on its first render.
+          const key = currentComponent;
+          if (effectsRun.has(key)) return;
+          effectsRun.add(key);
+          effect();
         },
         useCallback: (fn: unknown) => fn,
       };
@@ -546,13 +612,26 @@ describe('the settings page (browser half)', () => {
       };
       module.apply(ctx);
 
-      // Render once (loading), let the fetch promise settle, render again (ready).
+      // Render the registered section, which is the whole page: the inventory
+      // report and the priorities editor, each with its own state.
+      //
+      // The hook cursor is per component *function*, so a render pass walks each
+      // component's own hook sequence from the start — which is what a two-section
+      // layout needs: the two are independent components with independent state.
       const render = (): unknown => {
         slotIndex = 0;
+        currentComponent = undefined;
         return registered.component?.();
       };
-      render();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Let the two requests settle. The components do not run their effects until
+      // they are first *walked*, because a component function only executes when
+      // the tree is traversed — so the page is walked once here to start the two
+      // effects, and the yields below let each promise chain land. The caller walks
+      // it again and sees the settled state.
+      flatten(render());
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
 
       return { module, registered, render };
     } finally {

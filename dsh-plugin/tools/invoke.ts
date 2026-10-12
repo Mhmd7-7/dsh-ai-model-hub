@@ -72,6 +72,14 @@ export function registerInvokeTool(
     readonly invocationTimeoutMs: number;
     /** Where this call's artifacts go: the calling session's workspace by default. */
     readonly artifactRootFor: ArtifactRootResolver;
+    /**
+     * The deployment's attempt budget, when it configured one.
+     *
+     * Absent means the whole permitted list is walked. Present means a documented
+     * limitation, and the failure message says how many options went untried
+     * because of it.
+     */
+    readonly attemptBudget?: number;
   },
 ): void {
   const hub = service.hub;
@@ -167,22 +175,92 @@ export function registerInvokeTool(
               },
             },
             value: { type: 'object', additionalProperties: true },
+            // ── diagnostics ──────────────────────────────────────────────
+            // The requested capability, the policy that decided it, the ordered
+            // list that was permitted, what was skipped and why, and how each
+            // attempt turned out. Reported on success too: "why did this run on
+            // the second option?" is answered by the first option's reason, and
+            // the difference between "launch forbidden", "stopped", "startup
+            // failed", and "generation failed" is the attempt's stage.
+            policyRevision: { type: 'integer' },
+            permittedOptions: { type: 'array', items: { type: 'string' } },
+            skippedOptions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string', required: true },
+                  reason: { type: 'string', required: true },
+                },
+              },
+            },
+            attempts: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  optionId: { type: 'string', required: true },
+                  order: { type: 'integer', required: true },
+                  outcome: { type: 'string', required: true },
+                  stage: { type: 'string', required: true },
+                  code: { type: 'string' },
+                  reason: { type: 'string', required: true },
+                  durationMs: { type: 'integer', required: true },
+                },
+              },
+            },
+            unresolved: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                reason: { type: 'string', required: true },
+                modelId: { type: 'string', required: true },
+                submitted: { type: 'boolean', required: true },
+                guidance: { type: 'string', required: true },
+              },
+            },
           },
         },
         render: (args, value) => {
           const header = `${args.capability} served by ${value.modelId} in ${value.durationMs} ms${value.coldStart ? ' (cold start)' : ''}.`;
+          const lines: string[] = [];
           if (value.outputs.length === 0) {
-            return textBlock(`${header}\nThe model returned no artifacts.`);
+            lines.push(`${header}\nThe model returned no artifacts.`);
+          } else {
+            lines.push(header, '', `Produced ${value.outputs.length} artifact(s):`);
+            for (const artifact of value.outputs) {
+              lines.push(`  ${artifact.type} — ${artifact.description}`);
+              lines.push(`    artifact id: ${artifact.id}`);
+            }
+            lines.push('');
+            lines.push(
+              'Pass these artifact ids in the `inputs` parameter of a later invoke_model call to build on this output.',
+            );
           }
-          const lines = [header, '', `Produced ${value.outputs.length} artifact(s):`];
-          for (const artifact of value.outputs) {
-            lines.push(`  ${artifact.type} â€” ${artifact.description}`);
-            lines.push(`    artifact id: ${artifact.id}`);
+          if (value.unresolved !== undefined) {
+            lines.push('', `UNRESOLVED OUTCOME — ${value.unresolved.reason}`);
+            lines.push(value.unresolved.guidance);
           }
-          lines.push('');
-          lines.push(
-            'Pass these artifact ids in the `inputs` parameter of a later invoke_model call to build on this output.',
-          );
+          const attempts = value.attempts ?? [];
+          if (attempts.length > 1) {
+            lines.push('', 'Options tried, in the saved order:');
+            for (const attempt of attempts) {
+              lines.push(
+                `  ${String(attempt.order)}. ${attempt.optionId} — ${attempt.outcome} at ${attempt.stage}` +
+                  `${attempt.code === undefined ? '' : ` [${attempt.code}]`}: ${attempt.reason}`,
+              );
+            }
+          }
+          const skipped = value.skippedOptions ?? [];
+          if (skipped.length > 0) {
+            lines.push('', `Not used (${String(skipped.length)}):`);
+            for (const entry of skipped) lines.push(`  ${entry.id}: ${entry.reason}`);
+          }
+          if (value.policyRevision !== undefined) {
+            lines.push('', `Decided by capability policy revision ${String(value.policyRevision)}.`);
+          }
           return textBlock(lines.join('\n'));
         },
       },
@@ -216,7 +294,12 @@ export function registerInvokeTool(
             },
             {
               allowFallback: true,
-              maxAttempts: 3,
+              // No attempt cap. The permitted list is walked in full, in the
+              // operator's saved order — the old silent limit of three is gone,
+              // because stopping early is indistinguishable from "every option
+              // failed" to whoever reads the result. A deployment that wants a
+              // budget sets `attemptBudget`, and this relays it.
+              ...(options.attemptBudget === undefined ? {} : { maxAttempts: options.attemptBudget }),
               ...(artifactRoot === undefined ? {} : { artifactRoot }),
             },
           );
@@ -241,6 +324,35 @@ export function registerInvokeTool(
                 ?.replace(/^\s+/, '') ?? artifact.id,
             })),
             ...(settled.value === undefined ? {} : { value: { ...settled.value } }),
+            policyRevision: settled.decision.policyRevision ?? hub.policy.currentRevision,
+            permittedOptions: [...(settled.decision.permittedOptions ?? [])],
+            skippedOptions: (settled.decision.skippedOptions ?? []).map((entry) => ({
+              id: entry.id,
+              reason: entry.reason,
+            })),
+            ...(settled.attempts === undefined
+              ? {}
+              : {
+                  attempts: settled.attempts.map((attempt) => ({
+                    optionId: attempt.optionId,
+                    order: attempt.order,
+                    outcome: attempt.outcome,
+                    stage: attempt.stage,
+                    ...(attempt.code === undefined ? {} : { code: attempt.code }),
+                    reason: attempt.reason,
+                    durationMs: attempt.durationMs,
+                  })),
+                }),
+            ...(settled.unresolved === undefined
+              ? {}
+              : {
+                  unresolved: {
+                    reason: settled.unresolved.reason,
+                    modelId: settled.unresolved.modelId,
+                    submitted: settled.unresolved.submitted,
+                    guidance: settled.unresolved.guidance,
+                  },
+                }),
           };
         } catch (error) {
           // A tool failure is what the model needs to see: the stable code plus a
@@ -285,6 +397,13 @@ function hintFor(code: string): string {
       return 'Hint: call check_model_health for the models involved; every candidate failed, so this is likely an engine problem rather than a request problem.';
     case 'START_FAILED':
       return 'Hint: call get_model_status â€” the engine probably failed to load. Its output is included in the failure details.';
+    case 'LIFECYCLE_UNSUPPORTED':
+      return 'Hint: this deployment has no launch command for that engine, so it must already be running. Say which engine is down, and that starting it is the operator’s to do — or that its catalog entry needs a `lifecycle.start` command.';
+    case 'POLICY_DISABLED':
+      // Deliberately no "try this instead": a disabled option is the operator's
+      // decision, and routing around it — by pinning a different model, or by
+      // calling a subscription tool directly — is exactly what must not happen.
+      return 'Hint: this is not a failure, it is a setting. Say which option is switched off in Settings → Local models → Capability priorities, and do not try to work around it.';
     default:
       return '';
   }

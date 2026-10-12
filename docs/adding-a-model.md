@@ -85,6 +85,41 @@ to the catalog. Saving a new workflow in ComfyUI alone does **not** register it;
 add its descriptor, then reload the catalog. See the host example in
 `config/examples/real-models.example.json`.
 
+#### A workflow entry without `bindings` and `outputs` is refused
+
+An entry that names a `workflowPath` (or an inline `workflow`) but declares neither
+`bindings` nor `outputs` is **read and then dropped**, with a warning in the boot
+log and in the capability context the agent sees. It is not a usable provider: the
+hub cannot know which node input a caller's prompt belongs in, or which node holds
+the deliverable, so the entry would fail on its first use — and a provider that
+fails on first use is worse than one that was never published.
+
+The practical consequence is worth stating plainly, because it is easy to misread:
+**a capability can be missing because the entry that would have served it was
+rejected**, and that looks exactly like a capability the machine cannot do. Check
+the log line and the capability context before concluding anything is unavailable.
+
+The fix is two blocks of JSON:
+
+```json
+"bindings": {
+  "prompt": { "node": "13", "input": "text" },
+  "seed":   { "node": "15", "input": "seed" },
+  "steps":  { "node": "15", "input": "steps" },
+  "width":  { "node": "1",  "input": "width" },
+  "height": { "node": "1",  "input": "height" }
+},
+"outputs": { "image": { "node": "18", "type": "image" } }
+```
+
+Only the bindings your workflow actually has are needed; `prompt` and the output
+selector are the two that make it usable at all. The alternative — deleting the
+entry and letting the **Local models** page scan register the workflow with an
+inferred contract — is available when the workflow is saved inside ComfyUI, which
+is what that scan reads. A hand-written entry that names a `workflowPath` is
+deliberately never inferred from: guessing which input is the prompt is exactly the
+kind of guess that produces a run that silently ignores what you asked for.
+
 ---
 
 ## Level 1 — a model on a supported engine

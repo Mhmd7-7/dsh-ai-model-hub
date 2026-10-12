@@ -23,3 +23,11 @@ node_modules/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Scratch space. Tests run `mkdtemp` under `$TEMP`, but a restricted sandbox that
+# cannot write there needs a writable directory inside the workspace, and this is
+# the one they are pointed at. Nothing here is a build input or an output.
+/.tmp/
+
+# Scratch commit-message files
+/.tmp-*

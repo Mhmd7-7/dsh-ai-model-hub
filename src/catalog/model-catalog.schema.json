@@ -66,7 +66,7 @@
     "adapterKind": {
       "type": "string",
       "description": "How the hub talks to the model. One adapter per kind is registered in code; adding a model on an existing kind requires no code.",
-      "enum": ["mock", "http_json", "openai_compatible", "comfyui", "three_d", "cli"]
+      "enum": ["mock", "http_json", "openai_compatible", "comfyui", "three_d", "cli", "subscription"]
     },
     "healthCheckKind": {
       "type": "string",
@@ -195,7 +195,7 @@
     },
     "health": {
       "type": "object",
-      "description": "How to check liveness. Defaults from the adapter kind: HTTP-based adapters get an HTTP probe, `cli` and `mock` get `none`.",
+      "description": "How to check liveness. Defaults from the adapter kind: HTTP-based adapters get an HTTP probe, `cli`, `mock` and `subscription` get `none`.",
       "required": ["kind"],
       "additionalProperties": true,
       "properties": {
@@ -203,7 +203,16 @@
         "path": { "type": "string", "description": "Path for an `http` check. Defaults to `/`." },
         "command": { "type": "string", "description": "Command for a `command` check; subject to the launch guardrails." },
         "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments for a `command` check." },
-        "timeoutMs": { "type": "number", "minimum": 1, "description": "Per-attempt timeout in milliseconds. Defaults to 2000." }
+        "timeoutMs": { "type": "number", "minimum": 1, "description": "Per-attempt timeout in milliseconds. Defaults to 2000." },
+        "expect": {
+          "enum": ["any", "json", "json-key"],
+          "description": "What an `http` response must look like to count as READY rather than merely alive. `any` (default) accepts any 2xx/3xx; `json` requires a JSON body; `json-key` additionally requires one of `expectKeys` at the top level. Use it so an HTML page or a half-loaded engine cannot pass as ready."
+        },
+        "expectKeys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Top-level JSON keys, at least one of which must be present when `expect` is `json-key`."
+        }
       }
     },
     "host": {

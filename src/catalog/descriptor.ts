@@ -61,6 +61,18 @@ export const ADAPTER_KINDS = [
   'three_d',
   /** A command-line program invoked per request with a staged input directory. */
   'cli',
+  /**
+   * A remote backend reached through a host plugin's own tool (a subscription
+   * integration, say), rather than through an engine the hub starts.
+   *
+   * The hub deliberately knows nothing about *which* backend: the adapter for
+   * this kind is registered by the plugin that owns the credential, session, and
+   * transport, and it resolves the exact backend from the descriptor. What this
+   * kind buys the hub is an honest distinction — a subscription option has no
+   * local process, no GPU footprint, and no launch command, so nothing in the
+   * runtime manager may try to start one or measure it against this machine.
+   */
+  'subscription',
 ] as const;
 
 /** One supported integration kind. */
@@ -99,6 +111,29 @@ export interface HealthCheckSpec {
   readonly args?: readonly string[];
   /** Per-attempt timeout in milliseconds. Defaults to 2000. */
   readonly timeoutMs?: number;
+  /**
+   * What the `http` response must actually look like to count as ready.
+   *
+   * A bare 2xx is a *liveness* answer, not a readiness one, and treating it as
+   * both is a real bug: a half-loaded engine, a reverse proxy, or any local web
+   * page can answer 200 while the engine is not yet able to serve work. This
+   * project already shipped that mistake once — an HTML index page counted as
+   * "ComfyUI is ready" — so an operator can now demand the shape of a real
+   * answer.
+   *
+   * - `any` (or omitted): any 2xx/3xx counts. The historical behaviour, correct
+   *   for a route that is itself the readiness proof.
+   * - `json`: the body must parse as JSON. An HTML error page is not readiness.
+   * - `json-key`: the body must parse as JSON *and* carry at least one of
+   *   {@link expectKeys} at the top level — `/system_stats` really answering
+   *   `{"system": …}` rather than a captive portal's `{}`.
+   *
+   * A body that fails the declared expectation is an unhealthy model with the
+   * observed content described, which is what makes the failure explainable.
+   */
+  readonly expect?: 'any' | 'json' | 'json-key';
+  /** Top-level JSON keys, at least one of which must be present for `json-key`. */
+  readonly expectKeys?: readonly string[];
 }
 
 /**
@@ -818,6 +853,8 @@ function parseHealthSpec(
     command?: string;
     args?: readonly string[];
     timeoutMs?: number;
+    expect?: 'any' | 'json' | 'json-key';
+    expectKeys?: readonly string[];
   } = { kind };
   const healthPath = readOptionalString(raw, 'path', path, collector);
   if (healthPath !== undefined) spec.path = healthPath;
@@ -827,8 +864,18 @@ function parseHealthSpec(
   if (args !== undefined) spec.args = args;
   const timeoutMs = readOptionalNumber(raw, 'timeoutMs', path, collector);
   if (timeoutMs !== undefined) spec.timeoutMs = timeoutMs;
+  const expect = readOptionalEnum(raw, 'expect', ['any', 'json', 'json-key'] as const, path, collector);
+  if (expect !== undefined) spec.expect = expect;
+  const expectKeys = readOptionalStringArray(raw, 'expectKeys', path, collector);
+  if (expectKeys !== undefined) spec.expectKeys = expectKeys;
   if (kind === 'command' && command === undefined) {
     collector.add(`${path}.command`, 'is required for a command health check');
+  }
+  if (spec.expect === 'json-key' && (spec.expectKeys === undefined || spec.expectKeys.length === 0)) {
+    collector.add(`${path}.expectKeys`, 'is required when `expect` is "json-key"');
+  }
+  if (spec.expect !== undefined && spec.expect !== 'any' && kind !== 'http') {
+    collector.add(`${path}.expect`, 'only applies to an http health check');
   }
   return spec;
 }
@@ -1157,6 +1204,11 @@ export function resolveDescriptor(
 
 /**
  * Merge a descriptor's lifecycle with its host's, applying defaults.
+ *
+ * A `subscription` model inherits nothing startable, whatever host it names: its
+ * backend runs on someone else's machine, so there is no process for this hub to
+ * supervise and no default local-engine launch command it may be handed.
+ *
  * @param descriptor - the model as written.
  * @param host - its host, when any.
  * @returns the fully-defaulted lifecycle.
@@ -1166,7 +1218,8 @@ function resolveLifecycle(
   host: ModelHost | undefined,
 ): ResolvedModel['lifecycle'] {
   const own = descriptor.lifecycle;
-  const inherited = host?.lifecycle;
+  const isRemote = descriptor.adapter === 'subscription' || descriptor.runtime?.adapter === 'subscription';
+  const inherited = isRemote ? undefined : host?.lifecycle;
   const startable = own?.startable ?? inherited?.startable ?? false;
   const stoppable = own?.stoppable ?? inherited?.stoppable ?? startable;
   const start = own?.start ?? inherited?.start;
@@ -1212,12 +1265,12 @@ function defaultHealthFor(adapter: AdapterKind): HealthCheckSpec {
       // ComfyUI answers `/system_stats` cheaply and without touching a model.
       return { kind: 'http', path: '/system_stats', timeoutMs: DEFAULTS.healthTimeoutMs };
     case 'three_d':
+    case 'subscription':
       // `none` here means "ask the adapter", not "assume healthy" — see the
-      // runtime manager's `runHealthCheck`. That is deliberate: a 3D engine's
-      // liveness proof is its Gradio API-description document, and which route
-      // that lives on depends on the Gradio version and on any mount prefix, so
-      // the adapter probes it. A descriptor that states `health.path` explicitly
-      // overrides this and gets a plain HTTP check instead.
+      // runtime manager's `runHealthCheck`. That is deliberate for both: a 3D
+      // engine's liveness proof is its Gradio API-description document, and a
+      // subscription backend's is the owning plugin's usable login. Neither is a
+      // port on this machine, so neither has an HTTP route the hub could guess.
       return { kind: 'none' };
     case 'cli':
     case 'mock':

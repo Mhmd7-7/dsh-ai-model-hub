@@ -85,6 +85,24 @@ export interface AdapterInvocation {
   readonly signal: AbortSignal;
   /** Diagnostics sink. */
   readonly log: AdapterLogger;
+  /**
+   * Report that the work can no longer be called off.
+   *
+   * An adapter calls this the moment it has handed the request to an engine that
+   * will keep going without it — after POSTing a graph to ComfyUI's queue, after
+   * an image request is on the wire. From that point a timeout or a disconnect
+   * leaves a question this process cannot answer: did the work complete? The hub
+   * then reports an *unresolved* outcome instead of failing over, because
+   * generating again could double-render or double-charge.
+   *
+   * Omitting the call is not the same as calling it with nothing: it says the
+   * work was never submitted, so a failure before this point is a clean failure
+   * and the next permitted option may be tried.
+   *
+   * @param jobIds - identifiers that can be used to look the work up later: a
+   *   provider request id, a ComfyUI `prompt_id`, a job name.
+   */
+  readonly onSubmit?: (jobIds?: Readonly<Record<string, string>>) => void;
 }
 
 /** What an adapter returns on success. */

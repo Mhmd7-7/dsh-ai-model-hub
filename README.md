@@ -456,6 +456,134 @@ config:
 The directory is a source of workflows only — nothing in it enumerates weights or
 custom nodes.
 
+### Capability priorities: order and enablement you own
+
+Below the inventory, the same page carries a **Capability priorities** editor. One
+list per capability, containing every option that genuinely declares it — local
+models, ComfyUI workflows, and subscription backends in the *same* list, because to
+the hub they are the same kind of thing: a way to serve a capability.
+
+Three facts about an option are deliberately kept apart, and confusing them is the
+failure this section exists to prevent:
+
+| Fact | Where it lives | What it means |
+|---|---|---|
+| **Enabled / Disabled** | The policy you save | *May* this option serve this capability |
+| **Position** | The policy you save | *When* it is tried, relative to the others |
+| **State** | The live runtime | *Is* it usable right now — `ready`, `stopped`, `starting`, `unhealthy`, `unavailable`, `unsupported` |
+
+So "disabled" is not "stopped", and "lower priority" is not "unavailable":
+
+- A **disabled** option stays visible, marked `Disabled`, keeps its position, and is
+  **never run** — not as a first choice and not as a fallback — and its engine is
+  never started for it. Only you can change that.
+- A **stopped but enabled and startable** local engine keeps its saved place and is
+  started on demand. It is *not* demoted behind a remote backend that merely happens
+  to be warm right now.
+- A **lower-priority** option runs only after every higher-ranked permitted option
+  has definitively failed.
+- **Global disable wins over everything.** It is one switch, and it overrides every
+  per-capability setting.
+
+Reordering is real drag-and-drop — and every row also has **Move up**, **Move down**,
+**Move to top** and **Move to bottom** buttons with accessible names, so the list is
+not mouse-only. Nothing is written until **Save**; **Cancel** reverts to the saved
+policy. That matters for a list whose whole point is an arrangement: a drag that
+saved immediately would make a mistake irreversible.
+
+The policy is persisted as its own versioned document, keyed by **stable ids**
+(never display names), at `~/.dsh/plugins/dsh-ai-model-hub/capability-policy.json` —
+override it with `policyPath`. It survives reloads, restarts, and catalog refreshes,
+and an option that is temporarily undiscovered **keeps its saved settings** rather
+than being forgotten.
+
+**Nothing new activates itself.** A newly discovered option — a pulled Ollama model,
+a workflow saved in ComfyUI, a subscription backend a plugin just registered —
+appears in the list immediately, **disabled**, and stays that way until you enable
+it. Catalog presence, a descriptor's own `enabled` flag, and visibility in a picker
+are not authorization. Options that were already configured when the plugin loaded
+keep working exactly as they did, so the feature is a no-op on an existing
+deployment until you touch it.
+
+#### How a request is served
+
+For every request, in order:
+
+1. Inputs are resolved and validated against the artifact store.
+2. Global enablement, then the capability's own enablement, are applied.
+3. Your saved order decides the sequence.
+4. Compatibility and live readiness are checked — **without demoting a startable
+   stopped engine**.
+5. A permitted local engine is made ready: a warm one is reused, a startup already in
+   progress is joined rather than duplicated, and a cold one is started with its
+   configured command. The **readiness check** gates the submission — process
+   creation or an open port alone is not enough.
+6. The request is dispatched to that **exact** backend and no other.
+7. On an eligible definitive failure, the next permitted compatible option is tried.
+8. When the permitted list is exhausted, the hub stops and reports every reason.
+
+There is **no attempt cap by default**: a saved order of ten options really is ten
+attempts. A deployment that needs a smaller budget sets `attemptBudget`, and the
+failure message then says how many options went untried rather than implying they
+failed.
+
+#### Readiness, not liveness
+
+A bare `2xx` proves that *something* is listening. It does not prove the engine can
+serve work — a half-loaded engine or any local web page answers `200` too, and this
+project has been bitten by exactly that. A health check may therefore demand the
+shape of a real answer:
+
+```json
+"health": {
+  "kind": "http",
+  "path": "/system_stats",
+  "expect": "json-key",
+  "expectKeys": ["system", "devices"]
+}
+```
+
+`any` (the default) keeps the historical permissive behaviour; `json` requires a JSON
+body; `json-key` additionally requires one of `expectKeys` at the top level. A body
+that fails the expectation is an **unhealthy** model with the observed content in the
+reason. The shipped catalog uses this for ComfyUI (`/system_stats`) and Ollama
+(`/api/tags`).
+
+#### Turning automatic startup on or off
+
+Automatic local-engine startup is the deployment-level `allowProcessLaunch` switch,
+and it has always been the one place to decide it — once, not per request:
+
+```yaml
+config:
+  allowProcessLaunch: true    # the hub may start an engine its catalog declares startable
+```
+
+Both halves must agree: the descriptor declares `lifecycle.startable: true` with a
+`start` command, *and* the deployment opts in. With launching off, an engine that is
+merely stopped is reported as **not startable by the hub** with that as the reason —
+never launched anyway, and never confused with a failed launch. See
+[`docs/security.md`](docs/security.md) before enabling it.
+
+#### Seeing what happened
+
+`invoke_model` reports the requested capability, the **policy revision** that decided
+it, the ordered list of permitted options, everything that was skipped with the
+switch or fact that skipped it, and how each attempt turned out — distinguishing
+**launch forbidden**, **stopped**, **startup failed**, and **generation failed** by
+the stage it failed at. That is reported on success too: "why did this run on the
+second option?" is answered by the first option's reason, not by a log hunt.
+
+#### If the outcome cannot be determined
+
+A timeout or a dropped connection **after** the request reached the backend leaves a
+question this process cannot answer: did it generate? The hub refuses to guess. It
+reports an explicit **unresolved** outcome, with any identifiers that can be used to
+look the work up, and does **not** fall back — because generating again could
+double-charge a subscription or repeat a three-minute render. A refusal the backend
+*stated* (quota, a login problem, a `4xx`) is a definitive "no", and the plan moves
+on as usual.
+
 ### Pointing the hub at your engines
 
 The shipped catalog ([`config/models.json`](config/models.json)) declares two real

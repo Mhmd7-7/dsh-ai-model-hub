@@ -289,6 +289,81 @@ would make the hub useless on a machine where nothing runs until asked. Set
 **Ordering** is a single numeric score — currently `priority`. The scoring lives
 in one function that cannot name a model, which is what keeps the rule honest.
 
+## The capability policy — permission, order, and readiness are three things
+
+The router answers "which model is best for this request?". It does not answer
+"may I use this at all?" or "which do I prefer?", and pretending those are the
+same question is the bug `src/policy/capability-policy.ts` exists to prevent.
+
+| Question | Answered by | Vocabulary |
+|---|---|---|
+| May this option serve this capability? | the saved policy | `enabled` / `disabled` |
+| When should it be tried? | the saved policy | position in `order` |
+| Is it usable *right now*? | the runtime manager | `ready`, `stopped`, `starting`, `unhealthy`, `unavailable`, `unsupported` |
+
+Keeping them apart has consequences that are load-bearing rather than cosmetic:
+
+- A **disabled** option is never run — not as a first choice, never as a fallback,
+  and its engine is never launched for it. It stays in the plan, visible, in its
+  saved position, so re-enabling it restores the arrangement.
+- A **stopped but startable** option keeps its rank. Readiness does not reorder:
+  a cold local engine is not demoted behind a warm remote backend.
+- An option the operator has **never arranged** falls back to the router's own
+  ranking, so a deployment that has never opened the settings page behaves exactly
+  as it did before the policy existed. One that has been arranged follows the
+  saved order, and only the unsaved entries fall through to the router.
+
+`CapabilityPolicy.plan()` is pure and synchronous: it reads the catalog and the
+runtime's already-computed status and makes no network calls, so it is cheap
+enough to run per request and identical in tests and production. Live state comes
+in through two narrow seams — a `PolicyRuntimeView` for catalog models and an
+`extraRuntime` map for options that are not models at all.
+
+### Options that are not models
+
+A subscription backend is a way to serve a capability, so it belongs in the same
+ordered list — but it has no process, no endpoint, and no place in `models.json`.
+`CapabilityOption` is that shape: facts for the policy, a `status()` for
+readiness, and an `invoke()` that does the work. The hub supplies ordering,
+enablement, compatibility filtering, fallback, and the artifact contract; the
+owning plugin supplies the transport, because credentials and sessions belong to
+it.
+
+That is how "ChatGPT Images, then Grok Images, then a local workflow" is one saved
+order rather than a chain of prompt instructions. It is also why a remote option
+never inherits this machine's GPU or VRAM budget, and why `subscription` is its
+own adapter kind with no local lifecycle.
+
+### Where the policy lives, and what it refuses to assume
+
+The document is versioned, validated on read, and written atomically. A document
+this build does not understand is **refused** rather than half-enforced: honouring
+a policy whose unknown field might have been the one that disabled something is
+worse than saying so.
+
+Nothing activates itself. A newly discovered option is seeded **disabled**, and
+the default rule is injected rather than inferred — `CatalogBaselineDefaults`
+covers options that existed when the deployment loaded, so an existing
+configuration keeps working while a discovery pass, a probe, or a catalog refresh
+cannot switch on an integration nobody authorized.
+
+### Enforcement at the execution boundary
+
+A policy that only governs `invoke_model` is not a policy, because an agent whose
+routed request was refused can call the underlying tool directly. So the same
+policy is enforced on the tool pipeline through a **guard** — the registry's
+monotonic denial layer, which runs after every extensible pre-execute listener and
+immediately before the tool body, and which no listener can override back to
+permission. Two rules follow from where it sits:
+
+- A call to a tool that can choose its own provider **names no backend**, so it
+  cannot be checked, so it is refused. The provider's own internal fallback runs
+  past the guard, and "let the tool decide" is exactly the behaviour a policy
+  switch turns off.
+- The option a call would run is derived from what it will actually *do* — a call
+  carrying reference images runs the *edit* option, judged against
+  `image_to_image`'s policy, not `text_to_image`'s. Two switches stay independent.
+
 ## Failure handling
 
 Failures are typed, coded, and actionable. `ModelHubError.code` is stable and
@@ -297,16 +372,39 @@ safe to branch on; the message is for humans and for the model.
 | Situation | Code | What happens |
 |---|---|---|
 | Nothing serves the capability | `NO_COMPATIBLE_MODEL` | Every candidate's rejection reason is listed |
+| Every option is switched off | `POLICY_DISABLED` | Names the switch and where to flip it; never retried |
 | Model is stopped and not startable | `MODEL_UNAVAILABLE` | Names the expected endpoint |
+| No launch command is configured | `LIFECYCLE_UNSUPPORTED` | Says so rather than implying the engine is broken |
 | Model needs more than the machine has | `INSUFFICIENT_RESOURCES` | Reports the shortfall |
-| Engine failed to load | `START_FAILED` | Includes the engine's stderr |
-| Invocation exceeded its budget | `INVOCATION_TIMEOUT` | — |
-| Caller cancelled | `INVOCATION_ABORTED` | Never retried on another model |
-| A model failed mid-workflow | — | Falls back to the next eligible candidate from the *same* deterministic decision |
+| Engine failed to load | `START_FAILED` | Includes the engine's stderr, or the readiness budget it exceeded |
+| Invocation exceeded its budget | `INVOCATION_TIMEOUT` | Unresolved if it happened after submission |
+| Caller cancelled | `INVOCATION_ABORTED` | Never retried on another option |
+| A model failed mid-workflow | — | Falls back to the next *permitted* option, in the saved order |
 
-Fallback breadth is bounded by the catalog, not by a constant: the candidate
-order comes from one routing decision, so a fallback is as reproducible as the
-primary choice. A cancellation is the caller's decision and is never retried.
+The permitted order is walked **in full**. There is no attempt cap by default:
+"stop after three" is indistinguishable from "every option failed" to whoever
+reads the result, and it silently skips options the operator explicitly ranked. A
+deployment that sets `attemptBudget` gets a message that says how many options
+went untried *because of it* — a limitation of the plan, not a model failure.
+
+### Readiness, and the difference from liveness
+
+A `2xx` proves something is listening. It does not prove the engine can serve
+work: a half-loaded engine and any local web page answer `200`. A descriptor may
+therefore declare `health.expect` — `json` or `json-key` with `expectKeys` — and a
+body that fails it is **unhealthy**, with the observed content in the reason. This
+is enforced where it matters: `awaitHealthOnStart` gates the *submission*, so a
+cold start cannot dispatch into an engine that is not ready yet.
+
+### Post-submission ambiguity
+
+An adapter calls `onSubmit()` the moment the work passes beyond recall. From that
+point a timeout or a disconnect produces an explicit **unresolved** outcome
+instead of a retry: the first backend may well have completed, and generating
+again could double-charge a subscription or repeat a three-minute render. The
+result carries whatever identifiers can be used to look the work up. A refusal the
+backend *stated* — quota, authentication, a `4xx` — is a definitive "no", and the
+plan continues normally.
 
 ## Extensibility: three levels of change
 
@@ -334,6 +432,8 @@ upgrade.
 |---|---|---|
 | `name` / `inject` / `apply` / `Config` | plugin registration (Loader contract) | `dsh-plugin/index.ts` |
 | `ctx.tools.register` | exposing capability tools to the model | `dsh-plugin/tools/*` |
+| `ctx.tools.guard` | enforcing the capability policy on direct tool calls | `dsh-plugin/subscription/enforcement.ts` |
+| `ctx.tools.execute` | dispatching to another plugin's tool through the real pipeline | `dsh-plugin/subscription/index.ts` |
 | `ctx.systemPrompt.context` | a dynamic snapshot of available capabilities | `dsh-plugin/index.ts` |
 | `ctx.logger` | diagnostics | `dsh-plugin/index.ts` |
 | `ctx.effect` | disposing the hub — and every process it started — with the plugin | `dsh-plugin/index.ts` |
