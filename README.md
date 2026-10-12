@@ -458,10 +458,25 @@ custom nodes.
 
 ### Capability priorities: order and enablement you own
 
-Below the inventory, the same page carries a **Capability priorities** editor. One
-list per capability, containing every option that genuinely declares it — local
-models, ComfyUI workflows, and subscription backends in the *same* list, because to
-the hub they are the same kind of thing: a way to serve a capability.
+Open **Settings → Local models**, then use the **Edit priorities** button at the
+top left or the **Priorities** tab. The **Inventory** tab stays mounted alongside
+the editor, so switching views or rescanning does not discard an unsaved draft.
+
+The editor uses responsive cards, human-readable capability names, provider
+search, and **All / With options / Enabled** filters. Search matches capabilities
+and their providers; it keeps each matching capability's full ordered list visible
+so filtering never changes the meaning of a rank. Technical status and the policy
+file are available in expandable details, and **Save / Cancel** stay reachable in
+a sticky action bar. Light and dark colors follow the host theme.
+
+Each capability contains every option that genuinely declares it — local models,
+ComfyUI workflows, and subscription backends in the *same* list, because to the hub
+they are the same kind of thing: a way to serve a capability.
+
+On hosts that only report effective enablement while globally disabled, individual
+editing is paused rather than guessing at saved permissions. Enable and save the
+global switch to edit those options. Simply opening this page, switching tabs, or
+changing filters never changes the policy or starts a model.
 
 Three facts about an option are deliberately kept apart, and confusing them is the
 failure this section exists to prevent:

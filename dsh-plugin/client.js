@@ -44,9 +44,126 @@ window.__ModuleLoader__.load({
       secondary: 'var(--dsw-alias-label-secondary)',
       tertiary: 'var(--dsw-alias-label-tertiary)',
       border: 'var(--dsw-alias-border-l2)',
-      ok: 'var(--dsw-alias-state-ok-primary)',
+      ok: 'var(--dsw-alias-state-success-primary, #438368)',
       error: 'var(--dsw-alias-state-error-primary)',
     };
+
+    // Scoped to this page. Theme tokens follow DSH's light/dark theme; no fonts,
+    // images, or stylesheet requests leave the browser.
+    const STYLES = `
+      /* The accent is deliberately a fixed green rather than a host token: the
+         primary button puts white text on it, and the host's success colour is a
+         bright green that does not carry white text at an accessible contrast in
+         both themes. Everything structural still comes from the host tokens. */
+      .mh-page { --mh-accent: #438368; --mh-surface: var(--dsw-alias-bg-layer-1, rgba(127,127,127,.035)); --mh-soft: rgba(127,127,127,.065); width: 100%; max-width: 1040px; color: var(--dsw-alias-label-primary); font-family: inherit; }
+      .mh-page * { box-sizing: border-box; }
+      .mh-page button, .mh-page input { font: inherit; }
+      .mh-page button:focus-visible, .mh-page input:focus-visible, .mh-page summary:focus-visible { outline: 2px solid var(--mh-accent); outline-offset: 3px; }
+      .mh-page [hidden] { display: none !important; }
+      .mh-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+      .mh-mark { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 15px; background: var(--mh-soft); border: 1px solid var(--dsw-alias-border-l2); }
+      .mh-heading { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -.6px; line-height: 1.3; }
+      .mh-subtitle { margin: 5px 0 0; color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 1.6; }
+      .mh-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 7px 13px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--mh-surface); color: var(--dsw-alias-label-primary); font-size: 12px !important; font-weight: 550 !important; cursor: pointer; transition: background .15s, border-color .15s; }
+      .mh-button:hover:not(:disabled) { background: var(--mh-soft); border-color: var(--dsw-alias-label-tertiary); }
+      .mh-button:disabled { opacity: .45; cursor: not-allowed; }
+      .mh-button-primary { background: var(--mh-accent); color: #fff; border-color: var(--mh-accent); }
+      .mh-button-primary:hover:not(:disabled) { background: var(--mh-accent); filter: brightness(1.08); }
+      .mh-tabs { display: flex; gap: 5px; padding: 5px; width: fit-content; max-width: 100%; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--mh-soft); margin-bottom: 24px; }
+      .mh-tab { display: inline-flex; gap: 8px; align-items: center; padding: 9px 14px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 13px !important; }
+      .mh-tab[aria-selected=true] { background: var(--mh-surface); color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); box-shadow: 0 2px 5px rgba(0,0,0,.035); }
+      .mh-editor { display: flex; flex-direction: column; gap: 18px; }
+      .mh-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      .mh-section-heading h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.3px; }
+      .mh-section-heading p { margin: 6px 0 0; font-size: 13px; color: var(--dsw-alias-label-secondary); line-height: 1.6; }
+      .mh-panel { border: 1px solid var(--dsw-alias-border-l2); border-radius: 16px; padding: 18px; background: var(--mh-surface); }
+      .mh-global { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; }
+      .mh-global-copy { flex: 1; min-width: 180px; }
+      .mh-global-title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 14px; font-weight: 600; }
+      .mh-global p { margin: 7px 0 0; font-size: 12px; line-height: 1.65; color: var(--dsw-alias-label-secondary); max-width: 650px; }
+      .mh-global-icon { display: grid; place-items: center; width: 42px; height: 42px; flex-shrink: 0; border-radius: 12px; background: var(--mh-soft); color: var(--dsw-alias-label-secondary); }
+      .mh-help { font-size: 12px; line-height: 1.7; color: var(--dsw-alias-label-secondary); }
+      .mh-help summary { cursor: pointer; width: fit-content; font-weight: 550; color: var(--dsw-alias-label-primary); }
+      .mh-help p { margin: 10px 0 0; }
+      .mh-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .mh-search { display: flex; align-items: center; gap: 9px; flex: 1; min-width: min(240px, 100%); min-height: 38px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; padding: 0 12px; color: var(--dsw-alias-label-tertiary); background: var(--mh-surface); }
+      .mh-search input { width: 100%; min-width: 0; background: transparent; border: 0; padding: 10px 0; font-size: 12px; color: var(--dsw-alias-label-primary); }
+      .mh-filter { display: flex; flex-wrap: wrap; gap: 5px; }
+      .mh-filter button[aria-pressed=true] { background: var(--mh-soft); border-color: var(--mh-accent); }
+      .mh-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+      .mh-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 14px; align-items: start; }
+      .mh-card { overflow: hidden; border: 1px solid var(--dsw-alias-border-l2); border-radius: 16px; background: var(--mh-surface); }
+      .mh-card-head { display: flex; gap: 12px; align-items: flex-start; padding: 17px; }
+      .mh-cap-icon { width: 36px; height: 36px; border-radius: 10px; background: var(--mh-soft); display: grid; place-items: center; flex-shrink: 0; color: var(--mh-accent); }
+      .mh-card-title { margin: 0; font-size: 14px; line-height: 1.4; font-weight: 600; }
+      .mh-card-code { margin-top: 3px; color: var(--dsw-alias-label-tertiary); font-size: 10px; font-family: ${MONO}; overflow-wrap: anywhere; }
+      .mh-card-meta { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; padding: 0 17px 13px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+      .mh-options { display: flex; flex-direction: column; gap: 8px; padding: 0 10px 10px; }
+      .mh-option { border: 1px solid var(--dsw-alias-border-l2); border-radius: 11px; padding: 12px; background: var(--mh-soft); }
+      .mh-option-dragging { border-color: var(--mh-accent); opacity: .65; }
+      .mh-option-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+      .mh-rank { display: inline-flex; align-items: center; gap: 5px; color: var(--dsw-alias-label-tertiary); font-size: 11px; min-width: 30px; }
+      .mh-option-name { flex: 1; min-width: 100px; font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+      .mh-option-source { margin: 9px 0 0; font-size: 11px; color: var(--dsw-alias-label-secondary); line-height: 1.6; overflow-wrap: anywhere; }
+      .mh-option-controls { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 11px; }
+      .mh-move { width: 28px; height: 28px; padding: 0; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--mh-surface); color: var(--dsw-alias-label-secondary); font-size: 13px !important; cursor: pointer; }
+      .mh-move:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--mh-accent); }
+      .mh-move:disabled { opacity: .3; cursor: not-allowed; }
+      .mh-option-details { margin-top: 9px; font-size: 11px; color: var(--dsw-alias-label-secondary); line-height: 1.65; }
+      .mh-option-details summary { cursor: pointer; color: var(--dsw-alias-label-tertiary); }
+      .mh-option-details p { margin: 7px 0 0; overflow-wrap: anywhere; }
+      .mh-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 0; border: 0; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px !important; cursor: pointer; }
+      .mh-toggle:disabled { cursor: not-allowed; opacity: .5; }
+      .mh-toggle-track { width: 30px; height: 18px; padding: 3px; border-radius: 10px; background: var(--dsw-alias-label-tertiary); display: flex; align-items: center; }
+      .mh-toggle[aria-pressed=true] .mh-toggle-track { background: var(--mh-accent); }
+      .mh-toggle-knob { width: 12px; height: 12px; border-radius: 50%; background: #fff; transform: translateX(0); transition: transform .15s; }
+      .mh-toggle[aria-pressed=true] .mh-toggle-knob { transform: translateX(12px); }
+      .mh-empty { padding: 20px 17px; border-top: 1px dashed var(--dsw-alias-border-l2); font-size: 12px; color: var(--dsw-alias-label-secondary); line-height: 1.7; }
+      .mh-savebar { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border: 1px solid var(--dsw-alias-border-l2); border-radius: 13px; padding: 12px 15px; background: var(--dsw-alias-bg-layer-1, Canvas); box-shadow: 0 5px 20px rgba(0,0,0,.06); }
+      .mh-savebar-copy { font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); flex: 1; min-width: 160px; }
+      .mh-savebar-actions { display: flex; gap: 7px; }
+      .mh-alert { padding: 12px 15px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; font-size: 12px; line-height: 1.7; color: var(--dsw-alias-label-secondary); background: var(--mh-soft); }
+      .mh-alert-error { color: var(--dsw-alias-state-error-primary); }
+      .mh-inventory > section { max-width: none !important; gap: 14px !important; }
+      .mh-inventory > section > div { border-radius: 14px !important; }
+      @media (max-width: 540px) { .mh-heading { font-size: 21px; } .mh-header { gap: 10px; margin-bottom: 18px; } .mh-tab { padding: 8px 10px; } .mh-panel { padding: 14px; } .mh-global-icon { display: none; } .mh-savebar { bottom: 0; } }
+      @media (prefers-reduced-motion: reduce) { .mh-page *, .mh-page *::before, .mh-page *::after { transition: none !important; scroll-behavior: auto !important; } }
+    `;
+
+    const CAPABILITY_LABELS = {
+      text_to_text: ['Text generation', 'text'],
+      text_to_image: ['Image generation', 'image'],
+      image_to_image: ['Image editing', 'image'],
+      text_to_3d: ['Text to 3D', 'box'],
+      image_to_3d: ['Image to 3D', 'box'],
+      audio_generation: ['Audio generation', 'audio'],
+      speech_to_text: ['Speech to text', 'audio'],
+      image_understanding: ['Image understanding', 'eye'],
+      video_generation: ['Video generation', 'video'],
+    };
+
+    function Icon(props) {
+      const paths = {
+        settings: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z',
+        inventory: 'M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z',
+        text: 'M4 5h16 M12 5v14 M8 19h8',
+        image: 'M4 4h16v16H4z M4 16l5-5 4 4 3-3 4 4 M15 8h.01',
+        box: 'M12 3l9 5v8l-9 5-9-5V8z M3 8l9 5 9-5 M12 13v8 M8 5l9 5',
+        audio: 'M5 9v6 M9 5v14 M13 3v18 M17 6v12 M21 9v6',
+        eye: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6',
+        video: 'M3 5h12v14H3z M15 9l6-4v14l-6-4',
+        search: 'M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14 M15 15l6 6',
+        power: 'M12 2v10 M6 5a9 9 0 1 0 12 0',
+        refresh: 'M20 8a9 9 0 1 0 1 7 M20 3v5h-5',
+        save: 'M4 3h13l4 4v14H3V3z M7 3v6h10V3 M7 21v-8h10v8',
+      };
+      return h('svg', {
+        width: props.size || 18, height: props.size || 18, viewBox: '0 0 24 24',
+        fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round',
+        'aria-hidden': true, focusable: false,
+        children: h('path', { d: paths[props.name] || paths.settings }),
+      });
+    }
 
     /** Format a byte count the same way the host does, for engine-reported sizes. */
     function formatBytes(bytes) {
@@ -67,12 +184,11 @@ window.__ModuleLoader__.load({
       const tone = props.tone === 'ok' ? text.ok : props.tone === 'error' ? text.error : text.tertiary;
       return h('span', {
         style: {
-          border: '1px solid ' + (props.tone === 'ok' ? tone : text.border),
-          color: tone,
-          borderRadius: '999px',
-          padding: '1px 8px',
-          fontSize: '11px',
-          whiteSpace: 'nowrap',
+          display: 'inline-flex', alignItems: 'center',
+          border: '1px solid ' + text.border,
+          background: 'rgba(127,127,127,0.045)',
+          color: tone, borderRadius: '999px', padding: '3px 8px',
+          fontSize: '10px', lineHeight: '14px', fontWeight: 500, whiteSpace: 'nowrap',
         },
         children: props.children,
       });
@@ -86,16 +202,7 @@ window.__ModuleLoader__.load({
         onClick: props.onClick,
         disabled: disabled,
         'aria-label': props.ariaLabel,
-        style: {
-          border: '1px solid ' + text.border,
-          background: 'transparent',
-          color: text.primary,
-          borderRadius: '8px',
-          padding: '4px 14px',
-          fontSize: '12px',
-          cursor: disabled ? 'default' : 'pointer',
-          opacity: disabled ? 0.5 : 1,
-        },
+        className: 'mh-button' + (props.primary ? ' mh-button-primary' : ''),
         children: props.children,
       });
     }
@@ -327,6 +434,8 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = useState(false);
       const [notice, setNotice] = useState('');
       const [dragging, setDragging] = useState(null);
+      const [query, setQuery] = useState('');
+      const [filter, setFilter] = useState('all');
 
       const load = useCallback(() => {
         setState((previous) => ({ ...previous, status: previous.payload ? 'refreshing' : 'loading' }));
@@ -352,12 +461,12 @@ window.__ModuleLoader__.load({
       const move = useCallback((capability, from, to) => {
         setDraft((previous) => {
           if (!previous) return previous;
-          const list = previous[capability];
-          if (!list || to < 0 || to >= list.length || from === to) return previous;
+          const list = previous.capabilities[capability];
+          if (!list || from < 0 || from >= list.length || to < 0 || to >= list.length || from === to) return previous;
           const next = list.slice();
           const [item] = next.splice(from, 1);
           next.splice(to, 0, item);
-          return { ...previous, [capability]: next };
+          return { ...previous, capabilities: { ...previous.capabilities, [capability]: next } };
         });
         setDirty(true);
         setNotice('');
@@ -366,11 +475,14 @@ window.__ModuleLoader__.load({
       const toggle = useCallback((capability, id) => {
         setDraft((previous) => {
           if (!previous) return previous;
-          const list = previous[capability];
+          const list = previous.capabilities[capability];
           if (!list) return previous;
           return {
             ...previous,
-            [capability]: list.map((row) => (row.id === id ? { ...row, enabled: !row.enabled } : row)),
+            capabilities: {
+              ...previous.capabilities,
+              [capability]: list.map((row) => (row.id === id ? { ...row, enabled: !row.enabled } : row)),
+            },
           };
         });
         setDirty(true);
@@ -390,7 +502,8 @@ window.__ModuleLoader__.load({
         const globalChanged = draft.globalEnabled !== state.payload.globalEnabled;
         const edits = Object.keys(draft.capabilities).filter((capability) => {
           const before = state.payload.capabilities.find((entry) => entry.capability === capability);
-          const beforeOrder = before ? before.options.map((option) => option.id + ':' + option.enabled) : [];
+          const beforeOrder = before ? before.options.map((option) => option.id + ':' +
+            (typeof option.configuredEnabled === 'boolean' ? option.configuredEnabled : option.enabled)) : [];
           const afterOrder = draft.capabilities[capability].map((row) => row.id + ':' + row.enabled);
           return beforeOrder.join('|') !== afterOrder.join('|');
         });
@@ -447,130 +560,163 @@ window.__ModuleLoader__.load({
 
       const payload = state.payload;
       const capabilities = payload ? payload.capabilities : [];
+      const busy = saving || state.status === 'refreshing' || state.status === 'loading';
+      const globalEnabled = !!(draft && draft.globalEnabled);
+      // Older hosts only expose effective permission while globally disabled.
+      // Do not overwrite an unknown saved permission when reordering on those hosts.
+      const permissionsKnown = !payload || payload.globalEnabled || capabilities.every((entry) =>
+        entry.options.every((option) => typeof option.configuredEnabled === 'boolean'));
+      const needle = query.trim().toLowerCase();
+      const availableCount = capabilities.filter((entry) => entry.options.length > 0).length;
+      const shown = capabilities.filter((entry) => {
+        const rows = draft ? draft.capabilities[entry.capability] || [] : [];
+        if (filter === 'available' && rows.length === 0) return false;
+        if (filter === 'enabled' && !rows.some((row) => row.enabled)) return false;
+        const label = CAPABILITY_LABELS[entry.capability] || [entry.capability];
+        return !needle || [entry.capability, label[0]].concat(rows.map((row) =>
+          [row.name, row.providerLabel, row.id].join(' '))).join(' ').toLowerCase().includes(needle);
+      });
 
       return h('section', {
-        style: { maxWidth: '720px', color: text.primary, display: 'flex', flexDirection: 'column', gap: '8px' },
+        className: 'mh-editor',
+        'aria-label': 'Capability priorities editor',
+        'aria-busy': busy,
         children: [
-          h('h2', {
-            style: { margin: '20px 0 0', fontSize: '16px', fontWeight: 500, lineHeight: '24px' },
-            children: 'Capability priorities',
+          h('div', {
+            className: 'mh-section-heading',
+            children: [
+              h('div', { children: [
+                h('h2', { children: 'Capability priorities' }),
+                h('p', { children: 'Choose what can run. Arrange providers in the order you prefer.' }),
+              ] }),
+              payload ? h(Pill, { tone: dirty ? 'muted' : 'ok', children: dirty ? 'unsaved changes' : 'Saved policy' }) : null,
+            ],
           }),
-          h('p', {
-            style: { margin: 0, fontSize: '14px', color: text.tertiary, lineHeight: '22px' },
-            children:
-              'Which option serves each capability, in what order, and whether it is allowed to at all. ' +
-              'Enabled permits an option to serve this capability. Disabled forbids it: it is never run, not even as a ' +
-              'fallback, and its engine is never started for it. Lower priority means it is tried only after every ' +
-              'higher-ranked permitted option has definitively failed. Stopped means the engine is not running yet — ' +
-              'an enabled, stopped, startable option keeps its place and is started on demand. Nothing new is enabled ' +
-              'until you enable it.',
+          h('details', {
+            className: 'mh-help',
+            children: [
+              h('summary', { children: 'How enablement & priority work' }),
+              h('p', { children:
+                'Enabled permits an option to serve this capability. Disabled forbids it: it is never run, not even as a ' +
+                'fallback, and its engine is never started for it. Lower priority means it is tried only after every ' +
+                'higher-ranked permitted option has definitively failed. Stopped means the engine is not running yet — ' +
+                'an enabled, stopped, startable option keeps its place and is started on demand. Nothing new is enabled ' +
+                'until you enable it.',
+              }),
+            ],
           }),
-
-          state.status === 'error'
-            ? h('div', {
-                style: {
-                  border: '1px solid ' + text.error,
-                  borderRadius: '12px',
-                  padding: '10px 14px',
-                  fontSize: '12px',
-                  color: text.error,
-                  lineHeight: '18px',
-                },
-                children:
-                  'The capability policy could not be read: ' +
-                  state.error +
-                  '. Everything else on this page still works; the model hub keeps routing with the policy already in force.',
-              })
-            : null,
-
-          payload
-            ? h('div', {
-                style: {
-                  border: '1px solid ' + text.border,
-                  borderRadius: '12px',
-                  padding: '10px 14px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '6px',
-                },
+          state.status === 'error' ? h('div', {
+            className: 'mh-alert mh-alert-error', role: 'alert',
+            children: [
+              'The capability policy could not be read: ' + state.error + '. The policy already in force has not changed. ',
+              h(Button, { onClick: load, children: 'Try again' }),
+            ],
+          }) : null,
+          payload ? h('div', {
+            className: 'mh-panel mh-global',
+            children: [
+              h('div', { className: 'mh-global-icon', children: h(Icon, { name: 'power', size: 22 }) }),
+              h('div', {
+                className: 'mh-global-copy',
                 children: [
-                  h('div', {
-                    style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
-                    children: [
-                      h('div', { style: { fontSize: '13px', fontWeight: 500 }, children: 'Global switch' }),
-                      h(Pill, {
-                        tone: draft && draft.globalEnabled ? 'ok' : 'error',
-                        children: draft && draft.globalEnabled ? 'capabilities may run' : 'all disabled',
-                      }),
-                      h(Button, {
-                        onClick: toggleGlobal,
-                        disabled: saving || !draft,
-                        ariaLabel: draft && draft.globalEnabled ? 'Disable every capability' : 'Enable capabilities',
-                        children: draft && draft.globalEnabled ? 'Disable all capabilities' : 'Enable capabilities',
-                      }),
-                      dirty ? h(Pill, { tone: 'muted', children: 'unsaved changes' }) : null,
-                    ],
+                  h('div', { className: 'mh-global-title', children: [
+                    'Global switch',
+                    h(Pill, { tone: globalEnabled ? 'ok' : 'muted', children: globalEnabled ? 'On' : 'All disabled' }),
+                  ] }),
+                  h('p', { children: globalEnabled
+                    ? 'Only permitted options can run. Switching this off pauses every capability without changing your saved order.'
+                    : 'Global disable wins over every per-capability setting: nothing runs, including options you have enabled. Your saved choices remain in place.',
                   }),
-                  h('div', {
-                    style: { fontSize: '12px', color: text.tertiary, lineHeight: '18px' },
-                    children:
-                      'Global disable wins over every per-capability setting: nothing runs, including options you have ' +
-                      'enabled, and every request reports that the global switch is off.',
-                  }),
-                  h(Row, { label: 'policy file', value: payload.policyPath, mono: true }),
-                  h(Row, { label: 'revision', value: String(payload.revision) }),
+                  payload.globalEnabled !== globalEnabled ? h('p', {
+                    children: 'Draft only — the global switch changes when you press Save.',
+                  }) : null,
                 ],
-              })
-            : null,
-
-          payload
-            ? h('div', {
-                style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
-                children: [
-                  button(saving ? 'Saving…' : 'Save', save, saving || !dirty),
-                  button('Cancel', cancel, saving || !dirty),
-                  button(
-                    state.status === 'refreshing' ? 'Reloading…' : 'Reload',
-                    load,
-                    saving || state.status === 'refreshing',
-                  ),
-                  notice
-                    ? h('span', { style: { fontSize: '12px', color: text.tertiary }, children: notice })
-                    : dirty
-                      ? h('span', {
-                          style: { fontSize: '12px', color: text.tertiary },
-                          children: 'Unsaved: press Save to write this order.',
-                        })
-                      : null,
-                ],
-              })
-            : null,
-
-          state.status === 'loading'
-            ? h('div', {
-                style: {
-                  border: '1px solid ' + text.border,
-                  borderRadius: '12px',
-                  padding: '10px 14px',
-                  fontSize: '12px',
-                  color: text.tertiary,
-                },
-                children: 'Reading the capability policy and probing every option…',
-              })
-            : null,
-
-          ...capabilities.map((entry) =>
-            h(CapabilityCard, {
-              key: entry.capability,
-              entry,
+              }),
+              h(Button, {
+                onClick: toggleGlobal, disabled: busy || !draft,
+                ariaLabel: globalEnabled ? 'Disable every capability' : 'Enable capabilities',
+                children: globalEnabled ? 'Disable all capabilities' : 'Enable capabilities',
+              }),
+            ],
+          }) : null,
+          payload && !permissionsKnown ? h('div', {
+            className: 'mh-alert', role: 'status',
+            children: 'This host does not expose saved per-option choices while globally disabled. Enable and save the global switch before editing individual options; existing choices will not be overwritten.',
+          }) : null,
+          payload ? h('div', {
+            className: 'mh-toolbar',
+            children: [
+              h('label', { className: 'mh-search', children: [
+                h(Icon, { name: 'search', size: 16 }),
+                h('input', {
+                  type: 'search', value: query, onChange: (event) => setQuery(event.target.value),
+                  'aria-label': 'Search capabilities and providers', placeholder: 'Search capabilities or providers…',
+                }),
+              ] }),
+              h('div', { className: 'mh-filter', 'aria-label': 'Filter capabilities', children:
+                [['all', 'All'], ['available', 'With options'], ['enabled', 'Enabled']].map(([value, label]) =>
+                  h('button', {
+                    key: value, type: 'button', className: 'mh-button', 'aria-pressed': filter === value,
+                    onClick: () => setFilter(value), children: label,
+                  })),
+              }),
+              h(Button, {
+                onClick: load, disabled: busy || dirty,
+                ariaLabel: 'Reload saved capability policy',
+                children: [h(Icon, { name: 'refresh', size: 15 }), state.status === 'refreshing' ? 'Reloading…' : 'Reload'],
+              }),
+            ],
+          }) : null,
+          payload ? h('div', {
+            className: 'mh-summary', children: [
+              h('span', { children: String(capabilities.length) + ' capabilities' }),
+              h('span', { 'aria-hidden': true, children: '·' }),
+              h('span', { children: String(availableCount) + ' with options' }),
+              h('span', { 'aria-hidden': true, children: '·' }),
+              h('span', { children: globalEnabled ? 'Enabled options keep their saved priority' : 'Execution paused globally' }),
+            ],
+          }) : null,
+          state.status === 'loading' ? h('div', {
+            className: 'mh-alert', role: 'status', children: 'Reading the capability policy and checking option status…',
+          }) : null,
+          h('div', {
+            className: 'mh-grid',
+            children: shown.map((entry) => h(CapabilityCard, {
+              key: entry.capability, entry,
               rows: draft ? draft.capabilities[entry.capability] || [] : [],
-              disabled: saving || !draft,
-              dragging: dragging,
-              onDragStateChange: setDragging,
-              onMove: move,
-              onToggle: toggle,
-            }),
-          ),
+              disabled: busy || !draft || !permissionsKnown,
+              globalEnabled, dragging,
+              onDragStateChange: setDragging, onMove: move, onToggle: toggle,
+            })),
+          }),
+          payload && shown.length === 0 ? h('div', {
+            className: 'mh-alert', role: 'status', children: 'No capabilities match this filter.',
+          }) : null,
+          payload ? h('details', {
+            className: 'mh-help', children: [
+              h('summary', { children: 'Policy file & revision' }),
+              h('div', { style: { marginTop: '10px' }, children: [
+                h(Row, { label: 'policy file', value: payload.policyPath, mono: true }),
+                h(Row, { label: 'revision', value: String(payload.revision) }),
+              ] }),
+            ],
+          }) : null,
+          payload ? h('div', {
+            className: 'mh-savebar',
+            children: [
+              h('div', {
+                className: 'mh-savebar-copy', role: 'status', 'aria-live': 'polite',
+                children: notice || (dirty ? 'Unsaved changes — Save to apply, or Cancel to discard.' : 'Changes are only applied when you press Save.'),
+              }),
+              h('div', { className: 'mh-savebar-actions', children: [
+                button('Cancel', cancel, busy || !dirty),
+                h(Button, {
+                  onClick: save, disabled: busy || !dirty, primary: true,
+                  children: [h(Icon, { name: 'save', size: 15 }), saving ? 'Saving…' : 'Save'],
+                }),
+              ] }),
+            ],
+          }) : null,
         ],
       });
     }
@@ -593,7 +739,9 @@ window.__ModuleLoader__.load({
           reason: option.reason,
           startable: option.startable,
           executable: option.executable,
-          enabled: option.enabled,
+          enabled: typeof option.configuredEnabled === 'boolean' ? option.configuredEnabled : option.enabled,
+          permissionUnknown: !payload.globalEnabled && typeof option.configuredEnabled !== 'boolean',
+          missing: option.missing,
         }));
       }
       return { globalEnabled: payload.globalEnabled, capabilities: capabilities };
@@ -604,62 +752,36 @@ window.__ModuleLoader__.load({
       const entry = props.entry;
       const rows = props.rows;
       const enabledCount = rows.filter((row) => row.enabled).length;
-      return h('div', {
-        style: {
-          border: '1px solid ' + text.border,
-          borderRadius: '12px',
-          padding: '10px 14px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '6px',
-        },
+      const unknown = rows.some((row) => row.permissionUnknown);
+      const label = CAPABILITY_LABELS[entry.capability] || [entry.capability, 'settings'];
+      // Compute the draft display from the edited order, not the stale server plan.
+      const permitted = props.globalEnabled ? rows.filter((row) => row.enabled) : [];
+      return h('article', {
+        className: 'mh-card', 'aria-label': label[0],
         children: [
-          h('div', {
-            style: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' },
-            children: [
-              h('span', {
-                style: { fontFamily: MONO, fontSize: '13px', fontWeight: 500, color: text.primary, userSelect: 'text' },
-                children: entry.capability,
-              }),
-              h('span', {
-                style: { fontSize: '12px', color: text.tertiary },
-                children:
-                  rows.length +
-                  ' option(s) · ' +
-                  enabledCount +
-                  ' enabled · order: ' +
-                  (entry.permitted.length > 0 ? entry.permitted.join(' → ') : 'nothing permitted'),
-              }),
-            ],
+          h('div', { className: 'mh-card-head', children: [
+            h('div', { className: 'mh-cap-icon', children: h(Icon, { name: label[1], size: 20 }) }),
+            h('div', { style: { flex: 1, minWidth: 0 }, children: [
+              h('h3', { className: 'mh-card-title', children: label[0] }),
+              h('div', { className: 'mh-card-code', children: entry.capability }),
+            ] }),
+            h(Pill, { tone: 'muted', children: rows.length ? String(rows.length) + ' options' : 'Unavailable' }),
+          ] }),
+          rows.length ? h('div', { className: 'mh-card-meta', children: [
+            h('span', { children: unknown ? 'Saved choices paused' : String(enabledCount) + ' enabled' }),
+            '·', h('span', { children: !props.globalEnabled ? 'Global switch off' : permitted.length ? 'Top to bottom priority' : 'Nothing permitted' }),
+          ] }) : null,
+          rows.length === 0 ? h('div', {
+            className: 'mh-empty', children: 'No provider is installed for this capability. It stays visible so you can see what is missing.',
+          }) : h('div', {
+            className: 'mh-options',
+            children: rows.map((row, index) => h(PriorityRow, {
+              key: row.id, capability: entry.capability, row, index, count: rows.length,
+              disabled: props.disabled, globalEnabled: props.globalEnabled,
+              dragging: props.dragging, onDragStateChange: props.onDragStateChange,
+              onMove: props.onMove, onToggle: props.onToggle,
+            })),
           }),
-          entry.inputTypes && entry.inputTypes.length > 0
-            ? h(Row, {
-                label: 'accepts',
-                value: entry.inputTypes.join(', ') + '  →  ' + (entry.outputTypes || []).join(', '),
-              })
-            : null,
-          rows.length === 0
-            ? h('div', {
-                style: { fontSize: '12px', color: text.tertiary, lineHeight: '18px' },
-                children: 'Nothing in this deployment declares this capability. It stays listed so the gap is visible.',
-              })
-            : h('div', {
-                style: { display: 'flex', flexDirection: 'column', gap: '4px' },
-                children: rows.map((row, index) =>
-                  h(PriorityRow, {
-                    key: row.id,
-                    capability: entry.capability,
-                    row: row,
-                    index: index,
-                    count: rows.length,
-                    disabled: props.disabled,
-                    dragging: props.dragging,
-                    onDragStateChange: props.onDragStateChange,
-                    onMove: props.onMove,
-                    onToggle: props.onToggle,
-                  }),
-                ),
-              }),
         ],
       });
     }
@@ -676,7 +798,7 @@ window.__ModuleLoader__.load({
     function PriorityRow(props) {
       const row = props.row;
       const capability = props.capability;
-      const dim = row.enabled ? 1 : 0.55;
+      const liveState = !props.globalEnabled ? 'Paused globally' : row.state === 'disabled' && row.enabled ? 'Check after saving' : row.state;
       const stateTone = row.enabled
         ? row.state === 'ready'
           ? 'ok'
@@ -693,17 +815,7 @@ window.__ModuleLoader__.load({
           title: title,
           onClick,
           disabled: disabled === true,
-          style: {
-            border: '1px solid ' + text.border,
-            background: 'transparent',
-            color: text.primary,
-            borderRadius: '6px',
-            padding: '1px 6px',
-            fontSize: '11px',
-            lineHeight: '16px',
-            cursor: disabled === true ? 'default' : 'pointer',
-            opacity: disabled === true ? 0.4 : 1,
-          },
+          className: 'mh-move',
           children: label,
         });
 
@@ -731,76 +843,49 @@ window.__ModuleLoader__.load({
           props.onMove(capability, source.index, props.index);
         },
         'aria-label': row.name + ' — position ' + String(props.index + 1) + ' of ' + String(props.count) + ' for ' + capability,
-        style: {
-          border: '1px solid ' + (isDragging ? text.ok : text.border),
-          borderRadius: '8px',
-          padding: '6px 8px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '3px',
-          background: isDragging ? 'rgba(127,127,127,0.08)' : 'transparent',
-        },
+        className: 'mh-option' + (isDragging ? ' mh-option-dragging' : ''),
         children: [
-          h('div', {
-            style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
-            children: [
-              h('span', {
-                title: 'Drag to reorder',
-                'aria-hidden': 'true',
-                style: { cursor: props.disabled === true ? 'default' : 'grab', color: text.tertiary, fontSize: '13px' },
-                children: '⠿',
-              }),
-              h('span', {
-                style: { fontFamily: MONO, fontSize: '12px', color: text.tertiary, minWidth: '18px' },
-                children: String(props.index + 1) + '.',
-              }),
-              h('span', { style: { fontSize: '13px', color: text.primary, opacity: dim }, children: row.name }),
-              h(Pill, { tone: row.enabled ? 'ok' : 'error', children: row.enabled ? 'Enabled' : 'Disabled' }),
-              h(Pill, { tone: stateTone, children: row.state }),
-              row.missing ? h(Pill, { tone: 'muted', children: 'missing' }) : null,
-            ],
-          }),
-          h(Row, {
-            label: 'source',
-            value: row.providerLabel + ' · ' + row.source + ' · ' + row.type,
-          }),
-          h(Row, {
-            label: 'reason',
-            value: row.reason,
-          }),
-          row.inputTypes && row.inputTypes.length > 0
-            ? h(Row, {
-                label: 'in/out',
-                value: row.inputTypes.join('|') + ' → ' + (row.outputTypes || []).join('|'),
-              })
-            : null,
-          h('div', {
-            style: { display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap' },
-            children: [
-              h('button', {
-                type: 'button',
-                onClick: () => props.onToggle(capability, row.id),
-                disabled: props.disabled === true,
-                'aria-pressed': row.enabled,
-                'aria-label': (row.enabled ? 'Disable ' : 'Enable ') + row.name + ' for ' + capability,
-                style: {
-                  border: '1px solid ' + text.border,
-                  background: 'transparent',
-                  color: row.enabled ? text.error : text.ok,
-                  borderRadius: '6px',
-                  padding: '1px 8px',
-                  fontSize: '11px',
-                  cursor: props.disabled === true ? 'default' : 'pointer',
-                  opacity: props.disabled === true ? 0.5 : 1,
-                },
-                children: row.enabled ? 'Disable' : 'Enable',
-              }),
-              control('↑', 'Move ' + row.name + ' up', () => props.onMove(capability, props.index, props.index - 1), props.disabled === true || props.index === 0),
-              control('↓', 'Move ' + row.name + ' down', () => props.onMove(capability, props.index, props.index + 1), props.disabled === true || props.index === props.count - 1),
-              control('⤒', 'Move ' + row.name + ' to the top', () => props.onMove(capability, props.index, 0), props.disabled === true || props.index === 0),
-              control('⤓', 'Move ' + row.name + ' to the bottom', () => props.onMove(capability, props.index, props.count - 1), props.disabled === true || props.index === props.count - 1),
-            ],
-          }),
+          h('div', { className: 'mh-option-head', children: [
+            h('span', { className: 'mh-rank', children: [
+              h('span', { title: 'Drag to reorder', 'aria-hidden': true,
+                style: { cursor: props.disabled ? 'default' : 'grab', fontSize: '17px' }, children: '⠿' }),
+              String(props.index + 1),
+            ] }),
+            h('span', { className: 'mh-option-name', children: row.name }),
+            row.permissionUnknown ? h(Pill, { tone: 'muted', children: 'Paused' }) : h('button', {
+              className: 'mh-toggle', type: 'button',
+              onClick: () => props.onToggle(capability, row.id), disabled: props.disabled === true,
+              'aria-pressed': row.enabled,
+              'aria-label': (row.enabled ? 'Disable ' : 'Enable ') + row.name + ' for ' + capability,
+              children: [
+                h('span', { className: 'mh-toggle-track', 'aria-hidden': true,
+                  children: h('span', { className: 'mh-toggle-knob' }) }),
+                h('span', { children: row.enabled ? 'Enabled' : 'Disabled' }),
+              ],
+            }),
+          ] }),
+          h('div', { className: 'mh-option-source', children: row.providerLabel + ' · ' + row.source + ' · ' + row.type }),
+          h('div', { className: 'mh-option-controls', children: [
+            h(Pill, { tone: props.globalEnabled ? stateTone : 'muted', children: liveState }),
+            row.startable ? h(Pill, { tone: 'muted', children: 'Starts on demand' }) : null,
+            row.missing ? h(Pill, { tone: 'error', children: 'Missing' }) : null,
+            h('span', { style: { flex: 1 } }),
+            control('↑', 'Move ' + row.name + ' up', () => props.onMove(capability, props.index, props.index - 1), props.disabled === true || props.index === 0),
+            control('↓', 'Move ' + row.name + ' down', () => props.onMove(capability, props.index, props.index + 1), props.disabled === true || props.index === props.count - 1),
+            control('⤒', 'Move ' + row.name + ' to the top', () => props.onMove(capability, props.index, 0), props.disabled === true || props.index === 0),
+            control('⤓', 'Move ' + row.name + ' to the bottom', () => props.onMove(capability, props.index, props.count - 1), props.disabled === true || props.index === props.count - 1),
+          ] }),
+          h('details', { className: 'mh-option-details', children: [
+            h('summary', { children: 'Status & technical details' }),
+            h('div', { style: { marginTop: '8px' }, children: [
+              h(Row, { label: 'source', value: row.providerLabel + ' · ' + row.source + ' · ' + row.type }),
+              h(Row, { label: 'reason', value: row.reason }),
+              h(Row, { label: 'option id', value: row.id, mono: true }),
+              row.inputTypes && row.inputTypes.length ? h(Row, {
+                label: 'in/out', value: row.inputTypes.join(' | ') + ' → ' + (row.outputTypes || []).join(' | '),
+              }) : null,
+            ] }),
+          ] }),
         ],
       });
     }
@@ -825,24 +910,6 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         load('?scan=1');
       }, [load]);
-
-      const button = (label, onClick, disabled) =>
-        h('button', {
-          type: 'button',
-          onClick,
-          disabled: disabled === true,
-          style: {
-            border: '1px solid ' + text.border,
-            background: 'transparent',
-            color: text.primary,
-            borderRadius: '8px',
-            padding: '4px 14px',
-            fontSize: '12px',
-            cursor: disabled === true ? 'default' : 'pointer',
-            opacity: disabled === true ? 0.5 : 1,
-          },
-          children: label,
-        });
 
       const data = state.data;
       const resources = (data && data.resources) || [];
@@ -1141,19 +1208,62 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The settings section: the machine inventory, then the capability policy.
-     *
-     * Two independent components, not one wrapping the other. The inventory is a
-     * report — it re-scans, it is read-only, and nothing in it is remembered. The
-     * priorities editor is a document with unsaved state, and it must keep that
-     * state while the inventory beside it is rescanned. Nesting one inside the
-     * other would make a Scan button throw away a half-finished reorder, because a
-     * parent re-render is a child remount.
+     * Keep both panels mounted: switching tabs or rescanning the inventory must
+     * never discard a half-finished policy draft. Only visibility changes.
      */
     function LocalModelsPage() {
+      const [tab, setTab] = useState('inventory');
+      const selectTab = (value) => {
+        setTab(value);
+        // Keyboard tabs follow the WAI-ARIA roving-tabindex pattern.
+        const target = typeof document !== 'undefined' && document.getElementById('mh-tab-' + value);
+        if (target) target.focus();
+      };
+      const onTabKeyDown = (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        selectTab(event.key === 'Home' ? 'inventory' : event.key === 'End' ? 'priorities' : tab === 'inventory' ? 'priorities' : 'inventory');
+      };
       return h('div', {
-        style: { display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '720px' },
-        children: [h(LocalModelsSection, {}), h(CapabilityPriorities, {})],
+        className: 'mh-page',
+        children: [
+          h('style', { children: STYLES }),
+          h('header', {
+            className: 'mh-header', style: { direction: 'ltr' },
+            children: [
+              h(Button, {
+                onClick: () => selectTab('priorities'), ariaLabel: 'Edit priorities',
+                children: [h(Icon, { name: 'settings', size: 18 }), 'Edit priorities'],
+              }),
+              h('div', { className: 'mh-mark', children: h(Icon, { name: 'box', size: 26 }) }),
+              h('div', { children: [
+                h('h1', { className: 'mh-heading', children: 'Local models' }),
+                h('p', { className: 'mh-subtitle', children: 'Your models, providers, and routing preferences — in one place.' }),
+              ] }),
+            ],
+          }),
+          h('div', {
+            className: 'mh-tabs', role: 'tablist', 'aria-label': 'Local models views',
+            children: [['inventory', 'Inventory', 'inventory'], ['priorities', 'Priorities', 'settings']].map(([value, label, icon]) =>
+              h('button', {
+                key: value, type: 'button', className: 'mh-tab', id: 'mh-tab-' + value,
+                role: 'tab', 'aria-selected': tab === value, 'aria-controls': 'mh-panel-' + value,
+                tabIndex: tab === value ? 0 : -1,
+                onClick: () => setTab(value), onKeyDown: onTabKeyDown,
+                children: [h(Icon, { name: icon, size: 16 }), label],
+              })),
+          }),
+          h('div', {
+            id: 'mh-panel-inventory', className: 'mh-inventory', role: 'tabpanel',
+            'aria-labelledby': 'mh-tab-inventory', hidden: tab !== 'inventory',
+            children: h(LocalModelsSection, {}),
+          }),
+          h('div', {
+            id: 'mh-panel-priorities', role: 'tabpanel',
+            'aria-labelledby': 'mh-tab-priorities', hidden: tab !== 'priorities',
+            children: h(CapabilityPriorities, {}),
+          }),
+        ],
       });
     }
 

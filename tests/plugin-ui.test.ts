@@ -209,6 +209,10 @@ describe('the priorities editor is present and honest', () => {
     assert.match(text, /function CapabilityPriorities\(\)/);
     assert.match(text, /function LocalModelsSection\(\)/);
     assert.match(text, /function LocalModelsPage\(\)/);
-    assert.match(text, /h\(LocalModelsSection, \{\}\), h\(CapabilityPriorities, \{\}\)/);
+    assert.match(text, /children: h\(LocalModelsSection, \{\}\)/);
+    assert.match(text, /children: h\(CapabilityPriorities, \{\}\)/);
+    assert.match(text, /hidden: tab !== 'inventory'/);
+    assert.match(text, /hidden: tab !== 'priorities'/);
+    assert.match(text, /ariaLabel: 'Edit priorities'/);
   });
 });

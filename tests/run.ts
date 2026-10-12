@@ -48,3 +48,4 @@ import './startup.test.ts';
 import './priorities-route.test.ts';
 import './subscription-policy.test.ts';
 import './plugin-ui.test.ts';
+import './client-interactions.test.ts';
