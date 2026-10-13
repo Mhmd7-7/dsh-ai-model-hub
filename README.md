@@ -151,6 +151,57 @@ To remove an installation:
 dsh plugin --profile web remove dsh-ai-model-hub
 ```
 
+### Which DeepSeek Harness versions this runs on
+
+The plugin tracks the DSH `0.x` line rather than a single release:
+
+| | |
+|---|---|
+| **Supported** | `@deepseek-ai/dsh*` `>=0.1.5-rc.2 <0.3.0` |
+| **Developed and tested against** | `0.1.5-rc.2` (this package's own tree) and `0.2.0-rc.2` (a current host) |
+
+Two independent things decide whether that holds, and they fail in different
+places — which is worth knowing, because only one of them is visible in the
+plugin's own logs.
+
+**The manifest gate runs first, before any plugin code.** DSH reads
+`peerDependencies` and refuses the row when a `@deepseek-ai/dsh*` range does not
+match the harness. For a `0.x` version, **caret pins the minor**: `^0.1.5-rc.2`
+means `>=0.1.5-rc.2 <0.2.0`, so it silently refuses every `0.2.x` host. That is
+why the peers here are written as explicit ranges and why
+`tests/peer-range.test.ts` exists — it asserts against the harness's own
+`evaluatePluginCompatibility` when that package is installed, and against a
+written-out range matcher when it is not. The old caret form is demonstrated
+failing in the same file, so it cannot come back unnoticed.
+
+**Then the runtime surface is detected, not assumed.** `dsh-plugin/compat.ts` is
+the only module that touches a host member. It reads the context once, reports
+what it found, and every registration goes through a helper that contains a
+missing or differently-shaped member to one diagnostic line:
+
+| If the host has no… | What is lost | What is **not** lost |
+|---|---|---|
+| `tools` | everything | nothing — the load fails, by name, on purpose |
+| `systemPrompt` | the capability snapshot in the prompt | every tool; the agent can still call `list_capabilities` |
+| `webServer` | the Local models and Priorities pages | every tool |
+| `effect` | stopping the hub's processes on plugin unload | every tool; the effect body is not run at all, because nothing could call its disposer |
+| `skills` | the bundled skill | every tool |
+| `sandboxPolicy` | artifacts in the calling session's workspace | every tool; artifacts fall back to the hub's own store |
+| `get` | nothing | the injected-property path still resolves every optional service |
+| `logger` | host-formatted diagnostics | the diagnostics — they go to the console instead |
+
+`tools` is the one hard requirement. Without a tool registry there is nothing for
+this plugin to do, and a hub the agent cannot reach is worse than an honest
+failure: it produces a settings page and the false impression that the capability
+is available.
+
+Two things are deliberately **not** wrapped. `defineTool`, because it is a pure
+function from a closed input to a closed output whose signature has not moved
+across the whole `0.1.5-rc` → `0.2.0-rc` line. And the `import type` lines, which
+vanish at compile time — a host that renames a type cannot break a running plugin.
+The complete runtime DSH coupling is six value imports: `defineTool`,
+`schemastery`'s default export, and cordis's `Service`.
+
 ### Why the package ships compiled JavaScript
 
 The plugin's sources are TypeScript, and Node runs them directly through type

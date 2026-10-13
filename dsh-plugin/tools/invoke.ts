@@ -16,8 +16,9 @@
  * @module dsh-ai-model-hub/dsh-plugin/tools/invoke
  */
 
-import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Context } from '@deepseek-ai/cordis';
+import { defineTool } from '@deepseek-ai/dsh-tools';
+import { installDefinedTool } from '../compat.ts';
 import type { ModelHubService } from '../service.ts';
 import type { Capability } from '../../src/index.ts';
 import { toHubError } from '../../src/index.ts';
@@ -25,7 +26,7 @@ import { withTimeout } from '../../src/index.ts';
 import { formatArtifact, formatFailure, textBlock } from './support.ts';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
 import type { ArtifactRootResolver } from '../workspace.ts';
-import type { ToolCallScope } from '../types.ts';
+import type { PluginLogger, ToolCallScope } from '../types.ts';
 
 /** How the tool asks for work. Mirrors `InvocationRequest` minus the parts the agent must not set. */
 interface InvokeArgs {
@@ -80,12 +81,17 @@ export function registerInvokeTool(
      * because of it.
      */
     readonly attemptBudget?: number;
+    /** The plugin's logger, used to report a tool this host refuses. */
+    readonly log: PluginLogger;
   },
 ): void {
   const hub = service.hub;
+  const { log } = options;
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'invoke_model',
       description:
         'Run a local AI capability and get the produced artifacts back. ' +
@@ -367,6 +373,7 @@ export function registerInvokeTool(
         }
       },
     }),
+    log,
   );
 }
 

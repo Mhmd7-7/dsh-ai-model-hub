@@ -11,13 +11,22 @@
  * @module dsh-ai-model-hub/dsh-plugin/tools/discovery
  */
 
-import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Context } from '@deepseek-ai/cordis';
+import { defineTool } from '@deepseek-ai/dsh-tools';
+import { installDefinedTool } from '../compat.ts';
 import type { ModelHubService } from '../service.ts';
 import type { Capability } from '../../src/index.ts';
 import { formatArtifact, formatAvailability, formatModel, textBlock, toToolError } from './support.ts';
 import type { ArtifactRootResolver } from '../workspace.ts';
-import type { ToolCallScope } from '../types.ts';
+import type { PluginLogger, ToolCallScope } from '../types.ts';
+
+/** Options every tool-registering function in this module takes. */
+export interface ToolRegistrationOptions {
+  /** Resolves the per-call artifact root, so a listing shows the calling session's artifacts. */
+  readonly artifactRootFor: ArtifactRootResolver;
+  /** The plugin's logger, used to report a tool this host refuses. */
+  readonly log: PluginLogger;
+}
 
 /**
  * Register the read-only discovery tools.
@@ -30,14 +39,17 @@ import type { ToolCallScope } from '../types.ts';
 export function registerDiscoveryTools(
   ctx: Context,
   service: ModelHubService,
-  options: { readonly artifactRootFor: ArtifactRootResolver },
+  options: ToolRegistrationOptions,
 ): void {
   const hub = service.hub;
+  const { log } = options;
 
-  registerRefreshDiscoveryTool(ctx, service);
+  registerRefreshDiscoveryTool(ctx, service, log);
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'list_models',
       description:
         'List the local AI models this machine offers, with their capabilities, live status, and resource requirements. ' +
@@ -134,10 +146,13 @@ export function registerDiscoveryTools(
         };
       },
     }),
+    log,
   );
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'list_capabilities',
       description:
         'List the media and text capabilities this machine can currently serve, which models provide each, and which capabilities have no model at all. ' +
@@ -232,10 +247,13 @@ export function registerDiscoveryTools(
         return { capabilities, unserved };
       },
     }),
+    log,
   );
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'get_model_status',
       description:
         'Report whether specific models are running, healthy, and available, including the reason when one is not. ' +
@@ -360,10 +378,13 @@ export function registerDiscoveryTools(
         }
       },
     }),
+    log,
   );
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'list_artifacts',
       description:
         'List artifacts produced earlier â€” images, 3D meshes, audio, text â€” with their ids. ' +
@@ -417,6 +438,7 @@ export function registerDiscoveryTools(
         };
       },
     }),
+    log,
   );
 }
 
@@ -433,12 +455,15 @@ export function registerDiscoveryTools(
 export function registerRoutingTool(
   ctx: Context,
   service: ModelHubService,
-  options: { readonly artifactRootFor: ArtifactRootResolver },
+  options: ToolRegistrationOptions,
 ): void {
   const hub = service.hub;
+  const { log } = options;
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'explain_routing',
       description:
         'Explain which model would be chosen for a capability and why, considering every candidate that was considered and rejected. ' +
@@ -517,6 +542,7 @@ export function registerRoutingTool(
         }
       },
     }),
+    log,
   );
 }
 
@@ -536,12 +562,15 @@ export { formatAvailability, formatModel };
  *
  * @param ctx - the context whose `tools` registry receives it.
  * @param service - the hub service to refresh.
+ * @param log - the plugin's logger, used to report a tool this host refuses.
  */
-export function registerRefreshDiscoveryTool(ctx: Context, service: ModelHubService): void {
+export function registerRefreshDiscoveryTool(ctx: Context, service: ModelHubService, log: PluginLogger): void {
   const hub = service.hub;
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'refresh_model_discovery',
       description:
         'Re-read every configured model engine and republish the catalog, so models installed since the last check ' +
@@ -617,5 +646,6 @@ export function registerRefreshDiscoveryTool(ctx: Context, service: ModelHubServ
         };
       },
     }),
+    log,
   );
 }

@@ -12,6 +12,11 @@
  * the `describe`/`it` registrations from these imports and runs them in-process,
  * so resolution happens from a real file inside the package.
  *
+ * That last property is what makes `compat.test.ts` and `peer-range.test.ts`
+ * meaningful. Both assert on which copy of a DSH package this package *resolves*,
+ * and a bare specifier resolved from another directory would answer about a
+ * different copy than the one the plugin runs against.
+ *
  * Run it with:
  *
  *   node --test --experimental-test-isolation=none tests/run.ts
@@ -26,6 +31,8 @@ import './router.test.ts';
 import './runtime.test.ts';
 import './integration.test.ts';
 import './plugin.test.ts';
+import './compat.test.ts';
+import './peer-range.test.ts';
 import './skills.test.ts';
 import './inventory.test.ts';
 import './workspace.test.ts';

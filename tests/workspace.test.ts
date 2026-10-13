@@ -224,6 +224,7 @@ describe('resolving the artifact root for a call (plugin)', () => {
     registerInvokeTool(context, new ModelHubService(context, hub), {
       invocationTimeoutMs: 30_000,
       artifactRootFor: resolver,
+      log: logger,
     });
 
     try {

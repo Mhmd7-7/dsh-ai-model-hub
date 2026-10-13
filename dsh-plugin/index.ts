@@ -4,7 +4,7 @@
  * This is the only DSH-aware module in the project, and it is deliberately thin:
  * it loads configuration, constructs the hub, publishes it as a service,
  * registers **generic capability tools**, and binds the hub's lifetime to the
- * plugin fiber. It contains no model knowledge whatsoever Ã¢â‚¬â€ no model id, no
+ * plugin fiber. It contains no model knowledge whatsoever — no model id, no
  * engine name, no launch command, no capability-specific branch.
  *
  * The whole DSH coupling is:
@@ -19,7 +19,7 @@
  * | `ctx.effect`                     | disposing the hub with the plugin           |
  *
  * That list is the entire compatibility surface. If DSH changes one of these,
- * this file changes and nothing else does Ã¢â‚¬â€ the catalog, router, runtime,
+ * this file changes and nothing else does — the catalog, router, runtime,
  * adapters, and artifact store import nothing from DSH and are tested without it.
  *
  * The plugin is a **function plugin with named exports and no default export**:
@@ -34,6 +34,16 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Config as SchemaConfig, resolvePluginConfig } from './config.ts';
 import type { PluginConfig, ResolvedPluginConfig } from './config.ts';
+import {
+  installEffect,
+  installPromptContext,
+  memberVerdict,
+  pluginLogger,
+  reportCompatHost,
+  resolveCompatHost,
+} from './compat.ts';
+import type { CompatHost } from './compat.ts';
+import type { PluginLogger } from './types.ts';
 import { ModelHubService } from './service.ts';
 import { registerInventoryRoute } from './inventory.ts';
 import { registerPrioritiesRoute } from './priorities-route.ts';
@@ -99,7 +109,7 @@ export type Config = PluginConfig;
  *
  * A missing or invalid catalog is contained: by default the plugin logs the
  * problem, registers nothing, and lets DSH boot. An unusable model catalog must
- * never make the agent unusable Ã¢â‚¬â€ the agent can still do everything that does not
+ * never make the agent unusable — the agent can still do everything that does not
  * need a local model.
  *
  * @param ctx - the plugin's context.
@@ -107,7 +117,25 @@ export type Config = PluginConfig;
  */
 export function apply(ctx: Context, rawConfig: PluginConfig): void {
   const config: ResolvedPluginConfig = resolvePluginConfig(rawConfig);
-  const log = ctx.logger('dsh-ai-model-hub');
+  // The host is read before the logger, because a host whose `logger` is missing
+  // must still be able to say so. `pluginLogger` falls back to the console, and
+  // the compatibility report below is the first thing written to it.
+  const log = pluginLogger(ctx, 'dsh-ai-model-hub');
+  const host = resolveCompatHost(ctx);
+  reportCompatHost(host, log);
+
+  // A host with no usable tool registry is the one failure that is not worth
+  // containing: the plugin's entire purpose is to put model tools in front of the
+  // agent, so loading a hub nothing can reach would only produce a settings page
+  // and a false impression that the capability is available.
+  if (!host.complete) {
+    const missing = host.diagnostics.join('; ');
+    throw new ModelHubError(
+      'UNSUPPORTED_OPERATION',
+      `dsh-ai-model-hub cannot load against this DeepSeek Harness build: ${missing}. ` +
+        'The plugin needs a tool registry to register its model tools.',
+    );
+  }
 
   // Offer the hub's own instructions as a skill before anything can fail: the
   // skill is most valuable precisely when the catalog did not load, because it
@@ -150,7 +178,7 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
     );
   } catch (error) {
     const hubError = toHubError(error, 'CONFIG_ERROR');
-    const message = `model hub disabled Ã¢â‚¬â€ ${hubError.code}: ${hubError.message}`;
+    const message = `model hub disabled — ${hubError.code}: ${hubError.message}`;
     if (config.onConfigError === 'throw') throw new ModelHubError(hubError.code, message, hubError.details);
     log.warn(message);
     log.warn(
@@ -192,14 +220,16 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
   void seedPolicy(hub, policyPath, log);
 
   // Bind the hub's lifetime to the plugin fiber. cordis runs disposers in reverse
-  // registration order when the fiber unloads, and awaits async ones Ã¢â‚¬â€ so a
+  // registration order when the fiber unloads, and awaits async ones — so a
   // plugin reload genuinely stops every model process before the new instance
   // starts, rather than racing it for the same port.
-  ctx.effect(
+  installEffect(
+    ctx,
     () => () => {
       void hub.dispose();
     },
     'dsh-ai-model-hub: dispose the model hub and every process it started',
+    log,
   );
 
   // Where a call's artifacts go: the calling session's workspace by default, since
@@ -207,14 +237,15 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
   // says nothing about the conversation's.
   const artifactRootFor = createArtifactRootResolver(ctx, config.artifactRoot, log);
 
-  registerDiscoveryTools(ctx, service, { artifactRootFor });
-  registerRoutingTool(ctx, service, { artifactRootFor });
+  registerDiscoveryTools(ctx, service, { artifactRootFor, log });
+  registerRoutingTool(ctx, service, { artifactRootFor, log });
   registerInvokeTool(ctx, service, {
     invocationTimeoutMs: config.invocationTimeoutMs,
     artifactRootFor,
+    log,
     ...(config.attemptBudget === undefined ? {} : { attemptBudget: config.attemptBudget }),
   });
-  registerLifecycleTools(ctx, service, { allowProcessLaunch: config.allowProcessLaunch });
+  registerLifecycleTools(ctx, service, { allowProcessLaunch: config.allowProcessLaunch, log });
 
   // The human-facing half of the same policy the tools enforce.
   if (policy !== undefined) {
@@ -222,7 +253,7 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
   }
 
   if (config.exposeCapabilityContext) {
-    registerCapabilityContext(ctx, service);
+    registerCapabilityContext(ctx, service, log, host);
   }
 
   // The same facts, for the human: the "Local models" settings page reads a live
@@ -240,7 +271,8 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
 
   // One diagnostic line per invocation, so an operator can see what ran without
   // the hub knowing about logging. This is the only event subscriber.
-  ctx.effect(
+  installEffect(
+    ctx,
     () =>
       hub.onEvent((event) => {
         if (event.type === 'invocation/fellback') {
@@ -251,6 +283,7 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
         }
       }),
     'dsh-ai-model-hub: hub event diagnostics',
+    log,
   );
 
   const unserved = hub.listUnservedCapabilities();
@@ -466,12 +499,26 @@ function buildHub(
  *
  * @param ctx - the plugin context.
  * @param service - the hub service.
+ * @param log - the plugin's logger, for a host that will not name a context order.
+ * @param host - the host observation; `systemPrompt` is only touched when it is usable.
  */
-function registerCapabilityContext(ctx: Context, service: ModelHubService): void {
-  ctx.systemPrompt.context({
-    name: 'dsh-ai-model-hub:capabilities',
-    order: ctx.systemPrompt.getContextOrder('SANDBOX_POLICY') + 1,
-    text: () => {
+function registerCapabilityContext(
+  ctx: Context,
+  service: ModelHubService,
+  log: PluginLogger,
+  host: CompatHost,
+): void {
+  if (memberVerdict(host, 'systemPrompt')?.usable !== true) {
+    // The repository's preference is a contained absence over a thrown error.
+    // This is the one optional feature that notifies the model what exists, so its
+    // loss is stated at the level a missing optional member deserves.
+    log.warn(
+      'the capability snapshot was not registered because this host has no usable `ctx.systemPrompt`, so the model ' +
+        'learns what this machine offers only by calling list_capabilities',
+    );
+    return;
+  }
+  const text = (): string => {
       const capabilities = service.hub.listCapabilities();
       const lines: string[] = [];
       if (capabilities.length === 0) {
@@ -503,6 +550,12 @@ function registerCapabilityContext(ctx: Context, service: ModelHubService): void
         'These models run locally. Use invoke_model with a capability name — do not try to launch model software yourself.',
       );
       return lines.join('\n');
-    },
-  });
+  };
+  installPromptContext(
+    ctx,
+    'dsh-ai-model-hub:capabilities',
+    'SANDBOX_POLICY',
+    text,
+    log,
+  );
 }

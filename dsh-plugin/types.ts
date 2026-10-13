@@ -36,6 +36,48 @@ declare module '@deepseek-ai/cordis' {
      * @returns a disposer that tears the effect down and settles once done.
      */
     effect(execute: () => Effect, label?: string): Disposable<Promise<void>>;
+
+    /**
+     * The host's HTTP route registry, when the composition mounts one.
+     *
+     * Declared **optional on purpose**, and read through
+     * `compat.ts`'s `installRoute` rather than directly. The service belongs to
+     * `@deepseek-ai/dsh-host-webserver`, which this plugin deliberately does not
+     * depend on, so the declaration here is a structural mirror of the one method
+     * the plugin calls. `undefined` is the normal state in a headless or SDK
+     * profile and costs the settings pages, not a tool.
+     */
+    webServer?: {
+      /**
+       * Register one route.
+       * @param route - the exact path and its handler.
+       * @returns the disposer that unregisters the route.
+       */
+      register(route: {
+        kind: 'exact';
+        path: string;
+        handler: (req: never, res: never) => void | Promise<void>;
+      }): () => void;
+    };
+
+    /**
+     * The sandbox policy, when the composition mounts one.
+     *
+     * Optional for the same reason: it is only ever consulted to place a call's
+     * artifacts, so its absence degrades one default (artifacts land in the hub's
+     * own store rather than the calling session's workspace) and never a tool.
+     */
+    sandboxPolicy?: SandboxPolicyService;
+
+    /**
+     * The skill registry, when the composition mounts one.
+     *
+     * Present only where `@deepseek-ai/dsh-skill` is mounted. Declaring it as a
+     * required `inject` would park this plugin's fiber until that service arrives,
+     * which in a profile without it means forever — and the cost of that is every
+     * model tool, spent to offer one skill.
+     */
+    skills?: SkillsService;
   }
 }
 

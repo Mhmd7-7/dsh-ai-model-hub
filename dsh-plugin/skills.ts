@@ -35,6 +35,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
+import { serviceInScope } from './compat.ts';
 import type {
   PluginLogger,
   SkillCandidate,
@@ -131,11 +132,15 @@ export function registerModelHubSkill(
   skillFile: string = SKILL_FILE,
 ): void {
   ctx.inject(['skills'], (scope) => {
-    // Resolved by cordis's inject-aware context proxy, so it is present here; the
-    // cast supplies the declaration DSH publishes only in `@deepseek-ai/dsh-skill`,
-    // which this plugin deliberately does not depend on.
-    const skills = (scope as unknown as { readonly skills?: SkillsService }).skills;
-    if (skills === undefined) return;
+    // Resolved through the compatibility layer, which tries the inject-aware
+    // proxy's own property and `ctx.get` alike; the cast supplies the declaration
+    // DSH publishes only in `@deepseek-ai/dsh-skill`, which this plugin
+    // deliberately does not depend on.
+    const skills = serviceInScope<SkillsService>(scope, 'skills');
+    if (skills === undefined || typeof skills.registerProvider !== 'function') {
+      log.debug('this host exposes no usable skill registry, so the bundled skill is not offered');
+      return;
+    }
     skills.registerProvider(() => createModelHubSkillProvider(log, skillFile));
     log.debug(`offering the bundled skill ${PROVIDER_NAME} from ${skillFile}`);
   });

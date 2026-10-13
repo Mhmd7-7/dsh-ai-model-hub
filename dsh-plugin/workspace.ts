@@ -28,6 +28,7 @@
 
 import { isAbsolute, join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
+import { optionalService, sessionCwdOf as readSessionCwd } from './compat.ts';
 import type { PluginLogger, SandboxPolicyService, ToolCallScope } from './types.ts';
 
 /** The subdirectory artifacts land in, under a workspace. */
@@ -46,13 +47,15 @@ export interface ArtifactRootResolver {
 /**
  * Read the calling session's workspace out of a run context.
  *
+ * A re-export of the compatibility layer's guarded read rather than a second
+ * optional-chain: `runContext` is host data crossing into plugin code, and a host
+ * that reported a session as a string rather than an object would make
+ * `?.agent?.session?.cwd` throw inside a tool call. The guard checks each link.
+ *
  * @param runContext - the tool call's run context.
  * @returns the absolute session cwd, when the call carries one.
  */
-export function sessionCwdOf(runContext: ToolCallScope | undefined): string | undefined {
-  const cwd = runContext?.agent?.session?.cwd;
-  return typeof cwd === 'string' && cwd.length > 0 ? cwd : undefined;
-}
+export const sessionCwdOf = readSessionCwd;
 
 /**
  * Build the resolver the tools call once per invocation.
@@ -76,7 +79,7 @@ export function createArtifactRootResolver(
   let warned = false;
   return (runContext) => {
     const session = runContext?.agent?.session;
-    const policy = ctx.get('sandboxPolicy') as SandboxPolicyService | undefined;
+    const policy = optionalService<SandboxPolicyService>(ctx, 'sandboxPolicy');
     if (policy !== undefined && session !== undefined) {
       try {
         const root = policy.resolve({ session }).workspaceRoot;

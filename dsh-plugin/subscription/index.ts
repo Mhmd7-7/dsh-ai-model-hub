@@ -32,6 +32,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis';
+import { optionalService } from '../compat.ts';
 import type { CapabilityOption, OptionLiveState } from '../../src/index.ts';
 import { ModelHub, ModelHubError } from '../../src/index.ts';
 import type { PluginLogger } from '../types.ts';
@@ -210,7 +211,7 @@ export function resolveToolName(tools: ToolRuntimeLike, canonical: string): stri
  * @returns the registry, or `undefined`.
  */
 function readToolRuntime(ctx: Context): ToolRuntimeLike | undefined {
-  const tools = ctx.get('tools') as unknown as ToolRuntimeLike | undefined;
+  const tools = optionalService<ToolRuntimeLike>(ctx, 'tools');
   if (tools === undefined) return undefined;
   if (typeof tools.get !== 'function' || typeof tools.execute !== 'function') return undefined;
   return tools;

@@ -13,11 +13,13 @@
  * @module dsh-ai-model-hub/dsh-plugin/tools/lifecycle
  */
 
-import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { Context } from '@deepseek-ai/cordis';
+import { defineTool } from '@deepseek-ai/dsh-tools';
+import { installDefinedTool } from '../compat.ts';
 import type { ModelHubService } from '../service.ts';
 import { toHubError } from '../../src/index.ts';
 import { textBlock, toToolError } from './support.ts';
+import type { PluginLogger } from '../types.ts';
 
 /**
  * Register `start_model`, `stop_model`, and `check_model_health`.
@@ -29,12 +31,15 @@ import { textBlock, toToolError } from './support.ts';
 export function registerLifecycleTools(
   ctx: Context,
   service: ModelHubService,
-  options: { readonly allowProcessLaunch: boolean },
+  options: { readonly allowProcessLaunch: boolean; readonly log: PluginLogger },
 ): void {
   const hub = service.hub;
+  const log = options.log;
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'start_model',
       description:
         'Start a local AI model so it can serve requests. ' +
@@ -91,10 +96,13 @@ export function registerLifecycleTools(
         }
       },
     }),
+    log,
   );
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'stop_model',
       description:
         'Stop a model the hub started, freeing its memory and GPU. ' +
@@ -137,10 +145,13 @@ export function registerLifecycleTools(
         }
       },
     }),
+    log,
   );
 
-  ctx.tools.register(
+  installDefinedTool(
+    ctx,
     defineTool({
+      
       name: 'check_model_health',
       description:
         'Probe a model right now and report whether it is responding, how long the probe took, and why it failed if it did. ' +
@@ -227,5 +238,6 @@ export function registerLifecycleTools(
         }
       },
     }),
+    log,
   );
 }

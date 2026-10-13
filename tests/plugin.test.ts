@@ -28,6 +28,7 @@ import { apply, inject, name } from '../dsh-plugin/index.ts';
 import { ModelHubService } from '../dsh-plugin/service.ts';
 import { resolvePluginConfig } from '../dsh-plugin/config.ts';
 import { ModelHub, createMockAdapter } from '../src/index.ts';
+import type { PluginLogger } from '../dsh-plugin/types.ts';
 
 /** A registered tool plus how it was registered, as a fake context observes it. */
 interface CapturedTools {
@@ -89,6 +90,26 @@ function fakeContext(captured: CapturedTools): Context {
     __disposers: disposers,
   });
   return context;
+}
+
+/**
+ * A logger that writes into a test's capture buffer.
+ *
+ * The tool-registering functions take a logger so that a tool the host's registry
+ * refuses is reported rather than thrown. The harness passes a real logger for the
+ * same reason it passes a real context: a stub that swallowed the call would hide
+ * the diagnostics these tests exist to assert on.
+ *
+ * @param captured - the buffer the fake context also writes to.
+ * @returns a logger whose lines land in `captured.logLines`.
+ */
+function captureLogger(captured: CapturedTools): PluginLogger {
+  return {
+    debug: (message: string) => captured.logLines.push(`debug ${message}`),
+    info: (message: string) => captured.logLines.push(`info ${message}`),
+    warn: (message: string) => captured.logLines.push(`warn ${message}`),
+    error: (message: string) => captured.logLines.push(`error ${message}`),
+  };
 }
 
 /** A minimal `ToolRunContext` for direct tool execution. */
@@ -167,10 +188,11 @@ async function mount(
   // A pass-through resolver: these tests exercise one workspace at a time, so the
   // hub's own store (the temp root they built it with) is what they assert on.
   const artifactRootFor = (): undefined => undefined;
-  registerDiscoveryTools(ctx, service, { artifactRootFor });
-  registerRoutingTool(ctx, service, { artifactRootFor });
-  registerInvokeTool(ctx, service, { invocationTimeoutMs: resolved.invocationTimeoutMs, artifactRootFor });
-  registerLifecycleTools(ctx, service, { allowProcessLaunch: resolved.allowProcessLaunch });
+  const log = captureLogger(captured);
+  registerDiscoveryTools(ctx, service, { artifactRootFor, log });
+  registerRoutingTool(ctx, service, { artifactRootFor, log });
+  registerInvokeTool(ctx, service, { invocationTimeoutMs: resolved.invocationTimeoutMs, artifactRootFor, log });
+  registerLifecycleTools(ctx, service, { allowProcessLaunch: resolved.allowProcessLaunch, log });
 
   return {
     captured,
@@ -259,6 +281,18 @@ describe('plugin exports', () => {
       'events', 'logger', 'reflect', 'registry', 'fiber', 'scope',
     ]);
 
+    // Services read deliberately WITHOUT a declared `inject`, and read through
+    // `compat.ts` so a host that lacks them is a warning rather than a parked
+    // fiber. Declaring any of these would be worse than the risk this test guards
+    // against: `inject` is an awaited dependency, so a profile without the service
+    // never loads the plugin at all — which costs every model tool in order to
+    // protect one page, one skill, or one artifact path.
+    //
+    // Listed by name on purpose. A seventh one has to be added here consciously,
+    // and the runtime tests in `compat.test.ts` cover what happens when each is
+    // absent.
+    const optionalIntegrations = new Set(['webServer', 'sandboxPolicy', 'skills']);
+
     const pluginDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'dsh-plugin');
     // Only the plugin's own sources. `node_modules` must be excluded explicitly:
     // `readdir(..., { recursive: true })` descends into junctions on Windows and
@@ -287,7 +321,7 @@ describe('plugin exports', () => {
 
     const declared = new Set(inject);
     const undeclared = [...reads.keys()].filter(
-      (service) => !cordisBuiltins.has(service) && !declared.has(service),
+      (service) => !cordisBuiltins.has(service) && !declared.has(service) && !optionalIntegrations.has(service),
     );
 
     assert.deepEqual(
@@ -580,6 +614,7 @@ describe('invoke_model', () => {
     registerInvokeTool(ctx, new ModelHubService(ctx, hub), {
       invocationTimeoutMs: 30_000,
       artifactRootFor: () => undefined,
+      log: captureLogger(captured),
     });
 
     try {

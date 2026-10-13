@@ -30,6 +30,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
+import { serviceInScope } from './compat.ts';
 import type { ModelHub } from '../src/hub.ts';
 import type { ModelHost } from '../src/index.ts';
 import { scanLocalResources, readyPathFor } from './scan.ts';
@@ -755,10 +756,15 @@ export function registerInventoryRoute(
   },
 ): void {
   ctx.inject(['webServer'], (scope) => {
-    const server = (scope as unknown as {
-      readonly webServer?: { register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void };
-    }).webServer;
-    if (server === undefined) return;
+    const server = serviceInScope<{
+      register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void;
+    }>(scope, 'webServer');
+    if (server === undefined || typeof server.register !== 'function') {
+      log.debug(
+        'this host exposes no usable web server, so the engine inventory page is not served; every model tool still works',
+      );
+      return;
+    }
 
     const respond = (res: ServerResponse, inventory: Inventory): void => {
       const body = JSON.stringify(inventory, null, 2);

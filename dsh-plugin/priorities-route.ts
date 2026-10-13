@@ -20,6 +20,7 @@ import type { Capability, CapabilityPolicy, PolicyEntry } from '../src/index.ts'
 import { CAPABILITIES, isCapability } from '../src/index.ts';
 import type { ModelHub } from '../src/index.ts';
 import { savePolicyDocument } from './policy-store.ts';
+import { serviceInScope } from './compat.ts';
 import type { PluginLogger } from './types.ts';
 
 /** The route the settings page reads and writes. Absolute, no trailing slash. */
@@ -97,7 +98,7 @@ export function registerPrioritiesRoute(
   options: PrioritiesRouteOptions,
 ): void {
   ctx.inject(['webServer'], (scope) => {
-    const webServer = scope.get('webServer') as unknown as WebServerLike | undefined;
+    const webServer = serviceInScope<WebServerLike>(scope, 'webServer');
     if (webServer === undefined || typeof webServer.register !== 'function') {
       log.debug('no web server is mounted, so the Capability priorities route is not served');
       return;

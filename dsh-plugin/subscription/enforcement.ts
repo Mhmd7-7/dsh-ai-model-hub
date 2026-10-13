@@ -35,6 +35,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis';
+import { serviceInScope } from '../compat.ts';
 import type { Capability } from '../../src/index.ts';
 import { CapabilityPolicy } from '../../src/index.ts';
 import type { SubscriptionProvider } from './backends.ts';
@@ -140,7 +141,7 @@ export function registerSubscriptionEnforcement(
   log: PluginLogger,
 ): void {
   ctx.inject(['tools'], (scope) => {
-    const registry = scope.get('tools') as unknown as ToolGuardRegistry | undefined;
+    const registry = serviceInScope<ToolGuardRegistry>(scope, 'tools');
     if (registry === undefined || typeof registry.guard !== 'function') {
       log.warn(
         'the tool registry exposes no guard API, so direct subscription tool calls cannot be checked against the ' +
