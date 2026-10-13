@@ -25,7 +25,7 @@ import type { AddressInfo } from 'node:net';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, beforeEach, describe, it } from 'node:test';
 
 import { ModelHub } from '../src/index.ts';
 import type { ModelCatalogConfig, ModelHost } from '../src/index.ts';
@@ -129,16 +129,17 @@ function hubFor(endpoint: string): ModelHub {
  * that persists, which is correct in production and would otherwise mean a test
  * run writing into `~/.dsh` — and, worse, reading whatever a previous run or a
  * real session left there, which is how a test starts failing for a reason that
- * has nothing to do with the code. The supported redirect is the environment
- * variable the store itself reads.
+ * has nothing to do with the code.
+ *
+ * The redirect happens at **module load**, not in a `before` hook. A hook only
+ * runs once a test does, so a run whose name filter matches nothing — or any code
+ * that reaches the store earlier — would have written to the real home first. A
+ * module-level `mkdtemp` costs one temporary directory and removes the whole class
+ * of accident, including the one this suite caused.
  */
-let isolationRoot = '';
-let previousCatalogPath: string | undefined;
-before(async () => {
-  isolationRoot = await mkdtemp(join(tmpdir(), 'hub-offline-suite-'));
-  previousCatalogPath = process.env['DSH_AI_MODEL_HUB_WORKFLOW_CATALOG'];
-  process.env['DSH_AI_MODEL_HUB_WORKFLOW_CATALOG'] = join(isolationRoot, 'suite-catalog.json');
-});
+const isolationRoot = await mkdtemp(join(tmpdir(), 'hub-offline-suite-'));
+const previousCatalogPath = process.env['DSH_AI_MODEL_HUB_WORKFLOW_CATALOG'];
+process.env['DSH_AI_MODEL_HUB_WORKFLOW_CATALOG'] = join(isolationRoot, 'suite-catalog.json');
 after(() => {
   if (previousCatalogPath === undefined) delete process.env['DSH_AI_MODEL_HUB_WORKFLOW_CATALOG'];
   else process.env['DSH_AI_MODEL_HUB_WORKFLOW_CATALOG'] = previousCatalogPath;
