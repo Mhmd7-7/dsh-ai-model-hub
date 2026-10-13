@@ -191,6 +191,31 @@ export interface LocalScanResult {
   readonly generatedAt: string;
 }
 
+/**
+ * One ComfyUI host scope's observations, as the scan produced them.
+ *
+ * The scan hands these back so a caller can persist them without knowing how a
+ * workflow row is assembled: the resources are what a user saw, and the
+ * descriptors are the contracts that make a runnable workflow executable on a
+ * later launch with the engine down.
+ */
+export interface ScannedHostSnapshot {
+  readonly hostId: string;
+  readonly endpoint?: string;
+  /**
+   * Whether every source for this host was read completely this pass.
+   *
+   * This is the difference between "the workflow is gone" and "we could not
+   * look": only an authoritative snapshot may replace what was previously
+   * remembered for the scope, so an unreadable directory or an unreachable engine
+   * cannot delete anything. It is the same test the scan itself uses to decide
+   * whether an empty list is a fact.
+   */
+  readonly authoritative: boolean;
+  readonly resources: readonly LocalResource[];
+  readonly descriptors: readonly ModelDescriptor[];
+}
+
 /** Options for {@link scanLocalResources}. */
 export interface ScanOptions {
   /** The catalog's declared hosts. Engines not named here are not contacted. */
@@ -201,6 +226,15 @@ export interface ScanOptions {
   readonly workflowDir?: string;
   /** Additional verified workflow stores, scoped to their owning host. */
   readonly workflowDirsByHost?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Last-known workflows, scoped by host and endpoint, to fall back on.
+   *
+   * These are consulted **after** every live source, so they can only ever add a
+   * workflow or explain one — never replace what this scan actually observed. They
+   * are what keeps a saved workflow visible when ComfyUI is stopped, on a first
+   * launch with no previous successful connection included.
+   */
+  readonly persisted?: readonly ScannedHostSnapshot[];
   /** Budget for each HTTP or filesystem effect, in milliseconds. Defaults to 4000. */
   readonly timeoutMs?: number;
   /** Legacy compatibility option; scans never start engines. */
@@ -209,6 +243,14 @@ export interface ScanOptions {
   readonly probes?: Partial<ScanProbes>;
   /** Whether runnable workflows are published to the hub. Defaults to true. */
   readonly register?: boolean;
+  /**
+   * Called once per ComfyUI host, with everything this scan observed for it.
+   *
+   * The scan itself never writes anything durable, so persistence stays the
+   * caller's decision; the snapshot is handed over after the pass has reconciled
+   * live, local and remembered observations into the list a user actually sees.
+   */
+  readonly onHostScanned?: (snapshot: ScannedHostSnapshot) => void;
   /** Legacy compatibility option, ignored even when true: scanning never launches engines. */
   readonly startEngine?: boolean;
   /** Diagnostic sink. */
@@ -272,6 +314,8 @@ interface HostPass {
   readonly warnings: string[];
   readonly sources: ScanSourceReport[];
   readonly authoritative?: boolean;
+  /** Sources of the rows that came from the caller's remembered catalog. */
+  readonly rememberedSources?: readonly string[];
 }
 interface CacheEntry {
   readonly resources: readonly LocalResource[];
@@ -452,31 +496,74 @@ export function workflowDisplayName(raw: unknown, fallback: string): string {
 }
 
 /**
+ * Why an engine is not answering, at the level a user can act on.
+ *
+ * `stopped` and `unreachable` are different claims and must not be collapsed:
+ * a refused connection on a loopback address is the signature of a process that
+ * is not running, while a timeout, a DNS failure or a routed address that does
+ * not answer leaves the process's state genuinely unknown. Saying "stopped" about
+ * a remote engine that is merely behind a closed port would send someone looking
+ * for a process that may be running fine.
+ */
+export type EngineAvailability = 'answering' | 'stopped' | 'unreachable' | 'unconfigured' | 'not-comfyui' | 'error';
+
+/**
+ * Classify a connection failure from its message.
+ *
+ * @param detail - the transport detail the probe reported.
+ * @returns `stopped` for a refused connection, `unreachable` for everything else.
+ */
+function classifyConnection(detail: string): EngineAvailability {
+  return /ECONNREFUSED|ECONNRESET|EPIPE|connection refused|socket hang up/i.test(detail) ? 'stopped' : 'unreachable';
+}
+
+/**
+ * The sentence that explains an engine's state to a user.
+ *
+ * @param availability - the classified state.
+ * @param path - the readiness route that was probed.
+ * @returns a short phrase, suitable for appending to a row's detail.
+ */
+function describeAvailability(availability: EngineAvailability, path: string): string {
+  switch (availability) {
+    case 'answering': return 'ComfyUI answering ' + path;
+    case 'stopped': return 'ComfyUI stopped';
+    case 'unreachable': return 'ComfyUI unreachable';
+    case 'unconfigured': return 'ComfyUI has no configured endpoint';
+    case 'not-comfyui': return 'ComfyUI did not report valid system/device information';
+    case 'error': return 'ComfyUI answered with an error';
+  }
+}
+
+/**
  * Whether the engine for a host is answering, using its own readiness route.
  *
  * @param probes - the effects to use.
  * @param host - the host to check.
  * @param timeoutMs - budget for the request.
- * @returns whether it answered, and a sentence describing what happened.
+ * @returns whether it answered, why not when it did not, and a sentence saying so.
  */
 async function engineReady(
   probes: ScanProbes,
   host: ModelHost,
   timeoutMs: number,
-): Promise<{ running: boolean; detail: string }> {
+): Promise<{ running: boolean; availability: EngineAvailability; detail: string }> {
   const endpoint = host.runtime.endpoint;
   if (endpoint === undefined || endpoint.trim().length === 0) {
-    return { running: false, detail: 'no runtime.endpoint configured' };
+    return { running: false, availability: 'unconfigured', detail: 'no runtime.endpoint configured' };
   }
   const path = readyPathFor(host.runtime.engine);
   const result = await probes.request(`${baseOf(endpoint)}${path}`, timeoutMs);
   if (result.ok && /comfyui/i.test(host.runtime.engine) &&
     !(isObject(result.body) && isObject(result.body['system']) && Array.isArray(result.body['devices']))) {
-    return { running: false, detail: path + ' did not return valid ComfyUI system/device information' };
+    return { running: false, availability: 'not-comfyui', detail: path + ' did not return valid ComfyUI system/device information' };
   }
-  return result.ok
-    ? { running: true, detail: `${path} answered ${result.status}` }
-    : { running: false, detail: result.detail };
+  if (result.ok) return { running: true, availability: 'answering', detail: `${path} answered ${result.status}` };
+  return {
+    running: false,
+    availability: result.kind === 'connection' ? classifyConnection(result.detail) : 'error',
+    detail: result.detail,
+  };
 }
 
 
@@ -919,9 +1006,156 @@ function workflowResource(
   return { resource, descriptor };
 }
 
+/**
+ * Merge rows that name the same file, preferring the one with a declared identity.
+ *
+ * Two sources can reach the same workflow file: a configured directory walks it,
+ * and a catalog entry pins it with `workflowPath`. They are one workflow, so they
+ * are one row — and the row kept is the catalog's, because its id is what an
+ * operator (and a saved capability policy) refers to by name.
+ *
+ * Comparison is on the normalized path, so `C:/workflows/a.json` and
+ * `C:\workflows\a.json` are the same file, and it is only applied to paths: an
+ * engine URL and a file path are never conflated, however similarly they are
+ * spelled.
+ *
+ * @param resources - the rows built so far, in priority order.
+ * @param descriptors - the providers built so far.
+ * @returns the deduplicated rows and providers.
+ */
+function mergeBySourcePath(
+  resources: readonly LocalResource[],
+  descriptors: readonly ModelDescriptor[],
+): { resources: LocalResource[]; descriptors: ModelDescriptor[] } {
+  const keyOf = (resource: LocalResource): string | undefined =>
+    resource.kind !== 'comfyui_workflow' || /^[a-z][a-z0-9+.-]*:\/\//i.test(resource.source)
+      ? undefined : resource.source.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const declared = new Set(resources.flatMap((resource) => resource.modelId === undefined ? [] : [resource.id]));
+  const byPath = new Map<string, number>();
+  const merged: LocalResource[] = [];
+  const droppedIds = new Set<string>();
+  for (const resource of resources) {
+    const key = keyOf(resource);
+    if (key === undefined) { merged.push(resource); continue; }
+    const existing = byPath.get(key);
+    if (existing === undefined) { byPath.set(key, merged.length); merged.push(resource); continue; }
+    const kept = merged[existing]!;
+    const resourceIsDeclared = declared.has(resource.id);
+    const keptIsDeclared = declared.has(kept.id);
+    // Replace the row only with one that carries a declared identity, and take the
+    // discarded row's provider with it so the catalog cannot keep two.
+    if (!resourceIsDeclared || keptIsDeclared) { droppedIds.add(resource.modelId ?? resource.id); continue; }
+    droppedIds.add(kept.modelId ?? kept.id);
+    merged[existing] = resource;
+  }
+  const descriptorsKept = descriptors.filter((descriptor) => !droppedIds.has(descriptor.id));
+  return { resources: merged, descriptors: descriptorsKept };
+}
+
+/**
+ * The workflows a previous scan observed that this one did not answer for.
+ *
+ * Three rules make this safe to merge into a live list:
+ *
+ * 1. **Identity is the source**, exactly as it is everywhere else in this module,
+ *    so a workflow found live *and* remembered is one row, not two. The live row
+ *    always wins: a remembered observation can add a workflow, never correct one.
+ * 2. **A remembered workflow is never invented.** Its readiness, its inputs, its
+ *    outputs and its provider id come from the stored observation, so a workflow
+ *    whose contract was never verified cannot become runnable by being read back.
+ * 3. **Missing evidence is not removal.** This function does not decide that a
+ *    workflow is gone — that is {@link reconcileSource}'s job, and only a
+ *    successful scan of the same source can do it. Here a connection failure, a
+ *    timeout or an unreadable directory only means "not verified this pass".
+ *
+ * @param resources - what this pass already found, mutated by the caller.
+ * @param descriptors - providers this pass already built, for the same reason.
+ * @param persisted - the remembered snapshots for this host's scopes.
+ * @param host - the host being scanned.
+ * @param engine - whether the engine answered this pass, and why not when it did not.
+ * @returns the remembered rows and their providers, ready to append.
+ */
+function rememberWorkflows(
+  resources: readonly LocalResource[],
+  descriptors: readonly ModelDescriptor[],
+  persisted: readonly ScannedHostSnapshot[],
+  host: ModelHost,
+  engine: { readonly running: boolean; readonly availability: EngineAvailability },
+): { resources: LocalResource[]; descriptors: ModelDescriptor[]; sources: string[] } {
+  const candidates = persisted.filter((snapshot) => snapshot.endpoint === host.runtime.endpoint || snapshot.endpoint === undefined);
+  if (candidates.length === 0) return { resources: [], descriptors: [], sources: [] };
+
+  const seenSources = new Set(resources.map((resource) => resource.source));
+  const seenIds = new Set(resources.map((resource) => resource.id));
+  const rememberedResources: LocalResource[] = [];
+  const rememberedDescriptors: ModelDescriptor[] = [];
+  const stateSuffix = engine.running
+    ? ' (remembered from an earlier scan; this pass did not read it live)'
+    : ' (cached; ' + describeAvailability(engine.availability, readyPathFor(host.runtime.engine)) +
+      ', so readiness could not be re-verified)';
+
+  for (const snapshot of candidates) {
+    for (const resource of snapshot.resources) {
+      if (resource.kind !== 'comfyui_workflow') continue;
+      if (resource.source.length === 0 || seenSources.has(resource.source) || seenIds.has(resource.id)) continue;
+      seenSources.add(resource.source);
+      seenIds.add(resource.id);
+      // A remembered row is a cached observation, whatever freshness the live pass
+      // gave it when it was stored.
+      rememberedResources.push({
+        ...resource,
+        freshness: 'cached',
+        // Readiness and availability are re-stated for *this* pass: the stored
+        // observation's engine state is history, not current evidence. An
+        // answering engine cannot verify a stored workflow's dependencies either,
+        // so a reachable engine reports `unknown` rather than claiming `available`.
+        engineRunning: engine.running,
+        availability: engine.running ? 'unknown' : 'unavailable',
+        detail: withoutEngineAnnotation(resource.detail) + stateSuffix,
+      });
+      if (resource.runnable && resource.modelId !== undefined) {
+        const descriptor = snapshot.descriptors.find((entry) => entry.id === resource.modelId);
+        if (descriptor !== undefined && !descriptors.some((entry) => entry.id === descriptor.id)) {
+          rememberedDescriptors.push(descriptor);
+        }
+      }
+    }
+  }
+  return { resources: rememberedResources, descriptors: rememberedDescriptors, sources: rememberedResources.map((resource) => resource.source) };
+}
+
+/**
+ * The per-pass annotations a row's `detail` accumulates.
+ *
+ * They are appended so a user reads the engine's state next to the contract, but
+ * they are *this pass's* statements about the engine and must not be re-shown as
+ * if they were part of the observation. A row read back from the remembered
+ * catalog says "ComfyUI stopped" once, from this pass, rather than carrying a
+ * stale "(engine answering)" from whenever it was stored.
+ *
+ * Exported so the scan and the durable catalog strip exactly the same strings.
+ */
+export const ENGINE_ANNOTATION_PATTERNS: readonly RegExp[] = [
+  /\s*\(engine (?:answering|not answering)[^)]*\)/i,
+  /\s*\(cached; [^)]*\)/i,
+  /\s*\(remembered from an earlier scan[^)]*\)/i,
+  /\s*\(cached observation; [^)]*\)/i,
+];
+
+/**
+ * Strip the per-pass engine annotations from a stored row's detail.
+ *
+ * @param detail - the stored detail.
+ * @returns the observation's own sentence.
+ */
+export function withoutEngineAnnotation(detail: string): string {
+  let result = detail;
+  for (const pattern of ENGINE_ANNOTATION_PATTERNS) result = result.replace(pattern, '');
+  return result;
+}
+
 /** Reconcile one source independently: failed files keep their last good contract. */
-function reconcileSource(
-  state: HubScanState, key: string, fresh: HostPass, complete: boolean,
+function reconcileSource(  state: HubScanState, key: string, fresh: HostPass, complete: boolean,
   engineRunning: boolean, availability: 'available' | 'unavailable' | 'unknown', generation: number,
 ): HostPass {
   const previous = state.cache.get(key);
@@ -952,6 +1186,8 @@ async function runHostPass(
   hub: ModelHub, host: ModelHost, options: {
     readonly probes: ScanProbes; readonly timeoutMs: number; readonly workflowDirs: readonly string[];
     readonly catalogDir?: string;
+    /** Workflows a previous scan observed, already scoped to this host and endpoint. */
+    readonly persisted?: readonly ScannedHostSnapshot[];
   }, state: HubScanState,
 ): Promise<HostPass> {
   const { probes, timeoutMs } = options;
@@ -971,7 +1207,9 @@ async function runHostPass(
   if (!engineRunning) warnings.push(host.name + ': not answering; scans never start engines (' + ready.detail + ')');
   const endpoint = host.runtime.endpoint;
   const sources: ScanSourceReport[] = [{ id: host.id, kind: 'comfyui_workflow', label: host.name,
-    ok: engineRunning, detail: ready.detail, found: 0 }];
+    ok: engineRunning,
+    detail: (engineRunning ? '' : describeAvailability(ready.availability, readyPathFor(host.runtime.engine)) + ': ') + ready.detail,
+    found: 0 }];
   let io: ComfyNodeIndex | undefined;
   let classes: ReadonlySet<string> | undefined;
   let listed: { documents: WorkflowDocument[]; error?: string } = { documents: [], error: ready.detail };
@@ -993,7 +1231,9 @@ async function runHostPass(
       if (built === undefined) continue;
       resources.push({ ...built.resource,
         availability: document.unreadable !== undefined ? 'unknown' : engineRunning ? 'unknown' : 'unavailable',
-        detail: built.resource.detail + (engineRunning ? ' (engine answering; workflow dependencies not execution-verified)' : ' (engine not answering)'),
+        detail: built.resource.detail + (engineRunning
+          ? ' (engine answering; workflow dependencies not execution-verified)'
+          : ' (' + describeAvailability(ready.availability, readyPathFor(host.runtime.engine)) + ')'),
         freshness, checkedAt });
       if (built.descriptor !== undefined) descriptors.push(built.descriptor);
     }
@@ -1015,7 +1255,7 @@ async function runHostPass(
   apiFresh.warnings.push(...warnings, ...(listed.error === undefined ? [] : [listed.error]));
   const api = reconcileSource(state, JSON.stringify(['api', host]), apiFresh, listed.error === undefined,
     engineRunning, engineRunning ? 'unknown' : 'unavailable', apiGeneration);
-  const resources = [...api.resources]; const descriptors = [...api.descriptors];
+  let resources = [...api.resources]; const descriptors = [...api.descriptors];
   if (engineRunning) sources.push({ id: host.id, kind: 'comfyui_workflow', label: host.name,
     ok: listed.error === undefined, detail: listed.error ?? 'read saved workflows from ' + endpoint + '/userdata',
     found: api.resources.length });
@@ -1077,7 +1317,35 @@ async function runHostPass(
       detail: built.resource.detail + ' (known to catalog; workflow dependencies not execution-verified)'  };
   }));
   resources.push(...catalogResources.filter((resource): resource is LocalResource => resource !== undefined));
-  return { resources, descriptors, warnings, sources, authoritative };
+
+  // A configured workflow directory and a catalog `workflowPath` can name the same
+  // file, and the two passes above would then list it twice under two identities.
+  // The file is the identity that matters, so those rows are merged, keeping the
+  // declared provider's id: a hand-declared workflow must never be shadowed by a
+  // directory listing of its own template.
+  const merged = mergeBySourcePath(resources, descriptors);
+  resources = merged.resources;
+  descriptors.length = 0;
+  descriptors.push(...merged.descriptors);
+
+  // Last, and only for a workflow no live or local source answered for: what a
+  // previous scan observed. This is what keeps saved workflows on the page while
+  // ComfyUI is stopped, including on a first launch with no connection at all.
+  const remembered = rememberWorkflows(resources, descriptors, options.persisted ?? [], host, ready);
+  if (remembered.resources.length > 0) {
+    resources.push(...remembered.resources);
+    descriptors.push(...remembered.descriptors);
+    sources.push({
+      id: 'remembered',
+      kind: 'comfyui_workflow',
+      label: host.name + ' (remembered workflows)',
+      ok: true,
+      detail: 're-showed ' + remembered.resources.length + ' workflow(s) a previous scan discovered; ' +
+        'their contracts are cached and readiness was not re-verified this pass',
+      found: remembered.resources.length,
+    });
+  }
+  return { resources, descriptors, warnings, sources, authoritative, rememberedSources: remembered.sources };
 }
 
 /** Scan only observes. Neither compatibility flags nor launch policy grant lifecycle effects. */
@@ -1089,15 +1357,25 @@ export async function scanLocalResources(hub: ModelHub, options: ScanOptions): P
   const publicationGeneration = ++state.publicationGeneration;
   const requestedHosts = options.hosts.filter((host) => isOllamaHost(host) || host.adapter === 'comfyui');
   const previousScanned = hub.catalog.listModels().filter((model) => model.tags?.includes('scanned'));
+  const hostCount = requestedHosts.length;
+  const snapshots: (ScannedHostSnapshot | undefined)[] = new Array<ScannedHostSnapshot | undefined>(hostCount).fill(undefined);
   const passes = await Promise.all(options.hosts.filter((host) => isOllamaHost(host) || host.adapter === 'comfyui')
-    .map(async (host): Promise<HostPass> => {
+    .map(async (host, index): Promise<HostPass> => {
       try {
-        return isOllamaHost(host) ? await scanOllamaHost(hub, host, probes, timeoutMs, state)
-          : await runHostPass(hub, host, { probes, timeoutMs,
-            ...(options.catalogPath === undefined ? {} : { catalogDir: dirname(resolveAdapterPath(options.catalogPath, undefined).absolute) }),
-            workflowDirs: [...new Set([...(options.workflowDir?.trim() ? [options.workflowDir] : []),
-              ...(options.workflowDirsByHost?.[host.id] ?? []).filter((root) => root.trim())])],
-          }, state);
+        if (isOllamaHost(host)) return await scanOllamaHost(hub, host, probes, timeoutMs, state);
+        const pass = await runHostPass(hub, host, { probes, timeoutMs,
+          ...(options.catalogPath === undefined ? {} : { catalogDir: dirname(resolveAdapterPath(options.catalogPath, undefined).absolute) }),
+          workflowDirs: [...new Set([...(options.workflowDir?.trim() ? [options.workflowDir] : []),
+            ...(options.workflowDirsByHost?.[host.id] ?? []).filter((root) => root.trim())])],
+          ...(options.persisted === undefined ? {} : { persisted: options.persisted }),
+        }, state);
+        const observed = originalObservations(pass.resources, pass.rememberedSources ?? []);
+        const observedIds = new Set(observed.flatMap((resource) => resource.modelId === undefined ? [] : [resource.modelId]));
+        snapshots[index] = { hostId: host.id,
+          ...(host.runtime.endpoint === undefined ? {} : { endpoint: host.runtime.endpoint }),
+          authoritative: pass.authoritative === true,
+          resources: observed, descriptors: pass.descriptors.filter((descriptor) => observedIds.has(descriptor.id)) };
+        return pass;
       } catch (error) {
         const detail = host.name + ': scan failed: ' + String(error);
         return { resources: [], descriptors: [], warnings: [detail], sources: [{ id: host.id,
@@ -1117,16 +1395,40 @@ export async function scanLocalResources(hub: ModelHub, options: ScanOptions): P
     registered = hub.publishScannedModels(descriptors);
     options.log?.('scan: published ' + registered + ' provider(s) in the catalog');
   }
+  // Hand each host's reconciled observations to the caller before returning, so a
+  // caller that owns durable state can record them without this module writing.
+  for (const snapshot of snapshots) {
+    if (snapshot === undefined) continue;
+    try { options.onHostScanned?.(snapshot); }
+    catch (error) { options.log?.('scan: a host snapshot could not be recorded: ' + String(error)); }
+  }
   return { resources, sources: passes.flatMap((pass) => pass.sources), warnings: passes.flatMap((pass) => pass.warnings),
     registered, generatedAt: new Date().toISOString() };
+}
+
+/**
+ * The rows a caller should persist: everything except what it already stored.
+ *
+ * Remembered rows are excluded deliberately. Writing those back would append
+ * another "cached" sentence to the sentence the last write appended, so the
+ * document would grow on every scan while saying nothing new. Every other row —
+ * live, found on disk, or carried over from this scan's own previous pass — is
+ * the current state of that source, which is what the caller records.
+ *
+ * @param resources - the reconciled rows for one host.
+ * @param rememberedSources - the sources of rows that came from the catalog.
+ * @returns the rows that represent this pass's view.
+ */
+function originalObservations(resources: readonly LocalResource[], rememberedSources: readonly string[]): LocalResource[] {
+  const fromCatalog = new Set(rememberedSources);
+  return resources.filter((resource) => !fromCatalog.has(resource.source));
 }
 
 /**
  * Keep the first descriptor for each id.
  * @param descriptors - the descriptors to deduplicate.
  * @returns the unique descriptors, in order.
- */
-function dedupeById(descriptors: readonly ModelDescriptor[]): ModelDescriptor[] {
+ */function dedupeById(descriptors: readonly ModelDescriptor[]): ModelDescriptor[] {
   const seen = new Set<string>();
   const unique: ModelDescriptor[] = [];
   for (const descriptor of descriptors) {

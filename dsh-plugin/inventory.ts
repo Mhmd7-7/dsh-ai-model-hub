@@ -34,8 +34,18 @@ import type { Context } from '@deepseek-ai/cordis';
 import { installRoute } from './compat.ts';
 import type { ModelHub } from '../src/hub.ts';
 import type { ModelHost } from '../src/index.ts';
+import { resolveAdapterPath } from '../src/adapters/paths.ts';
 import { scanLocalResources, readyPathFor } from './scan.ts';
-import type { LocalResource, ScanProbes, ScanSourceReport } from './scan.ts';
+import type { LocalResource, ScanProbes, ScanSourceReport, ScannedHostSnapshot } from './scan.ts';
+import { resolveConfiguredPath } from './paths.ts';
+import {
+  defaultWorkflowCatalogPath,
+  loadWorkflowCatalog,
+  recordScan,
+  rememberedSnapshots,
+  saveWorkflowCatalog,
+} from './workflow-catalog.ts';
+import type { WorkflowCatalogDocument } from './workflow-catalog.ts';
 import type { PluginLogger } from './types.ts';
 
 /** The route the settings page reads. Absolute, no trailing slash. */
@@ -375,6 +385,21 @@ export function formatBytes(bytes: number): string {
  *   deployment flags, and injectable probes.
  * @returns the inventory the settings page renders.
  */
+/**
+ * Spell a path the way the inventory reports it.
+ *
+ * Forward slashes on every platform, so a page, a route payload, a remembered
+ * workflow's source and a config value someone pastes back all read the same —
+ * and so a path does not change spelling between "configured" and "discovered".
+ * `join` is still what composes them; only the last mile is spelled once.
+ *
+ * @param path - a path from the filesystem or the configuration.
+ * @returns the path with forward slashes.
+ */
+function asReported(path: string): string {
+  return path.replace(/\\/g, '/');
+}
+
 export async function buildInventory(
   hub: ModelHub,
   options: {
@@ -392,12 +417,33 @@ export async function buildInventory(
     readonly workflowDir?: string;
     /** Per-probe budget in milliseconds; filesystem traversal is separately capped. */
     readonly scanTimeoutMs?: number;
+    /**
+     * Where discovered workflows are remembered between launches.
+     *
+     * Omitted means the plugin's own state directory. This is what makes a saved
+     * workflow discoverable on a first launch with ComfyUI stopped, and what keeps
+     * one visible after the engine goes away.
+     */
+    readonly workflowCatalogPath?: string;
     /** Diagnostic sink for the scan; defaults to silence. */
     readonly log?: (message: string) => void;
+    /**
+     * Whether discovered workflows are remembered between launches. Defaults to
+     * true; `false` is for callers that must not write anything.
+     */
+    readonly persistWorkflows?: boolean;
+    /** The plugin's own logger, for the durable workflow catalog's diagnostics. */
+    readonly logger?: PluginLogger;
   },
 ): Promise<Inventory> {
   const requestedBudget = options.scanTimeoutMs ?? PROBE_TIMEOUT_MS;
   const budget = Number.isFinite(requestedBudget) ? Math.max(1, Math.min(60_000, requestedBudget)) : PROBE_TIMEOUT_MS;
+  const logger: PluginLogger = options.logger ?? {
+    debug: (message: string) => options.log?.(message),
+    info: (message: string) => options.log?.(message),
+    warn: (message: string) => options.log?.('warn: ' + message),
+    error: (message: string) => options.log?.('error: ' + message),
+  };
   const configuredPath = (path: string): string => {
     const expanded = expandPath(path);
     return isAbsolute(expanded) || /^[A-Za-z]:[/\\]/.test(expanded) || !/[/\\]/.test(expanded)
@@ -440,7 +486,7 @@ export async function buildInventory(
     ], known?.id ?? host.runtime.engine, start?.command === undefined ? undefined : configuredPath(start.command), errors);
     const [endpoint, stores, models] = await Promise.all([
       describeEndpoint(probes, host, options.probe !== false),
-      describeStores(probes, known, install.path, host.runtime.env?.['OLLAMA_MODELS']).catch((error: unknown) => { errors.push(`model stores: ${error instanceof Error ? error.message : String(error)}`); return []; }),
+      describeStores(probes, known, install.path, configuredPaths, host.runtime.env?.['OLLAMA_MODELS']).catch((error: unknown) => { errors.push(`model stores: ${error instanceof Error ? error.message : String(error)}`); return []; }),
       describeEngineModels(probes, known, host.runtime.endpoint, install.path),
     ]);
     if (endpoint.error !== undefined) errors.push(endpoint.error);
@@ -451,12 +497,12 @@ export async function buildInventory(
       ...(host.runtime.endpoint === undefined ? {} : { endpoint: host.runtime.endpoint }),
       running: endpoint.running, statusDetail: endpoint.statusDetail,
       state: endpoint.running ? 'running' : installation === 'installed' ? 'installed_unreachable' : configured || endpoint.unverified || installation === 'unknown' ? 'unknown' : 'not_found',
-      installation, configuredPaths, checkedAt: new Date().toISOString(), errors,
+      installation, configuredPaths: configuredPaths.map(asReported), checkedAt: new Date().toISOString(), errors,
       startable: options.allowProcessLaunch && lifecycle?.startable === true,
-      ...(start === undefined ? {} : { launch: { command: expandPath(start.command), args: start.args ?? [], ...(start.cwd === undefined ? {} : { cwd: expandPath(start.cwd) }) } }),
+      ...(start === undefined ? {} : { launch: { command: asReported(expandPath(start.command)), args: start.args ?? [], ...(start.cwd === undefined ? {} : { cwd: asReported(expandPath(start.cwd)) }) } }),
       installSource: install.source,
-      ...(install.path === undefined ? { checkedPaths: install.checked } : { installPath: install.path }),
-      storePaths: stores, models: models.models, modelsSource: models.modelsSource,
+      ...(install.path === undefined ? { checkedPaths: install.checked.map(asReported) } : { installPath: asReported(install.path) }),
+      storePaths: stores.map((store) => ({ ...store, path: asReported(store.path) })), models: models.models, modelsSource: models.modelsSource,
       servedModelIds: views.filter((entry) => entry.model.hostId === host.id).map((entry) => entry.model.id),
     };
   }));
@@ -464,6 +510,20 @@ export async function buildInventory(
   for (const engine of engines) {
     if (engine.adapter === 'comfyui') workflowDirsByHost[engine.id] = engine.storePaths.filter((store) => store.exists).map((store) => store.path);
   }
+
+  // What earlier scans discovered, read *before* this one runs so it can be handed
+  // to the scan as a fallback source. This is the difference between "ComfyUI is
+  // down, so there are no workflows" and "ComfyUI is down, and here are the
+  // workflows it saved last time we looked" — including on a first launch, where
+  // the file was written by a scan that never needed a live API at all.
+  const catalogDir = dirname(resolveAdapterPath(options.catalogPath, undefined).absolute);
+  const workflowCatalogPath = defaultWorkflowCatalogPath(options.workflowCatalogPath);
+  const loaded = options.persistWorkflows === false
+    ? { document: { version: 1, scopes: [] } as WorkflowCatalogDocument, issues: [] as readonly string[] }
+    : await loadWorkflowCatalog(workflowCatalogPath, logger);
+  const remembered = rememberedSnapshots(loaded.document);
+  const scanned: ScannedHostSnapshot[] = [];
+  const scannedHosts = new Set<string>();
 
   // The scan is the page's actual job, so it always runs. It is contained by
   // construction — each engine is contacted on its own and reports its own
@@ -474,13 +534,29 @@ export async function buildInventory(
     catalogPath: options.catalogPath,
     workflowDirsByHost,
     startEngine: false,
-    ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
+    ...(options.workflowDir === undefined || options.workflowDir.trim().length === 0
+      ? {}
+      : { workflowDir: resolveConfiguredPath(options.workflowDir, catalogDir) }),
+    ...(remembered.length === 0 ? {} : { persisted: remembered }),
+    onHostScanned: (snapshot) => {
+      scannedHosts.add(snapshot.hostId);
+      scanned.push(snapshot);
+    },
     ...(options.scanTimeoutMs === undefined ? {} : { timeoutMs: options.scanTimeoutMs }),
     // Only an injected probe set is adapted; otherwise the scan keeps its own
     // status-aware fetch, which is the one that can tell a 404 from bad JSON.
     ...(options.probes === undefined ? {} : { probes: scanProbesFrom(options.probes) }),
     ...(options.log === undefined ? {} : { log: options.log }),
   });
+
+  // Persist after the scan: a failed read is reported, a failed write is reported,
+  // and neither stops the page from showing what this scan did find. A host this
+  // pass never reached keeps its previous entries, because "not scanned" is not
+  // evidence that its workflows are gone.
+  const reached = scanned.filter((snapshot) => scannedHosts.has(snapshot.hostId));
+  if (options.persistWorkflows !== false) {
+    await recordScannedWorkflows(workflowCatalogPath, loaded.document, reached, logger);
+  }
 
   const currentViews = hub.listModels({ includeDisabled: true });
   for (const engine of engines) {
@@ -571,33 +647,60 @@ async function resolveInstall(
   errors: string[],
 ): Promise<{ path?: string; source: string; checked: string[] }> {
   const checked = [...new Set(candidates.map((candidate) => expandPath(candidate).replace(/[/\\]+$/, '')).filter(Boolean))];
-  const markers = /comfyui/i.test(engine) ? ['main.py', 'src/main.py', 'ComfyUI/main.py']
+  const markers = /comfyui/i.test(engine) ? ['main.py']
     : /ollama/i.test(engine) ? ['ollama.exe', 'ollama', 'bin/ollama']
     : /a1111|forge/i.test(engine) ? ['webui.py', 'modules/launch_utils.py'] : [];
+  // The directory whose *contents* are the installation: a ComfyUI whose `main.py`
+  // and `server.py` live under `src/` is installed at `src`, not at the repository
+  // root that happens to contain it, and the workflow store hangs off the former.
+  const installDirectory = async (candidate: string): Promise<string | undefined> => {
+    const verify = async (file: string, missing: boolean): Promise<boolean> => {
+      if (probes.isFile !== undefined) {
+        try { return await probes.isFile(file); }
+        catch { return false; }
+      }
+      const parts = file.replace(/\\/g, '/');
+      const split = parts.lastIndexOf('/');
+      const entries = await probes.listDir(parts.slice(0, split));
+      // A directory that cannot be listed is not evidence either way: report what
+      // the probe could not read rather than guessing that the marker is there.
+      if (entries === undefined) throw new Error(`could not list ${parts.slice(0, split)}`);
+      if (!missing && !entries.some((entry) => entry.isDirectory && entry.name === parts.slice(split + 1))) return false;
+      return entries.some((entry) => !entry.isDirectory && entry.name === parts.slice(split + 1));
+    };
+    if (/comfyui/i.test(engine)) {
+      for (const subdir of ['', 'src', 'ComfyUI']) {
+        if ((await verify(join(candidate, subdir, 'main.py'), subdir === '')) &&
+            (await verify(join(candidate, subdir, 'server.py'), subdir === ''))) {
+          return join(candidate, subdir);
+        }
+      }
+      return undefined;
+    }
+    for (const marker of markers) {
+      if (await verify(join(candidate, marker), false)) return candidate;
+    }
+    return undefined;
+  };
   const found = await Promise.all(checked.map(async (path) => {
     try {
-      if (!(await probes.isDirectory(path))) return false;
+      if (!(await probes.isDirectory(path))) return undefined;
       // An arbitrary existing cwd (or .ollama data folder) is not an installation.
-      const verify = async (file: string): Promise<boolean> => {
-        if (probes.isFile !== undefined) return await probes.isFile(file);
-        const parts = file.replace(/\\/g, '/');
-        const split = parts.lastIndexOf('/');
-        const entries = await probes.listDir(parts.slice(0, split));
-        return entries?.some((entry) => !entry.isDirectory && entry.name === parts.slice(split + 1)) === true;
-      };
-      if (/comfyui/i.test(engine)) {
-        return (await Promise.all(['', 'src', 'ComfyUI'].map(async (subdir) =>
-          (await verify(join(path, subdir, 'main.py'))) && (await verify(join(path, subdir, 'server.py'))),
-        ))).some(Boolean);
-      }
-      return (await Promise.all(markers.map((marker) => verify(join(path, marker))))).some(Boolean);
+      return await installDirectory(path);
     } catch (error) {
       errors.push(`installation: ${path}: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
+      return undefined;
     }
   }));
-  const index = found.findIndex(Boolean);
-  if (index >= 0) return { path: checked[index]!, source: 'found on this machine', checked };
+  const index = found.findIndex((path) => path !== undefined);
+  if (index >= 0) {
+    const path = found[index]!;
+    // Compared with one spelling on both sides: `join` normalizes separators on
+    // Windows, so a candidate that is genuinely the installation must not be
+    // reported as "found somewhere else".
+    const sameLocation = path.replace(/\\/g, '/').replace(/\/+$/, '') === checked[index]!.replace(/\\/g, '/').replace(/\/+$/, '');
+    return { path, source: sameLocation ? 'found on this machine' : `found at ${path.replace(/\\/g, '/')}`, checked };
+  }
   if (command !== undefined && probes.isFile !== undefined) {
     const expanded = expandPath(command);
     const executable = /[/\\]/.test(expanded) ? expanded : undefined;
@@ -654,6 +757,26 @@ async function describeEndpoint(
 }
 
 /**
+ * Record this scan's observations, keeping every scope it did not reach.
+ *
+ * @param path - the workflow catalog to write.
+ * @param previous - the document that was loaded before the scan.
+ * @param scanned - the observations this scan produced.
+ * @param log - the plugin's logger.
+ * @returns the document that is now in force, written or not.
+ */
+async function recordScannedWorkflows(
+  path: string,
+  previous: WorkflowCatalogDocument,
+  scanned: readonly ScannedHostSnapshot[],
+  log: PluginLogger,
+): Promise<WorkflowCatalogDocument> {
+  const document = recordScan(previous, scanned, new Date().toISOString());
+  await saveWorkflowCatalog(path, document, log);
+  return document;
+}
+
+/**
  * Adapt the inventory's probes to the scan's.
  *
  * The scan needs richer outcomes than `fetchJson` gives — a connection refusal,
@@ -686,15 +809,34 @@ function scanProbesFrom(probes: InventoryProbes): Partial<ScanProbes> {
 
 /**
  * Describe an engine's model stores.
+ *
+ * A store whose path names the install directory is checked under the verified
+ * installation **and** under every configured launch path. That second base is
+ * what makes a ComfyUI whose `user/` tree sits beside its `main.py` — an install
+ * whose launcher sets `cwd` to the source directory rather than to the repository
+ * root — report its saved workflows at all. It is also what keeps the answer
+ * correct after the engine folder moves: the configured path may be stale, so both
+ * bases are tried and the readable one wins, rather than one silently replacing
+ * the other.
+ *
+ * A candidate that exists nowhere is still reported, for each base that was
+ * checked, because "we looked here and it was not there" is the fact an operator
+ * opening this page needs. The composed path keeps the separator style the
+ * candidate was written with, so a page or an API response reads the same on
+ * Windows and on a POSIX host.
+ *
  * @param probes - the filesystem probes.
  * @param known - the known-engine entry, when the engine is one this page knows.
  * @param installPath - the resolved installation directory.
+ * @param configuredPaths - launch paths the catalog configured for this engine.
+ * @param configuredOllamaStore - an Ollama store the host's own env names.
  * @returns one row per store, with its contents when the store lists files.
  */
 async function describeStores(
   probes: InventoryProbes,
   known: KnownEngine | undefined,
   installPath: string | undefined,
+  configuredPaths: readonly string[],
   configuredOllamaStore?: string,
 ): Promise<StorePath[]> {
   if (known === undefined) return [];
@@ -702,21 +844,65 @@ async function describeStores(
   const candidates = [...known.storeCandidates];
   const ollamaStore = configuredOllamaStore ?? process.env['OLLAMA_MODELS'];
   if (known.id === 'ollama' && ollamaStore) candidates.unshift({ label: 'Configured Ollama model store', path: ollamaStore });
+  const bases = [...new Set([installPath, ...configuredPaths].filter((path): path is string => path !== undefined))];
   for (const candidate of candidates) {
     if (candidate.path.includes('%INSTALL%')) {
-      if (installPath === undefined) continue;
-    }
-    const path = expandPath(candidate.path.replace('%INSTALL%', installPath ?? ''));
-    const exists = await probes.isDirectory(path);
-    if (!exists) {
-      stores.push({ label: candidate.label, path, exists: false });
+      if (bases.length === 0) continue;
+      // Every directory that could hold it, in priority order, so a stale
+      // configured path cannot hide a real install or the other way round. A
+      // configured *file* — a launch command, typically — is not a base for a
+      // directory, and reporting `python.exe/user/default/workflows` as a checked
+      // store would be noise dressed as evidence.
+      let checkedBase = false;
+      for (const base of bases) {
+        if (!(await probes.isDirectory(base))) continue;
+        checkedBase = true;
+        stores.push(await describeStoreAt(probes, candidate, composeStorePath(candidate.path, base)));
+      }
+      if (!checkedBase) {
+        stores.push({ label: candidate.label, path: composeStorePath(candidate.path, bases[0]!), exists: false });
+      }
       continue;
     }
-    const files =
-      candidate.listFiles === true ? await describeModelDirectory(probes, path) : undefined;
-    stores.push({ label: candidate.label, path, exists: true, ...(files === undefined ? {} : { files }) });
+    stores.push(await describeStoreAt(probes, candidate, expandPath(candidate.path)));
   }
   return stores;
+}
+
+/**
+ * Compose a store path from its declared template and a resolved base.
+ *
+ * The composed path uses forward slashes, which both Windows and POSIX accept,
+ * so the same store is spelled the same way in the page, in the route's JSON and
+ * on every platform this plugin runs on. `%INSTALL%/...` and `%INSTALL%\...` are
+ * both understood.
+ *
+ * @param template - the declared store path, containing `%INSTALL%`.
+ * @param base - the resolved base directory.
+ * @returns the composed path.
+ */
+function composeStorePath(template: string, base: string): string {
+  const normalizedBase = base.replace(/\\/g, '/');
+  const joined = template.replace(/[/\\]?%INSTALL%/g, normalizedBase + '/');
+  return expandPath(joined.replace(/\\/g, '/').replace(/\/+/g, '/'));
+}
+/**
+ * Read one store directory's row.
+ *
+ * @param probes - the filesystem probes.
+ * @param candidate - the declared store.
+ * @param path - the resolved absolute path.
+ * @returns the row, with its contents when the store lists files.
+ */
+async function describeStoreAt(
+  probes: InventoryProbes,
+  candidate: KnownEngine['storeCandidates'][number],
+  path: string,
+): Promise<StorePath> {
+  const exists = await probes.isDirectory(path);
+  if (!exists) return { label: candidate.label, path, exists: false };
+  const files = candidate.listFiles === true ? await describeModelDirectory(probes, path) : undefined;
+  return { label: candidate.label, path, exists: true, ...(files === undefined ? {} : { files }) };
 }
 
 /**
@@ -835,6 +1021,8 @@ export function registerInventoryRoute(
     readonly workflowDir?: string;
     /** Per-probe budget in milliseconds; filesystem traversal is separately capped. */
     readonly scanTimeoutMs?: number;
+    /** Where discovered workflows are remembered between launches. */
+    readonly workflowCatalogPath?: string;
   },
 ): void {
     const respond = (res: ServerResponse, inventory: Inventory): void => {
@@ -895,8 +1083,10 @@ export function registerInventoryRoute(
           ...(options.probes === undefined ? {} : { probes: options.probes }),
           ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
           ...(options.scanTimeoutMs === undefined ? {} : { scanTimeoutMs: options.scanTimeoutMs }),
+          ...(options.workflowCatalogPath === undefined ? {} : { workflowCatalogPath: options.workflowCatalogPath }),
           // Both Scan and Refresh re-check availability; neither launches engines.
           probe: true,
+          logger: log,
           log: (message) => log.debug(message),
         });
         respond(res, inventory);

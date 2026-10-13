@@ -93,13 +93,14 @@ function machine(options: { ollamaUp?: boolean; probeOllamaTags?: boolean } = {}
       throw new Error('connect ECONNREFUSED');
     },
     isDirectory: async (path) =>
-      norm(path) === 'C:/ComfyUI' || norm(path) === 'C:/ComfyUI/user/default/workflows',
-    isFile: async (path) => ['C:/ComfyUI/main.py', 'C:/ComfyUI/server.py'].includes(norm(path)),
+      ['C:/ComfyUI', 'C:/ComfyUI/src', 'C:/ComfyUI/src/user/default/workflows', 'C:/ComfyUI/user/default/workflows']
+        .includes(norm(path)),
+    isFile: async (path) => ['C:/ComfyUI/src/main.py', 'C:/ComfyUI/src/server.py', 'C:/ComfyUI/main.py', 'C:/ComfyUI/server.py'].includes(norm(path)),
     listDir: async (path) => {
-      if (norm(path) === 'C:/ComfyUI/user/default/workflows') {
+      if (norm(path) === 'C:/ComfyUI/src/user/default/workflows' || norm(path) === 'C:/ComfyUI/user/default/workflows') {
         return [{ name: 'demo', isDirectory: true }];
       }
-      if (norm(path) === 'C:/ComfyUI/user/default/workflows/demo') {
+      if (norm(path) === 'C:/ComfyUI/src/user/default/workflows/demo' || norm(path) === 'C:/ComfyUI/user/default/workflows/demo') {
         return [{ name: 'workflow.json', isDirectory: false, sizeBytes: 512 }];
       }
       return undefined;
@@ -148,6 +149,9 @@ async function inventory(options: { probes?: InventoryProbes; probe?: boolean } 
       allowProcessLaunch: true,
       probes: options.probes ?? machine(),
       probe: options.probe ?? true,
+      // The suite must never write to the real harness home; the workflow
+      // catalog's own tests pass a temporary path explicitly.
+      persistWorkflows: false,
     });
   } finally {
     await instance.dispose();
@@ -282,6 +286,63 @@ describe('engine inventory (host half)', () => {
     assert.equal(comfy.installation, 'not_found');
   });
 
+  it('finds an installation whose markers live in a subdirectory, and its workflow store with it', async () => {
+    // A real ComfyUI release keeps `main.py` and `server.py` under `src/`, and its
+    // saved workflows under `src/user/default/workflows`. Reporting the repository
+    // root as the installation put the store at `<root>/user/...`, which does not
+    // exist — so the page listed no workflows at all with the engine down.
+    const report = await inventory({
+      probes: {
+        ...machine({ ollamaUp: false }),
+        isDirectory: async (path) => ['C:/ComfyUI', 'C:/ComfyUI/src', 'C:/ComfyUI/src/user/default/workflows']
+          .includes(path.replace(/\\/g, '/')),
+        isFile: async (path) => ['C:/ComfyUI/src/main.py', 'C:/ComfyUI/src/server.py'].includes(path.replace(/\\/g, '/')),
+      },
+    });
+    const comfy = report.engines.find((engine) => engine.id === 'comfyui')!;
+    assert.equal(comfy.installPath, 'C:/ComfyUI/src', 'the directory whose contents are the install, not its parent');
+    assert.equal(comfy.installation, 'installed');
+    const store = comfy.storePaths.find((entry) => entry.exists === true);
+    assert.equal(store?.path, 'C:/ComfyUI/src/user/default/workflows');
+  });
+
+  it('does not call a directory with no engine markers an installation', async () => {
+    // `C:/ComfyUI` exists on many machines as a folder of checkpoints and nothing
+    // else. Claiming it is an install — and therefore that its workflows are
+    // somewhere under it — is a confident wrong answer.
+    const report = await inventory({
+      probes: {
+        ...machine({ ollamaUp: false }),
+        isDirectory: async (path) => path.replace(/\\/g, '/') === 'C:/ComfyUI',
+        isFile: async () => false,
+        listDir: async (path) => (path.replace(/\\/g, '/') === 'C:/ComfyUI' ? [{ name: 'models', isDirectory: true }] : undefined),
+      },
+    });
+    const comfy = report.engines.find((engine) => engine.id === 'comfyui')!;
+    assert.equal(comfy.installPath, undefined);
+    assert.equal(comfy.installation, 'not_found');
+  });
+
+  it('reports every configured base a store was checked under, and only directories', async () => {
+    // A configured launch *command* is a file, not a base for a directory: listing
+    // `python.exe/user/default/workflows` as a checked store is noise dressed as
+    // evidence, and it buries the store that is really there.
+    const report = await inventory({
+      probes: {
+        ...machine({ ollamaUp: false }),
+        isDirectory: async (path) => ['C:/ComfyUI/src', 'C:/ComfyUI/src/user/default/workflows']
+          .includes(path.replace(/\\/g, '/')),
+        isFile: async (path) => ['C:/ComfyUI/src/main.py', 'C:/ComfyUI/src/server.py'].includes(path.replace(/\\/g, '/')),
+      },
+    });
+    const comfy = report.engines.find((engine) => engine.id === 'comfyui')!;
+    assert.ok(comfy.storePaths.length > 0);
+    assert.ok(
+      comfy.storePaths.every((entry) => !entry.path.includes('python.exe/')),
+      `a launch command was used as a directory base: ${comfy.storePaths.map((entry) => entry.path).join(', ')}`,
+    );
+  });
+
   it('contains denied installation probes and invalid readiness data per engine', async () => {
     const report = await inventory({ probes: {
       ...machine(),
@@ -307,6 +368,7 @@ describe('engine inventory (host half)', () => {
     const base = machine({ ollamaUp: false });
     try {
       const report = await buildInventory(instance, { hosts: hosts as never, catalogPath: 'C:/catalog/models.json', allowProcessLaunch: false,
+        persistWorkflows: false,
         probes: { ...base, fetchJson: (url, timeout) => url.includes(':11435') ? Promise.resolve({ models: [{ name: 'good:latest' }] }) : base.fetchJson(url, timeout) } });
       const secondary = report.models.find((model) => model.id === 'secondary_text')!;
       assert.equal(secondary.availability, 'available');
@@ -321,6 +383,7 @@ describe('engine inventory (host half)', () => {
       const base = machine();
       const report = await buildInventory(instance, {
         hosts: catalog().hosts as never, catalogPath: 'C:/catalog/models.json', allowProcessLaunch: true, scanTimeoutMs: 15,
+        persistWorkflows: false,
         probes: { ...base, fetchJson: (url, timeout) => url.includes(':11434') ? new Promise(() => {}) : base.fetchJson(url, timeout) },
       });
       assert.equal(report.engines.find((engine) => engine.id === 'comfyui')?.running, true);

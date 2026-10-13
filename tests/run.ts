@@ -49,6 +49,7 @@ import './discovery-comfyui-workflow.test.ts';
 import './comfy-workflow-boundary.test.ts';
 import './subgraph.test.ts';
 import './scan.test.ts';
+import './comfyui-offline.test.ts';
 import './policy.test.ts';
 import './readiness.test.ts';
 import './startup.test.ts';

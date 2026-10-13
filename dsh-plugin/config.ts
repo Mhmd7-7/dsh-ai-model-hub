@@ -187,6 +187,16 @@ export interface PluginConfig {
   /** Per-probe budget in milliseconds; directory walks also have count/depth/deadline limits. Defaults to 4000. */
   scanTimeoutMs?: number;
   /**
+   * Where the workflows a scan discovers are remembered between launches.
+   *
+   * Omitted means `~/.dsh/plugins/dsh-ai-model-hub/workflow-catalog.json`, beside
+   * the capability policy and for the same reason: that is the one place a
+   * third-party plugin can own durable state. The file is what makes a saved
+   * workflow discoverable while ComfyUI is stopped — on a first launch included —
+   * so it belongs to the plugin rather than to the catalog an operator edits.
+   */
+  workflowCatalogPath?: string;
+  /**
    * Where the saved capability policy lives.
    *
    * The policy — the per-capability order and enable/disable decisions made on
@@ -239,6 +249,7 @@ export const Config = z.object({
   discoveryTimeoutMs: z.number().step(1).min(1).default(5_000),
   comfyuiWorkflowDir: z.string().default(''),
   scanTimeoutMs: z.number().step(1).min(1).default(4_000),
+  workflowCatalogPath: z.string().default(''),
   policyPath: z.string().default(''),
   // 0 is the unlimited sentinel; the default must itself pass Loader validation.
   attemptBudget: z.number().step(1).min(0).default(0),
@@ -266,6 +277,7 @@ export function resolvePluginConfig(config: Partial<PluginConfig> | undefined): 
     discoveryTimeoutMs: config?.discoveryTimeoutMs ?? 5_000,
     comfyuiWorkflowDir: config?.comfyuiWorkflowDir ?? '',
     scanTimeoutMs: config?.scanTimeoutMs ?? 4_000,
+    workflowCatalogPath: config?.workflowCatalogPath ?? '',
     policyPath: config?.policyPath ?? '',
     // `0` is the schema's "not configured" spelling for an absent budget, since
     // schemastery's numeric default cannot be `undefined`. It is normalized away

@@ -98,10 +98,12 @@
       #   discoveryTimeoutMs: 5000
       #
       #   # A directory of ComfyUI workflow JSON files for the Local models scan.
-      #   # The scan already reads the workflows ComfyUI has saved, through the
-      #   # engine's own /userdata route; this is the second source, and the one
-      #   # that works while ComfyUI is down or when workflows are kept beside the
-      #   # catalog. Every *.json file under it is read, recursively.
+      #   # The scan already reads the workflows ComfyUI has saved — through the
+      #   # engine's own /userdata route while it answers, and from its own
+      #   # saved-workflow store on disk while it does not — and this is the
+      #   # additional source for workflows kept beside the catalog. Every *.json
+      #   # file under it is read, recursively. A relative path is resolved against
+      #   # the catalog, and %VAR% and ~/ are expanded.
       #   #
       #   # It is a source of WORKFLOWS only. Nothing here (or anywhere else on
       #   # that page) enumerates checkpoints, LoRAs, VAEs or custom nodes: those
@@ -111,6 +113,12 @@
       #   # Budget for each probe, in milliseconds; directory walks also have
       #   # count/depth/deadline limits. Scan/Refresh never launch engines.
       #   scanTimeoutMs: 4000
+      #
+      #   # Where the workflows a scan discovers are remembered, so they stay
+      #   # listed while ComfyUI is stopped — including on a first launch, where
+      #   # the local files are the only source there is. Omitted =>
+      #   # ~/.dsh/plugins/dsh-ai-model-hub/workflow-catalog.json.
+      #   workflowCatalogPath: ''
       #
       #   # Where the saved capability policy lives. The policy — the per-capability
       #   # order and enable/disable decisions made on the Local models page — is

@@ -463,10 +463,31 @@ cannot hide the workflows and a ComfyUI that is down cannot hide the models; eac
 source reports its own status. Scanning twice refreshes the list rather than
 growing it, because every entry's id comes from its source location.
 
+**A saved workflow is discovered without a running ComfyUI.** Workflow discovery
+reads the configured directories, the engine's own saved-workflow store when it
+can be found on disk, the active catalog, and the workflows earlier scans
+remembered — so a first launch with the engine stopped still lists the graphs that
+are on the machine, and an engine that stops mid-session cannot take them off the
+screen. The list says which evidence it has: `ComfyUI stopped` when a refused
+connection proves the process is not running, `ComfyUI unreachable` when a timeout
+or a routed address leaves that genuinely unknown, and a cached row whenever the
+contract came from a previous observation rather than this pass. Only a scan that
+completely read a source can conclude a workflow was deleted; a failure never can.
+
+The remembered workflows live in
+`~/.dsh/plugins/dsh-ai-model-hub/workflow-catalog.json`, beside the capability
+policy and for the same reason: it is machine state that changes without anyone
+editing a file. It is per host *and* endpoint, so repointing the catalog at another
+ComfyUI does not resurrect the old engine's workflows. `workflowCatalogPath`
+configures it; `DSH_AI_MODEL_HUB_WORKFLOW_CATALOG` redirects it for a test.
+
 **Scan and Refresh never launch or stop engines**, even when invocation is allowed
 to launch them. Engine states distinguish `running`, `installed_unreachable`,
 `not_found` in the checked locations, and `unknown`. Connection failure alone
-proves neither that a process is stopped nor that an installation is absent.
+proves neither that a process is stopped nor that an installation is absent. The
+installation is the directory whose *contents* are the engine — a ComfyUI whose
+`main.py` lives under `src/` is installed at `src/`, which is also where its
+saved-workflow store hangs from.
 
 Resource contract status is separate from availability. Each resource reports
 `live`, `local`, `catalog`, or `cached` freshness and its observation timestamp.
@@ -482,7 +503,15 @@ Workflow contract statuses include:
 | `ready` | Saved in API format — the hub queues it as it stands |
 | `needs_conversion` | Saved in the editor's UI format. It is listed and converted for execution, but it is not the same as an API export |
 | `invalid` | Readable, but produces nothing a caller can keep. The reason is shown |
+| `unreadable` | The file or the engine's copy of it could not be retrieved. The transport reason is shown, because the document was never seen |
 | `unavailable` | The engine needed to interpret it could not be reached |
+
+Running a remembered workflow while ComfyUI is stopped goes through the same
+lifecycle manager as any other cold engine: the configured instance is started,
+its readiness is awaited within the declared budget, and the graph is queued once it
+answers. A startup that is refused or fails leaves the workflow listed with the
+reason, and never falls through to a subscription provider — a workflow the user
+picked is not silently swapped for a different one.
 
 Runnable workflows are published to the hub as workflow-backed providers, so the
 agent can route to them with the existing `invoke_model` tool by pinning the
@@ -515,10 +544,21 @@ than inside ComfyUI:
 config:
   comfyuiWorkflowDir: 'C:/workflows/comfy'   # every *.json under it, recursively
   scanTimeoutMs: 4000                      # per-probe budget; filesystem walks are also capped
+  workflowCatalogPath: ''                  # where discovered workflows are remembered
 ```
 
-The directory is a source of workflows only — nothing in it enumerates weights or
-custom nodes.
+A relative directory is resolved against the catalog that configured it, and
+`%VAR%` and `~/` are expanded from the host's own environment, so the same
+configuration works on Windows and on a POSIX host. The directory is a source of
+workflows only — nothing in it enumerates weights or custom nodes.
+
+To see what a *stopped* engine still yields on this machine, with every HTTP probe
+refusing:
+
+```bash
+node scripts/verify-live-offline.ts                     # writes nothing
+node scripts/verify-live-offline.ts ./scratch-catalog.json
+```
 
 ### Capability priorities: order and enablement you own
 
