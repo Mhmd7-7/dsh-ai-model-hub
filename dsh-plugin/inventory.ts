@@ -25,12 +25,13 @@
  * @module dsh-ai-model-hub/dsh-plugin/inventory
  */
 
-import { stat, readdir } from 'node:fs/promises';
+import { stat, readdir, readFile } from 'node:fs/promises';
+import { withinBudget } from './probe-budget.ts';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, isAbsolute, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
-import { serviceInScope } from './compat.ts';
+import { installRoute } from './compat.ts';
 import type { ModelHub } from '../src/hub.ts';
 import type { ModelHost } from '../src/index.ts';
 import { scanLocalResources, readyPathFor } from './scan.ts';
@@ -88,6 +89,12 @@ export interface EngineReport {
   readonly endpoint?: string;
   /** Whether the last probe answered. */
   readonly running: boolean;
+  /** Connection failure is not evidence that a process is stopped. */
+  readonly state: 'running' | 'installed_unreachable' | 'not_found' | 'unknown';
+  readonly installation: 'installed' | 'not_found' | 'unknown';
+  readonly configuredPaths: readonly string[];
+  readonly checkedAt: string;
+  readonly errors: readonly string[];
   /** Why the probe failed, or what it answered. */
   readonly statusDetail: string;
   /** Whether the hub may start this engine. */
@@ -126,6 +133,9 @@ export interface CatalogModelReport {
   readonly hostId?: string;
   /** Live availability. */
   readonly availability: string;
+  /** Evidence for this row; endpoint liveness does not verify a workflow's weights. */
+  readonly freshness: 'catalog' | 'live';
+  readonly checkedAt?: string;
   /** Live lifecycle state. */
   readonly lifecycle: string;
   /** Whether the hub may start it. */
@@ -194,6 +204,9 @@ export interface Inventory {
  * without probing a real one.
  */
 export interface InventoryProbes {
+  /** Verify an installation marker or executable, rather than merely its containing directory. */
+  readonly isFile?: (path: string) => Promise<boolean>;
+  readonly readFile?: (path: string) => Promise<string>;
   /**
    * Read a JSON endpoint.
    * @param url - absolute URL.
@@ -217,6 +230,14 @@ export interface InventoryProbes {
 
 /** The default probes: a timed fetch and the real filesystem. */
 export const DEFAULT_PROBES: InventoryProbes = {
+  readFile: (path) => readFile(path, 'utf8'),
+  isFile: async (path) => {
+    try { return (await stat(path)).isFile(); }
+    catch (error) {
+      if (['ENOENT', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException).code))) return false;
+      throw error;
+    }
+  },
   fetchJson: async (url, timeoutMs) => {
     const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) {
@@ -231,15 +252,16 @@ export const DEFAULT_PROBES: InventoryProbes = {
   isDirectory: async (path) => {
     try {
       return (await stat(path)).isDirectory();
-    } catch {
-      return false;
+    } catch (error) {
+      if (['ENOENT', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException).code))) return false;
+      throw error;
     }
   },
   listDir: async (path) => {
     try {
       const entries = await readdir(path, { withFileTypes: true });
       return await Promise.all(
-        entries.map(async (entry) => {
+        entries.slice(0, 200).map(async (entry) => {
           if (entry.isDirectory()) return { name: entry.name, isDirectory: true };
           try {
             const info = await stat(join(path, entry.name));
@@ -368,15 +390,80 @@ export async function buildInventory(
      * the engine has saved. Unset means the engine's own store is the only source.
      */
     readonly workflowDir?: string;
-    /** Budget for one scan request, in milliseconds. */
+    /** Per-probe budget in milliseconds; filesystem traversal is separately capped. */
     readonly scanTimeoutMs?: number;
     /** Diagnostic sink for the scan; defaults to silence. */
     readonly log?: (message: string) => void;
   },
 ): Promise<Inventory> {
-  const probes = options.probes ?? DEFAULT_PROBES;
+  const requestedBudget = options.scanTimeoutMs ?? PROBE_TIMEOUT_MS;
+  const budget = Number.isFinite(requestedBudget) ? Math.max(1, Math.min(60_000, requestedBudget)) : PROBE_TIMEOUT_MS;
+  const configuredPath = (path: string): string => {
+    const expanded = expandPath(path);
+    return isAbsolute(expanded) || /^[A-Za-z]:[/\\]/.test(expanded) || !/[/\\]/.test(expanded)
+      ? expanded : resolve(dirname(options.catalogPath), expanded);
+  };
+  const rawProbes = options.probes ?? DEFAULT_PROBES;
+  const probes: InventoryProbes = {
+    fetchJson: (url, timeout) => withinBudget(() => rawProbes.fetchJson(url, timeout), Math.min(timeout, budget)),
+    isDirectory: (path) => withinBudget(() => rawProbes.isDirectory(path), budget),
+    listDir: (path) => withinBudget(() => rawProbes.listDir(path), budget),
+    ...(rawProbes.isFile === undefined ? {} : { isFile: (path: string) => withinBudget(() => rawProbes.isFile!(path), budget) }),
+    ...(rawProbes.readFile === undefined ? {} : { readFile: (path: string) => withinBudget(() => rawProbes.readFile!(path), budget) }),
+  };
   const declaredHosts = options.hosts;
   const views = hub.listModels({ includeDisabled: true });
+  const reported = new Set<string>();
+  const candidates: { host: ModelHost; known?: KnownEngine; configured: boolean }[] = declaredHosts.map((host) => {
+    const known = KNOWN_ENGINES.find((entry) => entry.id === host.id || entry.id === host.runtime.engine);
+    reported.add(host.id);
+    if (known !== undefined) reported.add(known.id);
+    return { host, ...(known === undefined ? {} : { known }), configured: true };
+  });
+  for (const known of KNOWN_ENGINES) {
+    if (reported.has(known.id)) continue;
+    candidates.push({
+      host: { id: known.id, name: known.name, adapter: known.adapter as ModelHost['adapter'],
+        runtime: { engine: known.id, adapter: known.adapter as ModelHost['adapter'], endpoint: known.endpoint } },
+      known, configured: false,
+    });
+  }
+  // Installation evidence is collected independently from endpoint liveness.
+  const engines = await Promise.all(candidates.map(async ({ host, known, configured }): Promise<EngineReport> => {
+    const lifecycle = host.lifecycle ?? views.find((entry) => entry.model.hostId === host.id)?.model.lifecycle;
+    const start = lifecycle?.start;
+    const configuredPaths = [start?.cwd, start?.command].filter((path): path is string => path !== undefined).map(configuredPath);
+    const errors: string[] = [];
+    const install = await resolveInstall(probes, [
+      ...(start?.cwd === undefined ? [] : [configuredPath(start.cwd)]),
+      ...(known?.installCandidates ?? []),
+    ], known?.id ?? host.runtime.engine, start?.command === undefined ? undefined : configuredPath(start.command), errors);
+    const [endpoint, stores, models] = await Promise.all([
+      describeEndpoint(probes, host, options.probe !== false),
+      describeStores(probes, known, install.path, host.runtime.env?.['OLLAMA_MODELS']).catch((error: unknown) => { errors.push(`model stores: ${error instanceof Error ? error.message : String(error)}`); return []; }),
+      describeEngineModels(probes, known, host.runtime.endpoint, install.path),
+    ]);
+    if (endpoint.error !== undefined) errors.push(endpoint.error);
+    if (models.error !== undefined) errors.push(models.error);
+    const installation = install.path !== undefined ? 'installed' : errors.some((entry) => entry.startsWith('installation:')) ? 'unknown' : 'not_found';
+    return {
+      id: host.id, name: host.name, adapter: host.adapter, configured,
+      ...(host.runtime.endpoint === undefined ? {} : { endpoint: host.runtime.endpoint }),
+      running: endpoint.running, statusDetail: endpoint.statusDetail,
+      state: endpoint.running ? 'running' : installation === 'installed' ? 'installed_unreachable' : configured || endpoint.unverified || installation === 'unknown' ? 'unknown' : 'not_found',
+      installation, configuredPaths, checkedAt: new Date().toISOString(), errors,
+      startable: options.allowProcessLaunch && lifecycle?.startable === true,
+      ...(start === undefined ? {} : { launch: { command: expandPath(start.command), args: start.args ?? [], ...(start.cwd === undefined ? {} : { cwd: expandPath(start.cwd) }) } }),
+      installSource: install.source,
+      ...(install.path === undefined ? { checkedPaths: install.checked } : { installPath: install.path }),
+      storePaths: stores, models: models.models, modelsSource: models.modelsSource,
+      servedModelIds: views.filter((entry) => entry.model.hostId === host.id).map((entry) => entry.model.id),
+    };
+  }));
+  const workflowDirsByHost: Record<string, readonly string[]> = {};
+  for (const engine of engines) {
+    if (engine.adapter === 'comfyui') workflowDirsByHost[engine.id] = engine.storePaths.filter((store) => store.exists).map((store) => store.path);
+  }
 
   // The scan is the page's actual job, so it always runs. It is contained by
   // construction — each engine is contacted on its own and reports its own
@@ -384,6 +471,9 @@ export async function buildInventory(
   // has instead of showing an error page.
   const scan = await scanLocalResources(hub, {
     hosts: declaredHosts,
+    catalogPath: options.catalogPath,
+    workflowDirsByHost,
+    startEngine: false,
     ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
     ...(options.scanTimeoutMs === undefined ? {} : { timeoutMs: options.scanTimeoutMs }),
     // Only an injected probe set is adapted; otherwise the scan keeps its own
@@ -392,71 +482,11 @@ export async function buildInventory(
     ...(options.log === undefined ? {} : { log: options.log }),
   });
 
-  const engines: EngineReport[] = [];
-  const reported = new Set<string>();
-
-  for (const host of declaredHosts) {
-    const view = views.find((entry) => entry.model.hostId === host.id);
-    const lifecycle = view?.model.lifecycle;
-    const start = lifecycle?.start;
-    const known = KNOWN_ENGINES.find((entry) => entry.id === host.id || entry.id === host.runtime.engine);
-    const endpoint = host.runtime.endpoint;
-
-    const install = await resolveInstall(probes, [
-      ...(start?.cwd === undefined ? [] : [expandPath(start.cwd)]),
-      ...(start?.command === undefined ? [] : [expandPath(start.command)]),
-      ...(known?.installCandidates ?? []),
-    ]);
-
-    engines.push({
-      id: host.id,
-      name: host.name,
-      adapter: host.adapter,
-      configured: true,
-      ...(endpoint === undefined ? {} : { endpoint }),
-      ...(await describeEndpoint(probes, host, options.probe === true)),
-      startable: lifecycle?.startable === true,
-      ...(start === undefined
-        ? {}
-        : {
-            launch: {
-              command: expandPath(start.command),
-              args: start.args ?? [],
-              ...(start.cwd === undefined ? {} : { cwd: expandPath(start.cwd) }),
-            },
-          }),
-      installSource: install.source,
-      ...(install.path === undefined ? {} : { installPath: install.path }),
-      ...(install.path === undefined && install.checked.length > 0 ? { checkedPaths: install.checked } : {}),
-      storePaths: await describeStores(probes, known, install.path),
-      ...(await describeEngineModels(probes, known, endpoint, install.path)),
-      servedModelIds: views.filter((entry) => entry.model.hostId === host.id).map((entry) => entry.model.id),
-    });
-    reported.add(host.id);
-    if (known !== undefined) reported.add(known.id);
-  }
-
-  for (const known of KNOWN_ENGINES) {
-    if (reported.has(known.id)) continue;
-    const install = await resolveInstall(probes, known.installCandidates);
-    engines.push({
-      id: known.id,
-      name: known.name,
-      adapter: known.adapter,
-      configured: false,
-      endpoint: known.endpoint,
-      ...(await describeEndpoint(
-        probes,
-        { runtime: { engine: known.id, adapter: known.adapter as ModelHost['adapter'], endpoint: known.endpoint } },
-        options.probe === true,
-      )),
-      startable: false,
-      installSource: install.source,
-      ...(install.path === undefined ? { checkedPaths: install.checked } : { installPath: install.path }),
-      storePaths: await describeStores(probes, known, install.path),
-      ...(await describeEngineModels(probes, known, known.endpoint, install.path)),
-      servedModelIds: [],
-    });
+  const currentViews = hub.listModels({ includeDisabled: true });
+  for (const engine of engines) {
+    (engine as { servedModelIds: readonly string[] }).servedModelIds = currentViews.filter((view) => view.model.hostId === engine.id).map((view) => view.model.id);
+    const failures = scan.sources.filter((source) => source.id === engine.id && !source.ok).map((source) => source.detail);
+    (engine.errors as string[]).push(...failures.filter((detail) => !engine.errors.includes(detail)));
   }
 
   const capabilities = hub.listCapabilities().map((entry) => ({
@@ -488,22 +518,31 @@ export async function buildInventory(
       notes: hub.machineProfile.notes,
     },
     engines,
-    models: views.map((view) => ({
+    models: currentViews.map((view) => {
+      const engine = view.model.hostId !== undefined
+        ? engines.find((entry) => entry.id === view.model.hostId)
+        : engines.find((entry) => entry.endpoint === view.model.runtime.endpoint && entry.id === view.model.runtime.engine);
+      const native = (view.model.adapterConfig as { model?: unknown } | undefined)?.model;
+      const liveModelList = engine?.running === true && engine.modelsSource === 'Ollama /api/tags';
+      const nativeFound = liveModelList && typeof native === 'string' && engine.models.some((entry) => entry.id === native || entry.id === `${native}:latest`);
+      const availability = view.model.enabled === false ? 'disabled' : engine?.running === false && engine.endpoint !== undefined ? 'unavailable' : liveModelList && typeof native === 'string' ? nativeFound ? 'available' : 'unavailable' : 'unknown';
+      return {
       id: view.model.id,
       name: view.model.name,
       type: String(view.model.type),
       capabilities: view.model.capabilities.map(String),
       engine: view.model.runtime.engine,
       ...(view.model.hostId === undefined ? {} : { hostId: view.model.hostId }),
-      availability: String(view.status.availability),
+      availability,
+      freshness: liveModelList ? 'live' : 'catalog',
+      ...(engine === undefined ? {} : { checkedAt: engine.checkedAt }),
       lifecycle: String(view.status.lifecycle),
       startable: view.model.lifecycle.startable,
       ...(view.status.pid === undefined ? {} : { pid: view.status.pid }),
-      ...(view.status.health === undefined ? {} : { healthy: view.status.health.healthy }),
-      ...(view.status.reason === undefined && view.status.health?.detail === undefined
-        ? {}
-        : { detail: view.status.reason ?? view.status.health?.detail ?? '' }),
-    })),
+      detail: availability === 'disabled' ? 'disabled by catalog' : engine?.running === false ? `${engine.statusDetail}; catalog knowledge only, not live model verification`
+        : liveModelList && typeof native === 'string' ? nativeFound ? 'model listed by live Ollama /api/tags' : 'configured model not listed by live Ollama /api/tags'
+        : 'known from catalog; model/workflow execution has not been live verified',
+    }; }),
     capabilities,
     unavailable: hub.listUnservedCapabilities().map((entry) => ({
       capability: String(entry.capability),
@@ -527,17 +566,49 @@ export async function buildInventory(
 async function resolveInstall(
   probes: InventoryProbes,
   candidates: readonly string[],
+  engine: string,
+  command: string | undefined,
+  errors: string[],
 ): Promise<{ path?: string; source: string; checked: string[] }> {
-  const checked: string[] = [];
-  for (const candidate of candidates) {
-    const path = expandPath(candidate).replace(/[/\\]+$/, '');
-    if (path.length === 0 || checked.includes(path)) continue;
-    checked.push(path);
-    if (await probes.isDirectory(path)) {
-      return { path, source: 'found on this machine', checked };
+  const checked = [...new Set(candidates.map((candidate) => expandPath(candidate).replace(/[/\\]+$/, '')).filter(Boolean))];
+  const markers = /comfyui/i.test(engine) ? ['main.py', 'src/main.py', 'ComfyUI/main.py']
+    : /ollama/i.test(engine) ? ['ollama.exe', 'ollama', 'bin/ollama']
+    : /a1111|forge/i.test(engine) ? ['webui.py', 'modules/launch_utils.py'] : [];
+  const found = await Promise.all(checked.map(async (path) => {
+    try {
+      if (!(await probes.isDirectory(path))) return false;
+      // An arbitrary existing cwd (or .ollama data folder) is not an installation.
+      const verify = async (file: string): Promise<boolean> => {
+        if (probes.isFile !== undefined) return await probes.isFile(file);
+        const parts = file.replace(/\\/g, '/');
+        const split = parts.lastIndexOf('/');
+        const entries = await probes.listDir(parts.slice(0, split));
+        return entries?.some((entry) => !entry.isDirectory && entry.name === parts.slice(split + 1)) === true;
+      };
+      if (/comfyui/i.test(engine)) {
+        return (await Promise.all(['', 'src', 'ComfyUI'].map(async (subdir) =>
+          (await verify(join(path, subdir, 'main.py'))) && (await verify(join(path, subdir, 'server.py'))),
+        ))).some(Boolean);
+      }
+      return (await Promise.all(markers.map((marker) => verify(join(path, marker))))).some(Boolean);
+    } catch (error) {
+      errors.push(`installation: ${path}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }));
+  const index = found.findIndex(Boolean);
+  if (index >= 0) return { path: checked[index]!, source: 'found on this machine', checked };
+  if (command !== undefined && probes.isFile !== undefined) {
+    const expanded = expandPath(command);
+    const executable = /[/\\]/.test(expanded) ? expanded : undefined;
+    // A Python interpreter proves Python exists, not that ComfyUI/A1111 does.
+    if (executable !== undefined && !/comfyui|a1111|forge/i.test(engine)) {
+      try {
+        if (await probes.isFile(executable)) return { path: executable.replace(/[/\\][^/\\]+$/, ''), source: 'verified launch executable', checked };
+      } catch (error) { errors.push(`installation: ${expanded}: ${error instanceof Error ? error.message : String(error)}`); }
     }
   }
-  return { source: 'not found on this machine', checked };
+  return { source: errors.some((error) => error.startsWith('installation:')) ? 'installation could not be verified' : 'not found in checked locations', checked };
 }
 
 /**
@@ -559,21 +630,26 @@ async function describeEndpoint(
   probes: InventoryProbes,
   host: Pick<ModelHost, 'runtime'>,
   live: boolean,
-): Promise<{ running: boolean; statusDetail: string }> {
+): Promise<{ running: boolean; statusDetail: string; error?: string; unverified?: boolean }> {
   const endpoint = host.runtime.endpoint;
-  if (endpoint === undefined) return { running: true, statusDetail: 'no endpoint: runs in process' };
-  if (!live) return { running: false, statusDetail: 'not probed yet — press Scan' };
+  if (endpoint === undefined) return { running: false, statusDetail: 'no endpoint: runtime has not been checked', unverified: true };
+  if (!live) return { running: false, statusDetail: 'not probed yet — press Scan', unverified: true };
   const path = readyPathFor(host.runtime.engine);
   const base = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
   try {
-    await probes.fetchJson(`${base}${path}`, PROBE_TIMEOUT_MS);
-    return { running: true, statusDetail: `${path} answered` };
+    const body = await probes.fetchJson(`${base}${path}`, PROBE_TIMEOUT_MS);
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error('invalid readiness data');
+    if (/ollama/i.test(host.runtime.engine) && !Array.isArray((body as { models?: unknown }).models)) throw new Error('invalid Ollama model list');
+    if (/comfyui/i.test(host.runtime.engine) && (!('system' in body) || !Array.isArray((body as { devices?: unknown }).devices))) throw new Error('invalid ComfyUI system stats');
+    return { running: true, statusDetail: `${path} answered with valid readiness data` };
   } catch (error) {
     const status = (error as { status?: number }).status;
     if (typeof status === 'number') {
-      return { running: false, statusDetail: `${path} answered HTTP ${status}` };
+      const detail = `${path} answered HTTP ${status}`;
+      return { running: false, statusDetail: detail, error: detail };
     }
-    return { running: false, statusDetail: `${path} unreachable: ${error instanceof Error ? error.message : String(error)}` };
+    const detail = `${path} not verified: ${error instanceof Error ? error.message : String(error)}`;
+    return { running: false, statusDetail: detail, error: detail };
   }
 }
 
@@ -604,6 +680,7 @@ function scanProbesFrom(probes: InventoryProbes): Partial<ScanProbes> {
     },
     isDirectory: probes.isDirectory,
     listDir: probes.listDir,
+    ...(probes.readFile === undefined ? {} : { readFile: probes.readFile }),
   };
 }
 
@@ -618,10 +695,14 @@ async function describeStores(
   probes: InventoryProbes,
   known: KnownEngine | undefined,
   installPath: string | undefined,
+  configuredOllamaStore?: string,
 ): Promise<StorePath[]> {
   if (known === undefined) return [];
   const stores: StorePath[] = [];
-  for (const candidate of known.storeCandidates) {
+  const candidates = [...known.storeCandidates];
+  const ollamaStore = configuredOllamaStore ?? process.env['OLLAMA_MODELS'];
+  if (known.id === 'ollama' && ollamaStore) candidates.unshift({ label: 'Configured Ollama model store', path: ollamaStore });
+  for (const candidate of candidates) {
     if (candidate.path.includes('%INSTALL%')) {
       if (installPath === undefined) continue;
     }
@@ -677,12 +758,12 @@ async function describeEngineModels(
   known: KnownEngine | undefined,
   endpoint: string | undefined,
   installPath: string | undefined,
-): Promise<{ models: EngineModel[]; modelsSource: string }> {
+): Promise<{ models: EngineModel[]; modelsSource: string; error?: string }> {
   if (known?.id === 'ollama' && endpoint !== undefined) {
     try {
       const body = await probes.fetchJson(`${endpoint}/api/tags`, PROBE_TIMEOUT_MS);
       const list = (body as { models?: unknown }).models;
-      if (!Array.isArray(list)) return { models: [], modelsSource: 'Ollama answered without a model list' };
+      if (!Array.isArray(list) || list.some((entry: unknown) => entry === null || typeof entry !== 'object' || typeof (entry as { name?: unknown }).name !== 'string')) throw new Error('invalid Ollama model list');
       return {
         models: list.map((entry) => {
           const model = entry as { name?: unknown; size?: unknown; details?: { parameter_size?: unknown; quantization_level?: unknown } };
@@ -698,7 +779,8 @@ async function describeEngineModels(
         modelsSource: 'Ollama /api/tags',
       };
     } catch (error) {
-      return { models: [], modelsSource: `Ollama did not answer: ${error instanceof Error ? error.message : String(error)}` };
+      const detail = `Ollama models not verified: ${error instanceof Error ? error.message : String(error)}`;
+      return { models: [], modelsSource: detail, error: detail };
     }
   }
   if (known?.id === 'comfyui') {
@@ -751,21 +833,10 @@ export function registerInventoryRoute(
     readonly probes?: InventoryProbes;
     /** A directory of ComfyUI workflow JSON files to scan, when configured. */
     readonly workflowDir?: string;
-    /** Budget for one scan request, in milliseconds. */
+    /** Per-probe budget in milliseconds; filesystem traversal is separately capped. */
     readonly scanTimeoutMs?: number;
   },
 ): void {
-  ctx.inject(['webServer'], (scope) => {
-    const server = serviceInScope<{
-      register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void;
-    }>(scope, 'webServer');
-    if (server === undefined || typeof server.register !== 'function') {
-      log.debug(
-        'this host exposes no usable web server, so the engine inventory page is not served; every model tool still works',
-      );
-      return;
-    }
-
     const respond = (res: ServerResponse, inventory: Inventory): void => {
       const body = JSON.stringify(inventory, null, 2);
       res.writeHead(200, {
@@ -816,12 +887,6 @@ export function registerInventoryRoute(
         return;
       }
       try {
-        const params = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams;
-        const probe = params.get('probe') === '1';
-        // `scan=1` is the Scan button. Both flags currently drive the same pass;
-        // they are kept separate because "probe the endpoints" and "re-read what
-        // the engines have" are different questions and may diverge.
-        const scan = params.get('scan') === '1';
         const inventory = await buildInventory(options.hub, {
           hosts: options.hosts ?? [],
           catalogPath: options.catalogPath,
@@ -830,7 +895,8 @@ export function registerInventoryRoute(
           ...(options.probes === undefined ? {} : { probes: options.probes }),
           ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
           ...(options.scanTimeoutMs === undefined ? {} : { scanTimeoutMs: options.scanTimeoutMs }),
-          probe: probe || scan,
+          // Both Scan and Refresh re-check availability; neither launches engines.
+          probe: true,
           log: (message) => log.debug(message),
         });
         respond(res, inventory);
@@ -841,7 +907,5 @@ export function registerInventoryRoute(
       }
     };
 
-    server.register({ kind: 'exact', path: INVENTORY_ROUTE, handler });
-    log.debug(`serving the engine inventory on ${INVENTORY_ROUTE}`);
-  });
+    installRoute(ctx, INVENTORY_ROUTE, (req, res) => handler(req as IncomingMessage, res as ServerResponse), 'engine inventory', log);
 }

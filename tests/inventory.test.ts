@@ -79,7 +79,7 @@ function machine(options: { ollamaUp?: boolean; probeOllamaTags?: boolean } = {}
   const norm = (path: string): string => path.replace(/\\/g, '/');
   return {
     fetchJson: async (url) => {
-      if (url === 'http://127.0.0.1:8188' || url === 'http://127.0.0.1:8188/system_stats') return { ok: true };
+      if (url === 'http://127.0.0.1:8188' || url === 'http://127.0.0.1:8188/system_stats') return { system: {}, devices: [] };
       if (url === 'http://127.0.0.1:8188/object_info') return comfyObjectInfo;
       if (url.endsWith('/userdata?dir=workflows&recurse=true')) return ['demo/workflow.json'];
       if (url === 'http://127.0.0.1:8188/userdata/demo%2Fworkflow.json') return comfyWorkflow;
@@ -94,6 +94,7 @@ function machine(options: { ollamaUp?: boolean; probeOllamaTags?: boolean } = {}
     },
     isDirectory: async (path) =>
       norm(path) === 'C:/ComfyUI' || norm(path) === 'C:/ComfyUI/user/default/workflows',
+    isFile: async (path) => ['C:/ComfyUI/main.py', 'C:/ComfyUI/server.py'].includes(norm(path)),
     listDir: async (path) => {
       if (norm(path) === 'C:/ComfyUI/user/default/workflows') {
         return [{ name: 'demo', isDirectory: true }];
@@ -246,6 +247,88 @@ describe('engine inventory (host half)', () => {
     assert.match(ollama?.statusDetail ?? '', /ECONNREFUSED/);
   });
 
+  for (const [ollamaUp, comfyUp] of [[true, true], [true, false], [false, true], [false, false]]) {
+    it(`finishes independent scan: Ollama ${ollamaUp ? 'running' : 'offline'}, ComfyUI ${comfyUp ? 'running' : 'offline'}`, async () => {
+      const base = machine();
+      const report = await inventory({ probes: {
+        ...base,
+        fetchJson: async (url, timeout) => {
+          if (url.includes(':11434') && !ollamaUp || url.includes(':8188') && !comfyUp) throw new Error('connect ECONNREFUSED');
+          return base.fetchJson(url, timeout);
+        },
+      } });
+      const ollama = report.engines.find((engine) => engine.id === 'ollama')!;
+      const comfy = report.engines.find((engine) => engine.id === 'comfyui')!;
+      assert.equal(ollama.running, ollamaUp);
+      assert.equal(comfy.running, comfyUp);
+      assert.equal(comfy.installation, 'installed');
+      assert.equal(comfy.state, comfyUp ? 'running' : 'installed_unreachable');
+      assert.equal(ollama.state, ollamaUp ? 'running' : 'unknown', 'configured does not prove installation or stopped process');
+      assert.equal(report.models.length, 2, 'catalog rows survive offline scans');
+      for (const model of report.models) {
+        const up = model.hostId === 'ollama' ? ollamaUp : comfyUp;
+        if (!up) { assert.equal(model.availability, 'unavailable'); assert.equal(model.freshness, 'catalog'); }
+      }
+      assert.equal(report.error, undefined, 'engine failures are not service failures');
+      if (!comfyUp) assert.ok(comfy.errors.some((error) => error.includes('ECONNREFUSED')));
+    });
+  }
+
+  it('does not verify installation from a configured directory alone', async () => {
+    const report = await inventory({ probes: { ...machine({ ollamaUp: false }), isFile: async () => false } });
+    const comfy = report.engines.find((engine) => engine.id === 'comfyui')!;
+    assert.equal(comfy.installPath, undefined);
+    assert.ok(comfy.configuredPaths.includes('C:/ComfyUI'));
+    assert.equal(comfy.installation, 'not_found');
+  });
+
+  it('contains denied installation probes and invalid readiness data per engine', async () => {
+    const report = await inventory({ probes: {
+      ...machine(),
+      isDirectory: async () => { throw new Error('access denied'); },
+      fetchJson: async (url) => url.includes(':11434') ? { models: [] } : null,
+    } });
+    const comfy = report.engines.find((engine) => engine.id === 'comfyui')!;
+    assert.equal(comfy.installation, 'unknown');
+    assert.equal(comfy.running, false);
+    assert.ok(comfy.errors.some((error) => error.includes('invalid readiness')));
+    assert.equal(report.engines.find((engine) => engine.id === 'ollama')?.running, true);
+    assert.equal(report.error, undefined);
+  });
+
+  it('uses exact host identity when two instances share an engine kind', async () => {
+    const config = catalog();
+    const hosts = config.hosts as { id: string; runtime: { endpoint: string } }[];
+    const first = hosts[0]!;
+    hosts.push({ ...first, id: 'ollama-secondary', runtime: { ...first.runtime, endpoint: 'http://127.0.0.1:11435' } });
+    const models = config.models as Record<string, unknown>[];
+    models.push({ id: 'secondary_text', name: 'Secondary', type: 'text_generation', host: 'ollama-secondary', capabilities: ['text_to_text'], adapterConfig: { model: 'good' } });
+    const instance = ModelHub.fromConfig(config, { manageTimers: false, probeResources: false });
+    const base = machine({ ollamaUp: false });
+    try {
+      const report = await buildInventory(instance, { hosts: hosts as never, catalogPath: 'C:/catalog/models.json', allowProcessLaunch: false,
+        probes: { ...base, fetchJson: (url, timeout) => url.includes(':11435') ? Promise.resolve({ models: [{ name: 'good:latest' }] }) : base.fetchJson(url, timeout) } });
+      const secondary = report.models.find((model) => model.id === 'secondary_text')!;
+      assert.equal(secondary.availability, 'available');
+      assert.equal(secondary.freshness, 'live');
+      assert.doesNotMatch(secondary.detail ?? '', /ECONNREFUSED/);
+    } finally { await instance.dispose(); }
+  });
+
+  it('bounds hanging endpoint probes and retains other engines and catalog models', async () => {
+    const instance = hub();
+    try {
+      const base = machine();
+      const report = await buildInventory(instance, {
+        hosts: catalog().hosts as never, catalogPath: 'C:/catalog/models.json', allowProcessLaunch: true, scanTimeoutMs: 15,
+        probes: { ...base, fetchJson: (url, timeout) => url.includes(':11434') ? new Promise(() => {}) : base.fetchJson(url, timeout) },
+      });
+      assert.equal(report.engines.find((engine) => engine.id === 'comfyui')?.running, true);
+      assert.ok(report.engines.find((engine) => engine.id === 'ollama')?.errors.some((error) => error.includes('timed out')));
+      assert.equal(report.models.length, 2);
+    } finally { await instance.dispose(); }
+  });
+
   it('carries the catalog models, capabilities, and what is unavailable', async () => {
     const report = await inventory();
     assert.equal(report.catalogPath, 'C:/catalog/models.json');
@@ -274,6 +357,7 @@ describe('the inventory route (host half)', () => {
     const ctx = {
       inject: (_deps: readonly string[], callback: (scope: unknown) => void) => {
         callback({
+          effect: (execute: () => unknown) => execute(),
           webServer: {
             register(route: { handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) {
               handler = route.handler;
@@ -336,8 +420,8 @@ describe('the inventory route (host half)', () => {
       const withoutProbe = fakeResponse();
       await handler({ method: 'GET', url: INVENTORY_ROUTE } as IncomingMessage, withoutProbe.res);
       const lazy = JSON.parse(withoutProbe.captured.body ?? '{}') as Inventory;
-      assert.equal(lazy.engines.find((engine) => engine.id === 'comfyui')?.running, false);
-      assert.match(lazy.engines.find((engine) => engine.id === 'comfyui')?.statusDetail ?? '', /not probed/);
+      assert.equal(lazy.engines.find((engine) => engine.id === 'comfyui')?.running, true, 'Refresh also performs a live check');
+      assert.match(lazy.engines.find((engine) => engine.id === 'comfyui')?.statusDetail ?? '', /readiness/);
 
       const withProbe = fakeResponse();
       await handler({ method: 'GET', url: `${INVENTORY_ROUTE}?probe=1` } as IncomingMessage, withProbe.res);
@@ -358,6 +442,7 @@ describe('the inventory route (host half)', () => {
       inject: (names: string[], callback: (scope: unknown) => void) => {
         assert.deepEqual(names, ['webServer']);
         callback({
+          effect: (execute: () => unknown) => execute(),
           webServer: {
             register(route: { handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) {
               handler = route.handler;
@@ -562,6 +647,14 @@ describe('the settings page (browser half)', () => {
         return component(props);
       };
       const react = {
+        useRef: (initial: unknown) => {
+          const key = currentComponent;
+          const slots = slotsByComponent.get(key) ?? [];
+          if (!slotsByComponent.has(key)) slotsByComponent.set(key, slots);
+          const index = slotIndex++;
+          if (slots.length <= index) slots.push({ value: { current: initial } });
+          return slots[index]?.value;
+        },
         useState: (initial: unknown) => {
           const key = currentComponent;
           const slots = slotsByComponent.get(key) ?? [];
@@ -580,11 +673,11 @@ describe('the settings page (browser half)', () => {
           ];
         },
         useEffect: (effect: () => void) => {
-          // Effects run once per component, on its first render.
           const key = currentComponent;
-          if (effectsRun.has(key)) return;
-          effectsRun.add(key);
-          effect();
+          const slots = slotsByComponent.get(key) ?? [];
+          if (!slotsByComponent.has(key)) slotsByComponent.set(key, slots);
+          const index = slotIndex++;
+          if (slots.length <= index) { slots.push({ value: true }); effect(); }
         },
         useCallback: (fn: unknown) => fn,
       };

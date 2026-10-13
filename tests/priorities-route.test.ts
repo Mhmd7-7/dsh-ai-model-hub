@@ -132,11 +132,13 @@ async function fixture(): Promise<Fixture> {
     handler = route.handler;
     return () => {};
   };
+  const routeDisposers: (() => void)[] = [];
   const ctx = {
     inject: (_deps: readonly string[], callback: (scope: unknown) => void) => {
       // The route reads the server through `scope.get`, which is how a cordis
       // scope exposes a service it has resolved.
-      callback({ get: (name: string) => (name === 'webServer' ? { register } : undefined) });
+      callback({ effect: (body: () => () => void) => { routeDisposers.push(body()); },
+        get: (name: string) => (name === 'webServer' ? { register } : undefined) });
     },
   } as unknown as Context;
   registerPrioritiesRoute(ctx, logger, { hub, policy, policyPath });
@@ -148,6 +150,7 @@ async function fixture(): Promise<Fixture> {
     handler: handler as never,
     lines,
     cleanup: async () => {
+      for (const dispose of routeDisposers) dispose();
       await hub.dispose();
       await rm(root, { recursive: true, force: true });
     },
@@ -363,6 +366,7 @@ describe('the Capability priorities route', () => {
       const ctx = {
         inject: (_deps: readonly string[], callback: (scope: unknown) => void) => {
           callback({
+            effect: (body: () => unknown) => body(),
             get: (name: string) =>
               name === 'webServer'
                 ? {

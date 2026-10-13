@@ -56,3 +56,4 @@ import './priorities-route.test.ts';
 import './subscription-policy.test.ts';
 import './plugin-ui.test.ts';
 import './client-interactions.test.ts';
+import './production-routing.test.ts';

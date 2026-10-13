@@ -28,13 +28,62 @@ window.__ModuleLoader__.load({
 
     const React = require('react');
     const { jsx: h } = require('react/jsx-runtime');
-    const { useCallback, useEffect, useState } = React;
+    const { useCallback, useEffect, useRef, useState } = React;
 
     /** The host route this page reads. */
     const ENDPOINT = '/dsh-ai-model-hub/inventory';
 
     /** The host route the Capability priorities editor reads and writes. */
     const PRIORITIES_ENDPOINT = '/dsh-ai-model-hub/priorities';
+
+    // Bound a whole request, including body decoding. Latest intent wins even
+    // when a transport ignores abort; teardown invalidates all pending callbacks.
+    const REQUEST_TIMEOUT_MS = 30000;
+    function useRequestTask() {
+      const active = useRef(null);
+      const sequence = useRef(0);
+      const cancel = useCallback(() => {
+        sequence.current += 1;
+        if (active.current) active.current.abort();
+        active.current = null;
+      }, []);
+      useEffect(() => cancel, [cancel]);
+      return useCallback((work, success, failure, finish) => {
+        cancel();
+        const id = sequence.current;
+        const controller = new AbortController();
+        active.current = controller;
+        let timer;
+        const cancelled = new Promise((_, reject) => {
+          controller.signal.addEventListener('abort', () => reject(new Error('Request cancelled')), { once: true });
+          timer = setTimeout(() => {
+            reject(new Error('Request timed out after 30 seconds'));
+            controller.abort();
+          }, REQUEST_TIMEOUT_MS);
+        });
+        Promise.race([Promise.resolve().then(() => work(controller.signal)), cancelled])
+          .then((value) => { if (id === sequence.current) success(value); })
+          .catch((error) => { if (id === sequence.current) failure(error); })
+          .finally(() => {
+            clearTimeout(timer);
+            if (id === sequence.current) {
+              active.current = null;
+              if (finish) finish();
+            }
+          });
+      }, [cancel]);
+    }
+
+    async function readJson(url, signal, init) {
+      const response = await fetch(url, { ...init, signal, cache: 'no-store' });
+      const body = await response.json().catch((error) => {
+        throw new Error('HTTP ' + response.status + ' — invalid JSON response: ' + error.message);
+      });
+      if (!response.ok) throw new Error('HTTP ' + response.status +
+        (body && body.error ? ' — ' + body.error : '') +
+        (body && body.issues ? ' — ' + body.issues.join('; ') : ''));
+      return body;
+    }
 
     /** Monospace stack for paths and commands; the system stack, so nothing is fetched. */
     const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace';
@@ -235,8 +284,9 @@ window.__ModuleLoader__.load({
     /** One engine card: where it is, whether it runs, and what is inside it. */
     function EngineCard(props) {
       const engine = props.engine;
-      const tone = engine.configured === false ? 'muted' : engine.running ? 'ok' : 'error';
-      const state = engine.configured === false ? 'not configured' : engine.running ? 'running' : 'stopped';
+      const state = engine.state || (engine.running ? 'running' : 'unknown');
+      const labels = { running: 'running', installed_unreachable: 'installed · unreachable', not_found: 'not found', unknown: 'unknown' };
+      const tone = state === 'running' ? 'ok' : state === 'installed_unreachable' ? 'error' : 'muted';
 
       return h('div', {
         style: {
@@ -252,7 +302,8 @@ window.__ModuleLoader__.load({
             style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
             children: [
               h('span', { style: { fontSize: '13px', fontWeight: 500, color: text.primary }, children: engine.name }),
-              h(Pill, { tone, children: state }),
+              h(Pill, { tone, children: labels[state] || state }),
+              h(Pill, { tone: 'muted', children: engine.configured ? 'configured' : 'not configured' }),
               engine.startable
                 ? h(Pill, { tone: 'ok', children: 'hub can start it' })
                 : h(Pill, { tone: 'muted', children: 'external' }),
@@ -261,11 +312,16 @@ window.__ModuleLoader__.load({
           h(Row, { label: 'engine', value: engine.id + ' · ' + engine.adapter }),
           h(Row, { label: 'listens on', value: engine.endpoint, mono: true }),
           engine.installPath
-            ? h(Row, { label: 'installed at', value: engine.installPath, mono: true })
-            : h(Row, {
-                label: 'installed at',
-                value: 'not found — looked in ' + (engine.checkedPaths || []).join(', '),
-              }),
+            ? h(Row, { label: 'verified install', value: engine.installPath, mono: true })
+            : h(Row, { label: 'installation', value: engine.installation === 'not_found'
+                ? 'not found in checked locations (not a machine-wide search)' : 'unknown — no verified installation path' }),
+          h(Row, { label: 'configured paths', value: (engine.configuredPaths || []).join(', '), mono: true }),
+          h(Row, { label: 'checked paths', value: (engine.checkedPaths || []).join(', '), mono: true }),
+          h(Row, { label: 'install evidence', value: engine.installSource }),
+          h(Row, { label: 'checked at', value: engine.checkedAt }),
+          ...(engine.errors || []).map((error, index) => h('div', {
+            key: 'engine-error-' + index, role: 'status', style: { color: text.error, fontSize: '12px' }, children: error,
+          })),
           engine.launch
             ? h(Row, {
                 label: 'starts with',
@@ -371,6 +427,11 @@ window.__ModuleLoader__.load({
           }),
           h(Row, { label: 'source', value: resource.source, mono: true }),
           h(Row, { label: 'status', value: resource.detail }),
+          h(Row, { label: 'availability', value: resource.availability || 'unknown — execution not verified' }),
+          typeof resource.engineRunning === 'boolean'
+            ? h(Row, { label: 'engine', value: resource.engineRunning ? 'reachable at last check' : 'unreachable at last check' }) : null,
+          h(Row, { label: 'freshness', value: resource.freshness || 'scan observation — execution not verified' }),
+          h(Row, { label: 'checked at', value: resource.checkedAt }),
           resource.capabilities && resource.capabilities.length > 0
             ? h(Row, { label: 'capabilities', value: resource.capabilities.join(', ') })
             : null,
@@ -437,22 +498,18 @@ window.__ModuleLoader__.load({
       const [query, setQuery] = useState('');
       const [filter, setFilter] = useState('all');
 
+      const request = useRequestTask();
+      const saveLock = useRef(false);
       const load = useCallback(() => {
-        setState((previous) => ({ ...previous, status: previous.payload ? 'refreshing' : 'loading' }));
-        fetch(PRIORITIES_ENDPOINT)
-          .then((response) => {
-            if (!response.ok) throw new Error('HTTP ' + response.status);
-            return response.json();
-          })
-          .then((payload) => {
-            setState({ status: 'ready', error: '', payload });
-            setDraft(draftFrom(payload));
-            setDirty(false);
-          })
-          .catch((error) =>
-            setState({ status: 'error', payload: null, error: String((error && error.message) || error) }),
-          );
-      }, []);
+        if (saveLock.current) return;
+        setState((previous) => ({ ...previous, error: '', status: previous.payload ? 'refreshing' : 'loading' }));
+        request((signal) => readJson(PRIORITIES_ENDPOINT, signal), (payload) => {
+          setState({ status: 'ready', error: '', payload });
+          setDraft(draftFrom(payload));
+          setDirty(false);
+        }, (error) => setState((previous) => ({ ...previous, status: 'error',
+          error: String((error && error.message) || error) })));
+      }, [request]);
 
       useEffect(() => {
         load();
@@ -496,7 +553,8 @@ window.__ModuleLoader__.load({
       }, []);
 
       const save = useCallback(() => {
-        if (!draft) return;
+        if (!draft || !state.payload || saveLock.current) return;
+        saveLock.current = true;
         setSaving(true);
         setNotice('');
         const globalChanged = draft.globalEnabled !== state.payload.globalEnabled;
@@ -519,38 +577,35 @@ window.__ModuleLoader__.load({
           });
         }
         if (steps.length === 0) {
+          saveLock.current = false;
           setSaving(false);
           setDirty(false);
           setNotice('Nothing changed.');
           return;
         }
-        (async () => {
+        request(async (signal) => {
           let payload = state.payload;
           for (const step of steps) {
-            const response = await fetch(PRIORITIES_ENDPOINT, {
-              method: 'PUT',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(step),
+            if (signal.aborted) throw new Error('Request cancelled');
+            payload = await readJson(PRIORITIES_ENDPOINT, signal, {
+              method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(step),
             });
-            const body = await response.json().catch(() => ({}));
-            if (!response.ok) {
-              throw new Error(
-                (body && body.error ? body.error : 'HTTP ' + response.status) +
-                  (body && body.issues ? ' — ' + body.issues.join('; ') : ''),
-              );
-            }
-            payload = body;
           }
+          return payload;
+        }, (payload) => {
           setState({ status: 'ready', error: '', payload });
           setDraft(draftFrom(payload));
           setDirty(false);
           setSaving(false);
           setNotice('Saved. ' + steps.length + ' change(s) written to the capability policy.');
-        })().catch((error) => {
+        }, (error) => {
+          setNotice('Not saved: ' + String((error && error.message) || error) +
+            '. Earlier steps or a timed-out write may have reached the host; retry is idempotent.');
+        }, () => {
+          saveLock.current = false;
           setSaving(false);
-          setNotice('Not saved: ' + String((error && error.message) || error));
         });
-      }, [draft, state.payload]);
+      }, [draft, state.payload, request]);
 
       const cancel = useCallback(() => {
         setDraft(draftFrom(state.payload));
@@ -608,7 +663,8 @@ window.__ModuleLoader__.load({
           state.status === 'error' ? h('div', {
             className: 'mh-alert mh-alert-error', role: 'alert',
             children: [
-              'The capability policy could not be read: ' + state.error + '. The policy already in force has not changed. ',
+              'The capability policy could not be read: ' + state.error + '. The policy already in force has not changed. ' +
+                (payload ? 'Showing stale policy data from the last successful read. ' : ''),
               h(Button, { onClick: load, children: 'Try again' }),
             ],
           }) : null,
@@ -892,20 +948,30 @@ window.__ModuleLoader__.load({
 
     /** The settings section itself. */
     function LocalModelsSection() {
-      const [state, setState] = useState({ status: 'loading', data: null, error: '' });
+      const [state, setState] = useState({ status: 'loading', data: null, error: '', stale: false });
 
+      const request = useRequestTask();
+      const lastQuery = useRef('?scan=1');
       const load = useCallback((query) => {
-        setState((previous) => ({ ...previous, status: previous.data ? 'refreshing' : 'loading' }));
-        fetch(ENDPOINT + (query || ''))
-          .then((response) => {
-            if (!response.ok) throw new Error('HTTP ' + response.status);
-            return response.json();
-          })
-          .then((data) => setState({ status: 'ready', data, error: '' }))
-          .catch((error) =>
-            setState({ status: 'error', data: null, error: String((error && error.message) || error) }),
-          );
-      }, []);
+        lastQuery.current = typeof query === 'string' ? query : lastQuery.current;
+        setState((previous) => ({ ...previous, error: '', status: previous.data ? 'refreshing' : 'loading' }));
+        request(async (signal) => {
+          const data = await readJson(ENDPOINT + lastQuery.current, signal);
+          const object = (value) => value && typeof value === 'object' && !Array.isArray(value);
+          const arrays = ['engines', 'models', 'resources', 'capabilities', 'unavailable'];
+          if (!object(data) || !object(data.machine) || arrays.some((key) => !Array.isArray(data[key])) ||
+              !object(data.scan) || !Array.isArray(data.scan.sources) || !Array.isArray(data.scan.warnings) ||
+              arrays.some((key) => data[key].some((entry) => !object(entry))) ||
+              data.engines.some((engine) => !Array.isArray(engine.models)) ||
+              data.models.some((model) => !Array.isArray(model.capabilities))) {
+            throw new Error('Invalid inventory response from the scan service');
+          }
+          return data;
+        },
+          (data) => setState({ status: 'ready', data, error: '', stale: false }),
+          (error) => setState((previous) => ({ ...previous, status: 'error', stale: !!previous.data,
+            error: String((error && error.message) || error) })));
+      }, [request]);
 
       useEffect(() => {
         load('?scan=1');
@@ -919,6 +985,7 @@ window.__ModuleLoader__.load({
       const scanWarnings = (data && data.scan && data.scan.warnings) || [];
 
       return h('section', {
+        'aria-busy': state.status === 'loading' || state.status === 'refreshing',
         style: {
           maxWidth: '720px',
           color: text.primary,
@@ -933,17 +1000,17 @@ window.__ModuleLoader__.load({
           h('p', {
             style: { margin: 0, fontSize: '14px', color: text.tertiary, lineHeight: '22px' },
             children:
-              'The local engines on this machine — where each one is installed, whether it is running, and what it holds. Read from the active catalog plus a live check, so it always matches what the model hub would actually do.',
+              'Configured engines and observed local resources. Configuration, verified installation paths and endpoint reachability are separate facts; observations describe the last successful check, not a guarantee that a model will run.',
           }),
           h('div', {
             style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
             children: [
               button(
-                state.status === 'loading' ? 'Scanning…' : 'Scan',
+                'Scan',
                 () => load('?scan=1'),
-                state.status === 'loading' || state.status === 'refreshing',
+                false,
               ),
-              button('Refresh', () => load(''), state.status === 'loading' || state.status === 'refreshing'),
+              button('Refresh', () => load(''), false),
               state.status === 'refreshing'
                 ? h('span', { style: { fontSize: '12px', color: text.tertiary }, children: 'scanning…' })
                 : null,
@@ -972,10 +1039,13 @@ window.__ModuleLoader__.load({
                   fontSize: '12px',
                   color: text.error,
                 },
-                children:
-                  'The scan could not be read: ' +
-                  state.error +
-                  '. The engines themselves may still be reachable — press Scan to try again.',
+                role: 'alert',
+                children: [
+                  'The inventory could not be read: ' + state.error + '. ' +
+                    (data ? 'Showing stale data from the last successful check. ' : 'No inventory data is available. ') +
+                    'This does not mean the engines are absent. ',
+                  h(Button, { onClick: () => load(lastQuery.current), children: 'Retry' }),
+                ],
               })
             : null,
 
@@ -1066,6 +1136,9 @@ window.__ModuleLoader__.load({
                       (data.machine.hasGpu ? 'GPU detected' : 'no GPU detected'),
                   }),
                   h(Row, { label: 'checked at', value: data.generatedAt }),
+                  state.stale || state.status === 'refreshing' ? h(Pill, { tone: 'muted',
+                    children: state.stale ? (state.status === 'refreshing' ? 'stale — retrying' : 'stale — refresh failed')
+                      : 'previous snapshot — refreshing' }) : null,
                 ],
               })
             : null,
@@ -1092,6 +1165,9 @@ window.__ModuleLoader__.load({
                       }),
                     ],
                   }),
+                  h(Row, { label: 'freshness', value: state.stale ? 'stale — last successful inventory' :
+                    ((data.scan && data.scan.freshness) || 'last scan snapshot; use Scan to re-read resources') }),
+                  h(Row, { label: 'scanned at', value: data.scan && (data.scan.checkedAt || data.scan.scannedAt) }),
                   resources.length === 0
                     ? h('div', {
                         style: { fontSize: '12px', color: text.tertiary, lineHeight: '18px' },
@@ -1159,6 +1235,8 @@ window.__ModuleLoader__.load({
                           tone: model.availability === 'available' ? 'ok' : 'muted',
                           children: model.availability + ' · ' + model.lifecycle,
                         }),
+                        h(Pill, { tone: 'muted', children: model.freshness === 'live' ? 'live checked' : 'catalog state — not live verified' }),
+                        h(Row, { label: 'checked at', value: model.checkedAt }),
                         h('span', {
                           style: { color: text.tertiary },
                           children:

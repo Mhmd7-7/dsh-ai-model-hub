@@ -14,6 +14,7 @@ import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 const CLIENT = fileURLToPath(new URL('../dsh-plugin/client.js', import.meta.url));
 const CAPABILITY = 'text_to_text';
@@ -340,6 +341,7 @@ interface FetchCall {
 interface Scenario {
   readonly globalEnabled?: boolean;
   readonly failNextPut?: boolean;
+  readonly manualTimers?: boolean;
 }
 
 /** The server returns the complete updated document after each PUT, like the real route. */
@@ -348,6 +350,13 @@ class RouteServer {
   readonly unexpected: string[] = [];
   private policy = initialPolicy();
   private failNextPut: boolean;
+  holdInventory = false;
+  readonly pendingInventory: { signal: AbortSignal | undefined; resolve: (response: unknown) => void; reject: (error: Error) => void }[] = [];
+  readonly timers = new Map<number, () => void>();
+  private nextTimer = 0;
+  readonly setTimer = (callback: () => void): number => { const id = ++this.nextTimer; this.timers.set(id, callback); return id; };
+  readonly clearTimer = (id: number): void => { this.timers.delete(id); };
+  timeoutRequests(): void { for (const callback of [...this.timers.values()]) callback(); }
 
   constructor(scenario: Scenario) {
     this.policy.globalEnabled = scenario.globalEnabled ?? true;
@@ -369,13 +378,17 @@ class RouteServer {
     return payload;
   }
 
-  readonly fetch = async (input: unknown, init?: { method?: string; body?: unknown }): Promise<unknown> => {
+  readonly fetch = async (input: unknown, init?: { method?: string; body?: unknown; signal?: AbortSignal }): Promise<unknown> => {
     const url = new URL(String(input), 'http://localhost');
     const method = init?.method ?? 'GET';
     const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
     this.calls.push({ url: url.pathname + url.search, method, body });
     let payload: unknown;
     if (url.pathname === '/dsh-ai-model-hub/inventory' && method === 'GET') {
+      if (this.holdInventory) return new Promise((resolve, reject) => {
+        // Intentionally ignores abort so latest-wins is independently exercised.
+        this.pendingInventory.push({ signal: init?.signal, resolve, reject });
+      });
       payload = {
         catalogPath: 'C:\\fixture\\catalog.yaml', artifactRoot: null, allowProcessLaunch: true,
         generatedAt: 'inventory scan ' + this.inventoryReads(), machine: { vramGb: 8, ramGb: 32, hasGpu: true },
@@ -418,6 +431,14 @@ class RouteServer {
     return { ok: true, status: 200, json: async () => structuredClone(snapshot) };
   };
 
+  completeInventory(index: number, marker: string, extra: Record<string, unknown> = {}): void {
+    this.pendingInventory[index]!.resolve({ ok: true, status: 200, json: async () => ({
+      generatedAt: marker, catalogPath: marker, allowProcessLaunch: false,
+      machine: { ramGb: 1, vramGb: 0, hasGpu: false }, resources: [], scan: { sources: [], warnings: [] },
+      engines: [], models: [], capabilities: [], unavailable: [], ...extra,
+    }) });
+  }
+
   inventoryReads(): number {
     return this.calls.filter((call) => call.method === 'GET' && call.url.startsWith('/dsh-ai-model-hub/inventory')).length;
   }
@@ -454,7 +475,10 @@ async function withClient(
       },
     } };
     const module = { exports: {} };
-    new Function('window', 'require', 'module', 'exports', source)(window, requireShim, module, module.exports);
+    runInNewContext(source, { window, require: requireShim, module, exports: module.exports,
+      fetch: server.fetch, AbortController,
+      setTimeout: scenario.manualTimers ? server.setTimer : setTimeout,
+      clearTimeout: scenario.manualTimers ? server.clearTimer : clearTimeout }, { filename: CLIENT });
     assert.equal(typeof captured?.apply, 'function', 'the bundle must publish its registration');
     const components: Component[] = [];
     captured!.apply!({ slots: {
@@ -492,6 +516,121 @@ function edit(order: { id: string; enabled: boolean }[]): unknown {
 }
 
 describe('registered settings page interactions', { concurrency: false }, () => {
+  it('repeat and out-of-order Refresh/Scan clicks keep only latest response and abort superseded work', async () => {
+    await withClient(async (ui, server) => {
+      server.holdInventory = true;
+      await ui.click('Refresh');
+      await ui.click('Scan');
+      assert.equal(server.pendingInventory[0]!.signal!.aborted, true);
+      assert.equal(server.pendingInventory[1]!.signal!.aborted, false);
+      server.completeInventory(1, 'newest-result');
+      await ui.settle();
+      assert.match(ui.visibleText(), /newest-result/);
+      server.completeInventory(0, 'obsolete-result');
+      await ui.settle();
+      assert.doesNotMatch(ui.visibleText(), /obsolete-result/);
+      assert.match(ui.visibleText(), /newest-result/);
+      assert.ok(ui.hits().filter((hit) => hit.node.props['aria-busy'] !== undefined)
+        .every((hit) => hit.node.props['aria-busy'] === false));
+    });
+  });
+
+  it('failed refresh keeps stale data, clears loading and Retry restores a fresh snapshot', async () => {
+    await withClient(async (ui, server) => {
+      server.holdInventory = true;
+      await ui.click('Refresh');
+      server.pendingInventory[0]!.reject(new Error('fixture disconnected'));
+      await ui.settle();
+      assert.match(textContent(ui.panelFor('Refresh')), /fixture disconnected/);
+      assert.match(textContent(ui.panelFor('Refresh')), /stale/i);
+      assert.match(ui.visibleText(), /inventory scan 1/);
+      await ui.click('Retry');
+      assert.match(textContent(ui.panelFor('Refresh')), /stale — retrying/);
+      assert.match(textContent(ui.panelFor('Refresh')), /inventory scan 1/);
+      server.completeInventory(1, 'recovered-result');
+      await ui.settle();
+      assert.match(ui.visibleText(), /recovered-result/);
+      assert.doesNotMatch(ui.visibleText(), /fixture disconnected|stale — refresh failed/);
+    });
+  });
+
+  it('invalid successful HTTP bodies fail safely without replacing the last inventory snapshot', async () => {
+    await withClient(async (ui, server) => {
+      server.holdInventory = true;
+      for (const body of [null, {}, { machine: {}, engines: null }]) {
+        const index = server.pendingInventory.length;
+        await ui.click('Refresh');
+        server.pendingInventory[index]!.resolve({ ok: true, status: 200, json: async () => body });
+        await ui.settle();
+        assert.match(textContent(ui.panelFor('Refresh')), /Invalid inventory response from the scan service/);
+        assert.match(textContent(ui.panelFor('Refresh')), /stale/);
+        assert.match(ui.visibleText(), /inventory scan 1/);
+        assert.equal(ui.hits().find((hit) => hit.node.type === 'section' && hit.node.props['aria-busy'] === true), undefined);
+      }
+      await ui.click('Retry');
+      assert.match(textContent(ui.panelFor('Refresh')), /stale — retrying/);
+      server.completeInventory(3, 'valid-after-invalid');
+      await ui.settle();
+      assert.match(ui.visibleText(), /valid-after-invalid/);
+      assert.doesNotMatch(textContent(ui.panelFor('Refresh')), /Invalid inventory response|stale —/);
+    });
+  });
+
+  it('engine cards distinguish configured paths from verified installation and expose per-engine failures and freshness', async () => {
+    await withClient(async (ui, server) => {
+      server.holdInventory = true;
+      await ui.click('Refresh');
+      server.completeInventory(0, 'card-fixture', { engines: [{
+        id: 'comfy', name: 'Fixture ComfyUI', adapter: 'comfyui', configured: true, running: false,
+        state: 'installed_unreachable', installation: 'installed', installPath: 'C:/verified/ComfyUI',
+        configuredPaths: ['C:/configured/ComfyUI'], checkedPaths: ['C:/verified/ComfyUI'],
+        installSource: 'main.py marker', checkedAt: 'fixture-check-time', errors: ['fixture endpoint timed out'],
+        statusDetail: 'Endpoint unavailable', models: [], storePaths: [], modelsSource: 'not read', servedModelIds: [],
+      }], models: [{ id: 'workflow', availability: 'unknown', lifecycle: 'external', capabilities: [], freshness: 'catalog' }] });
+      await ui.settle();
+      const content = textContent(ui.panelFor('Refresh'));
+      assert.match(content, /installed · unreachable/);
+      assert.match(content, /configured paths C:\/configured\/ComfyUI/);
+      assert.match(content, /verified install C:\/verified\/ComfyUI/);
+      assert.match(content, /fixture endpoint timed out/);
+      assert.match(content, /fixture-check-time/);
+      assert.match(content, /catalog state — not live verified/);
+      assert.match(content, /last scan snapshot/);
+    });
+  });
+
+  it('request timeout aborts the transport, clears busy state and timers, preserves stale data and permits Retry', async () => {
+    await withClient(async (ui, server) => {
+      server.holdInventory = true;
+      await ui.click('Refresh');
+      assert.equal(server.timers.size, 1);
+      server.timeoutRequests();
+      await ui.settle();
+      assert.equal(server.pendingInventory[0]!.signal!.aborted, true);
+      assert.equal(server.timers.size, 0);
+      assert.match(textContent(ui.panelFor('Refresh')), /timed out after 30 seconds/);
+      assert.match(textContent(ui.panelFor('Refresh')), /stale/);
+      assert.equal(ui.hits().find((hit) => hit.node.type === 'section' && hit.node.props['aria-busy'] === true), undefined);
+      await ui.click('Retry');
+      server.completeInventory(1, 'after-timeout');
+      await ui.settle();
+      assert.equal(server.timers.size, 0);
+      assert.match(ui.visibleText(), /after-timeout/);
+    }, { manualTimers: true });
+  });
+
+  it('unmount aborts pending inventory work and settling it cannot remount the page', async () => {
+    await withClient(async (ui, server) => {
+      server.holdInventory = true;
+      await ui.click('Scan');
+      ui.dispose();
+      assert.equal(server.pendingInventory[0]!.signal!.aborted, true);
+      server.completeInventory(0, 'after-unmount');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  });
+
   it('a legacy globally paused payload cannot erase unknown saved per-option choices', async () => {
     await withClient(async (ui, server) => {
       await ui.click('Edit priorities');
@@ -529,7 +668,7 @@ describe('registered settings page interactions', { concurrency: false }, () => 
       await ui.click('Save');
       const expected = edit([{ id: QUASAR, enabled: true }, { id: ORION, enabled: true }]);
       assert.deepEqual(server.writes(), [expected]);
-      assert.match(ui.visibleText(), /Not saved: Temporary policy write failure/);
+      assert.match(ui.visibleText(), /Not saved: HTTP 503 — Temporary policy write failure/);
       assertUnsaved(ui);
       assert.deepEqual(ui.rowNames(), ['Quasar', 'Orion']);
       assert.equal(ui.button('Disable Quasar for text_to_text').node.props['aria-pressed'], true);

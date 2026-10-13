@@ -36,19 +36,17 @@
  * workflow in a subdirectory. This module asks the documented shape first and
  * falls back to the alternatives, so a different ComfyUI version still works.
  *
- * ## The engine's lifecycle belongs to the scan, but only the part it started
- *
- * Discovering workflows requires a running ComfyUI. If one is already answering it
- * is used and left alone. If none is, the hub's own launch path starts one, and
- * the scan owns that process — and only that process. Never a pre-existing
- * instance, never a process killed by name, and never while a graph is queued or
- * running: an engine with work in flight is left up and the reason is reported.
+ * Scanning is observational: it never starts or stops engines. Live APIs, local
+ * workflows and the active catalog are independent sources; failures retain prior
+ * observations with explicit freshness and availability, scoped to this hub/config.
  *
  * @module dsh-ai-model-hub/dsh-plugin/scan
  */
 
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative, basename, dirname } from 'node:path';
+import { resolveAdapterPath } from '../src/adapters/paths.ts';
+import { homedir } from 'node:os';
 
 import type { Capability, ModelDescriptor, ModelHost, ModelHub } from '../src/index.ts';
 import {
@@ -160,6 +158,12 @@ export interface LocalResource {
   readonly format?: 'api' | 'ui';
   /** Whether the engine serving it is answering right now. */
   readonly engineRunning?: boolean;
+  /** Current engine/resource evidence, separate from the workflow contract. */
+  readonly availability?: 'available' | 'unavailable' | 'unknown';
+  /** Where this observation came from; cached does not imply a live check. */
+  readonly freshness?: 'live' | 'local' | 'catalog' | 'cached';
+  /** Time of the last resource observation (preserved when served from cache). */
+  readonly checkedAt?: string;
 }
 
 /** What one source contributed, so a partial answer can explain itself. */
@@ -191,23 +195,21 @@ export interface LocalScanResult {
 export interface ScanOptions {
   /** The catalog's declared hosts. Engines not named here are not contacted. */
   readonly hosts: readonly ModelHost[];
+  /** Catalog file location, for resolving catalog-written relative workflow paths. */
+  readonly catalogPath?: string;
   /** A directory of API/editor workflow JSON files to scan, when configured. */
   readonly workflowDir?: string;
-  /** Budget for one HTTP request, in milliseconds. Defaults to 4000. */
+  /** Additional verified workflow stores, scoped to their owning host. */
+  readonly workflowDirsByHost?: Readonly<Record<string, readonly string[]>>;
+  /** Budget for each HTTP or filesystem effect, in milliseconds. Defaults to 4000. */
   readonly timeoutMs?: number;
-  /** How long to wait for a started engine to become ready, in milliseconds. */
+  /** Legacy compatibility option; scans never start engines. */
   readonly startupTimeoutMs?: number;
   /** Injectable effects; omitted members fall back to the real machine. */
   readonly probes?: Partial<ScanProbes>;
   /** Whether runnable workflows are published to the hub. Defaults to true. */
   readonly register?: boolean;
-  /**
-   * Whether a stopped engine may be started to complete the scan.
-   *
-   * Defaults to true, and honours the deployment's own launch policy: the hub
-   * refuses to launch anything unless the descriptor and the profile both allow
-   * it, and that refusal is reported rather than worked around.
-   */
+  /** Legacy compatibility option, ignored even when true: scanning never launches engines. */
   readonly startEngine?: boolean;
   /** Diagnostic sink. */
   readonly log?: (message: string) => void;
@@ -215,9 +217,6 @@ export interface ScanOptions {
 
 /** The default request budget; a scan should not stall the settings page. */
 const DEFAULT_TIMEOUT_MS = 4_000;
-
-/** The default budget for an engine to come up, once launched. */
-const DEFAULT_STARTUP_TIMEOUT_MS = 180_000;
 
 /** How deep the workflow directory is walked. */
 const MAX_DIRECTORY_DEPTH = 6;
@@ -267,42 +266,66 @@ interface WorkflowDocument {
   readonly unreadable?: string;
 }
 
-/** What one host's discovery produced. */
 interface HostPass {
-  readonly hostId: string;
-  readonly label: string;
   readonly resources: LocalResource[];
   readonly descriptors: ModelDescriptor[];
   readonly warnings: string[];
   readonly sources: ScanSourceReport[];
-  readonly reachable: boolean;
-  readonly engineRunning: boolean;
-  readonly startedEngine: boolean;
-  readonly releasedEngine: boolean;
+  readonly authoritative?: boolean;
+}
+interface CacheEntry {
+  readonly resources: readonly LocalResource[];
+  readonly descriptors: readonly ModelDescriptor[];
+}
+interface HubScanState { readonly cache: Map<string, CacheEntry>; readonly generations: Map<string, number>; publicationGeneration: number }
+// Weak ownership prevents both cross-hub leaks and keeping disposed hubs alive.
+let scanStates = new WeakMap<ModelHub, HubScanState>();
+function stateFor(hub: ModelHub): HubScanState {
+  let state = scanStates.get(hub);
+  if (state === undefined) {
+    state = { cache: new Map(), generations: new Map(), publicationGeneration: 0 };
+    scanStates.set(hub, state);
+  }
+  return state;
 }
 
-/**
- * The last successful discovery per host.
- *
- * This is what makes a temporary failure non-destructive: a scan that cannot
- * reach ComfyUI reports the cached workflows with their engine marked as down,
- * rather than emptying the page and unregistering providers that were working a
- * minute ago. It is also what keeps a discovered contract usable after ComfyUI is
- * shut down, which is the point of discovering it in the first place.
- */
-const hostCache = new Map<string, { resources: readonly LocalResource[]; descriptors: readonly ModelDescriptor[] }>();
+function beginSource(state: HubScanState, key: string): number {
+  const generation = (state.generations.get(key) ?? 0) + 1;
+  state.generations.set(key, generation);
+  return generation;
+}
 
-/**
- * The scan passes currently in flight, keyed by host id.
- *
- * Two concurrent scans — the page's own button pressed twice, or a scan racing an
- * invocation's cold start — share one pass, so neither starts a second engine nor
- * shuts down one the other is using.
- */
-const inFlight = new Map<string, Promise<HostPass>>();
-
-/** Engines this process started for a scan, and how many passes still need them. */
-const ownedEngines = new Map<string, { readonly hostId: string; users: number }>();
+/** Bound every injected effect, including synchronous throws and ignored timeouts. */
+async function bounded<T>(effect: () => Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(effect),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label + ' timed out after ' + timeoutMs + ' ms')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+function boundedProbes(probes: ScanProbes, timeoutMs: number): ScanProbes {
+  const fsDeadline = Date.now() + timeoutMs * 6;
+  const fsEffect = <T>(effect: () => Promise<T>, label: string): Promise<T> => {
+    const remaining = fsDeadline - Date.now();
+    if (remaining <= 0) return Promise.reject(new Error(label + ' scan filesystem budget exhausted'));
+    return bounded(effect, Math.min(timeoutMs, remaining), label);
+  };
+  return {
+    request: async (url, budget) => {
+      try { return await bounded(() => probes.request(url, budget), budget, url); }
+      catch (error) { return { ok: false, kind: 'connection', detail: url + ' probe failed: ' + String(error) }; }
+    },
+    isDirectory: (path) => fsEffect(() => probes.isDirectory(path), path + ' stat'),
+    listDir: (path) => fsEffect(() => probes.listDir(path), path + ' listing'),
+    readFile: (path) => fsEffect(() => (probes.readFile ?? DEFAULT_SCAN_PROBES.readFile)!(path), path + ' read'),
+  };
+}
 
 /** The default probes: a status-aware fetch and the real filesystem. */
 export const DEFAULT_SCAN_PROBES: ScanProbes = {
@@ -447,104 +470,16 @@ async function engineReady(
   }
   const path = readyPathFor(host.runtime.engine);
   const result = await probes.request(`${baseOf(endpoint)}${path}`, timeoutMs);
+  if (result.ok && /comfyui/i.test(host.runtime.engine) &&
+    !(isObject(result.body) && isObject(result.body['system']) && Array.isArray(result.body['devices']))) {
+    return { running: false, detail: path + ' did not return valid ComfyUI system/device information' };
+  }
   return result.ok
     ? { running: true, detail: `${path} answered ${result.status}` }
     : { running: false, detail: result.detail };
 }
 
-/**
- * Bring a host's engine up, and report whether this pass owns what it started.
- *
- * @param hub - the live hub, whose launch policy is the one that applies.
- * @param host - the host to start.
- * @param timeoutMs - how long to wait for readiness.
- * @param log - diagnostic sink.
- * @returns ownership and a description of what happened.
- */
-async function startEngine(
-  hub: ModelHub,
-  host: ModelHost,
-  timeoutMs: number,
-  log: (message: string) => void,
-  isReady: () => Promise<boolean>,
-): Promise<{ owned: boolean; detail: string }> {
-  try {
-    const started = await hub.startEngineForHost(host.id);
-    if (started.alreadyRunning) {
-      // The hub found the endpoint already answering, so nothing was spawned and
-      // this pass owns nothing to shut down.
-      return { owned: false, detail: `${host.name} was already running` };
-    }
-    if (!started.started) {
-      return { owned: false, detail: `${host.name} did not need starting` };
-    }
-    // Readiness is the engine answering its own readiness route, not the hub's
-    // launch report: a process can be spawned a second before it binds its port,
-    // and a queued graph says nothing about whether the API is up.
-    const deadline = Date.now() + timeoutMs;
-    let ready = false;
-    while (Date.now() < deadline) {
-      if (await isReady()) {
-        ready = true;
-        break;
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, 500));
-    }
-    ownedEngines.set(started.modelId, { hostId: host.id, users: (ownedEngines.get(started.modelId)?.users ?? 0) + 1 });
-    return {
-      owned: true,
-      detail: ready
-        ? `started ${host.name} for this scan`
-        : `started ${host.name}, which did not answer within ${timeoutMs} ms`,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log(`scan: could not start ${host.name}: ${message}`);
-    return { owned: false, detail: `could not start ${host.name}: ${message}` };
-  }
-}
 
-/**
- * Shut down an engine this scan started, when it is safe to do so.
- *
- * Three conditions have to hold, and each exists because violating it would break
- * someone else's work: the engine must have been started *by a scan* (never a
- * pre-existing instance), no other scan may still be using it, and it must have no
- * graph queued or running. When the last does not hold the shutdown is deferred
- * and the reason is reported rather than the process being killed underneath a
- * running job.
- *
- * @param hub - the live hub.
- * @param modelId - the id the engine was started under.
- * @returns whether it was stopped, and what happened.
- */
-async function releaseEngine(hub: ModelHub, modelId: string): Promise<{ stopped: boolean; detail: string }> {
-  const owned = ownedEngines.get(modelId);
-  if (owned === undefined) return { stopped: false, detail: 'this scan did not start the engine' };
-  const users = owned.users - 1;
-  if (users > 0) {
-    ownedEngines.set(modelId, { hostId: owned.hostId, users });
-    return { stopped: false, detail: 'another scan is still using the engine, so it was left running' };
-  }
-  const busy = hub.activeInvocationsFor(modelId);
-  if (busy > 0) {
-    ownedEngines.set(modelId, { hostId: owned.hostId, users: 0 });
-    return {
-      stopped: false,
-      detail: `the engine has ${busy} graph(s) queued or running, so it was left up rather than interrupted`,
-    };
-  }
-  ownedEngines.delete(modelId);
-  try {
-    const result = await hub.stopEngine(modelId);
-    return {
-      stopped: result.stopped,
-      detail: result.stopped ? 'stopped the engine this scan started' : 'the engine was already stopped',
-    };
-  } catch (error) {
-    return { stopped: false, detail: `could not stop the engine: ${error instanceof Error ? error.message : String(error)}` };
-  }
-}
 
 /**
  * The whole saved-workflow directory listing URL.
@@ -612,12 +547,11 @@ async function readServerWorkflows(
     : isObject(listing.body) && Array.isArray(listing.body['files'])
       ? (listing.body['files'] as unknown[])
       : [];
-  if (entries.length === 0 && !Array.isArray(listing.body) && !isObject(listing.body)) {
+  if (!Array.isArray(listing.body) && !(isObject(listing.body) && Array.isArray(listing.body['files']))) {
     return { documents: [], error: 'the saved-workflow listing was not an array of names' };
   }
 
-  const documents: WorkflowDocument[] = [];
-  for (const entry of entries) {
+  const results = await Promise.all(entries.slice(0, MAX_WORKFLOW_FILES).map(async (entry): Promise<WorkflowDocument | undefined> => {
     const name =
       typeof entry === 'string'
         ? entry
@@ -626,9 +560,9 @@ async function readServerWorkflows(
           : isObject(entry) && typeof entry['name'] === 'string'
             ? (entry['name'] as string)
             : undefined;
-    if (name === undefined) continue;
+    if (name === undefined) return undefined;
     const cleaned = name.replace(/^\/+/, '').trim();
-    if (cleaned.length === 0 || !cleaned.toLowerCase().endsWith('.json')) continue;
+    if (cleaned.length === 0 || !cleaned.toLowerCase().endsWith('.json')) return undefined;
 
     const attempts: string[] = [];
     let read: WorkflowDocument | undefined;
@@ -640,15 +574,14 @@ async function readServerWorkflows(
       }
       attempts.push(result.detail);
     }
-    documents.push(
-      read ?? {
+    return read ?? {
         name: cleaned,
         raw: undefined,
-        source: `${base}/userdata/${cleaned}`,
+        source: workflowUrls(base, cleaned)[0]!,
         unreadable: `the engine listed this workflow but would not return its contents. Tried: ${attempts.join(' | ')}`,
-      },
-    );
-  }
+      };
+  }));
+  const documents = results.filter((document): document is WorkflowDocument => document !== undefined);
   return { documents };
 }
 
@@ -662,24 +595,33 @@ async function readServerWorkflows(
 async function listWorkflowFiles(
   probes: ScanProbes,
   root: string,
-): Promise<{ readonly path: string; readonly sizeBytes?: number }[]> {
+  accept: (name: string) => boolean = (name) => /\.json$/i.test(name),
+): Promise<{ readonly files: { readonly path: string; readonly sizeBytes?: number }[]; readonly errors: string[] }> {
+  const errors: string[] = [];
   const found: { path: string; sizeBytes?: number }[] = [];
   const queue: { path: string; depth: number }[] = [{ path: root, depth: 0 }];
-  while (queue.length > 0 && found.length < MAX_WORKFLOW_FILES) {
+  let directories = 0;
+  while (queue.length > 0 && found.length < MAX_WORKFLOW_FILES && directories < MAX_WORKFLOW_FILES) {
+    directories += 1;
     const current = queue.shift() as { path: string; depth: number };
-    const entries = (await probes.listDir(current.path)) ?? [];
-    for (const entry of entries) {
+    let entries: readonly ScannedDirEntry[] | undefined;
+    try { entries = await probes.listDir(current.path); }
+    catch (error) { errors.push(current.path + ': ' + String(error)); continue; }
+    if (entries === undefined) { errors.push(current.path + ' directory listing failed'); continue; }
+    for (const entry of entries.slice(0, MAX_WORKFLOW_FILES)) {
       if (found.length >= MAX_WORKFLOW_FILES) break;
+      // Directory probes must not escape the configured root.
+      if (!entry.name || /[/\\]/.test(entry.name) || entry.name === '.' || entry.name === '..') continue;
       const child = join(current.path, entry.name);
       if (entry.isDirectory) {
-        if (current.depth < MAX_DIRECTORY_DEPTH) queue.push({ path: child, depth: current.depth + 1 });
+        if (current.depth < MAX_DIRECTORY_DEPTH && queue.length < MAX_WORKFLOW_FILES) queue.push({ path: child, depth: current.depth + 1 });
         continue;
       }
-      if (!/\.json$/i.test(entry.name)) continue;
+      if (!accept(entry.name)) continue;
       found.push({ path: child, ...(entry.sizeBytes === undefined ? {} : { sizeBytes: entry.sizeBytes }) });
     }
   }
-  return found;
+  return { files: found, errors };
 }
 
 /**
@@ -697,31 +639,30 @@ async function readDirectoryWorkflows(
     return { documents: [], error: `the configured workflow directory ${root} is not a directory` };
   }
   const readText = probes.readFile ?? DEFAULT_SCAN_PROBES.readFile;
-  const files = await listWorkflowFiles(probes, root);
-  const documents: WorkflowDocument[] = [];
-  for (const file of files) {
+  const { files, errors } = await listWorkflowFiles(probes, root);
+  const documents = await Promise.all(files.map(async (file): Promise<WorkflowDocument> => {
     try {
       const text = await readText!(file.path);
-      documents.push({
+      return {
         name: file.path,
         raw: JSON.parse(text) as unknown,
         source: file.path,
         ...(file.sizeBytes === undefined ? {} : { sizeBytes: file.sizeBytes }),
-      });
+      };
     } catch (error) {
       // A file that could not be read or parsed is reported as unreadable rather
       // than as an invalid workflow: the difference is whether the document was
       // ever seen.
-      documents.push({
+      return {
         name: file.path,
         raw: undefined,
         source: file.path,
         unreadable: `${file.path} could not be read as JSON: ${error instanceof Error ? error.message : String(error)}`,
         ...(file.sizeBytes === undefined ? {} : { sizeBytes: file.sizeBytes }),
-      });
+      };
     }
-  }
-  return { documents };
+  }));
+  return { documents, ...(errors.length === 0 ? {} : { error: errors.join(' | ') }) };
 }
 
 /**
@@ -757,84 +698,111 @@ function ollamaResource(
     name,
     source: `${baseOf(endpoint)}/api/tags`,
     status: 'ready',
-    detail: parts.length === 0 ? 'installed' : `installed · ${parts.join(' · ')}`,
-    runnable: true,
-    modelId: registeredId ?? id,
+    detail: (parts.length === 0 ? 'installed' : `installed · ${parts.join(' · ')}`) +
+      (registeredId === undefined ? ' (not registered for hub invocation)' : ''),
+    runnable: registeredId !== undefined,
+    ...(registeredId === undefined ? {} : { modelId: registeredId }),
     engineRunning: true,
     ...(sizeBytes === undefined ? {} : { sizeBytes }),
   };
 }
 
-/**
- * Scan the Ollama instances the catalog declares.
- *
- * @param hub - the live hub, read for already-registered model ids.
- * @param hosts - the declared hosts.
- * @param probes - the effects to use.
- * @param timeoutMs - budget per request.
- * @returns the resources and the per-host report.
- */
-async function scanOllama(
-  hub: ModelHub,
-  hosts: readonly ModelHost[],
-  probes: ScanProbes,
-  timeoutMs: number,
-): Promise<{ resources: LocalResource[]; sources: ScanSourceReport[] }> {
-  const resources: LocalResource[] = [];
-  const sources: ScanSourceReport[] = [];
+/** Ollama treats an omitted tag as :latest; compare identities, not spellings. */
+function ollamaTag(tag: string): string {
+  const cleaned = tag.trim();
+  return cleaned.slice(cleaned.lastIndexOf('/') + 1).includes(':') ? cleaned : cleaned + ':latest';
+}
 
-  for (const host of hosts.filter(isOllamaHost)) {
-    const endpoint = host.runtime.endpoint;
-    if (endpoint === undefined || endpoint.trim().length === 0) {
-      sources.push({
-        id: host.id,
-        kind: 'ollama_model',
-        label: host.name,
-        ok: false,
-        detail: 'no runtime.endpoint configured, so its models cannot be listed',
-        found: 0,
-      });
-      continue;
-    }
-    // Readiness and listing are the same request for Ollama: `/api/tags` is both
-    // the health answer and the model list, which is why it is the readiness path.
-    const tags = await probes.request(`${baseOf(endpoint)}/api/tags`, timeoutMs);
-    if (!tags.ok) {
-      sources.push({
-        id: host.id,
-        kind: 'ollama_model',
-        label: host.name,
-        ok: false,
-        detail: tags.detail,
-        found: 0,
-      });
-      continue;
-    }
-    const list = isObject(tags.body) && Array.isArray(tags.body['models']) ? (tags.body['models'] as unknown[]) : [];
-    const registered = new Map<string, string>();
-    for (const model of hub.catalog.listModels()) {
-      if (model.hostId !== host.id) continue;
-      const tag = model.adapterConfig['model'];
-      if (typeof tag === 'string') registered.set(tag, model.id);
-    }
-    let found = 0;
-    for (const entry of list) {
+/** One independent Ollama pass; offline catalog entries remain visible. */
+async function scanOllamaHost(
+  hub: ModelHub, host: ModelHost, probes: ScanProbes, timeoutMs: number, state: HubScanState,
+): Promise<HostPass> {
+  const endpoint = host.runtime.endpoint;
+  const key = JSON.stringify(['ollama', host]);
+  const generation = beginSource(state, key);
+  const checkedAt = new Date().toISOString();
+  const known = hub.catalog.listModels().filter((model) => model.hostId === host.id && /ollama/i.test(model.runtime.engine) &&
+    model.runtime.endpoint === host.runtime.endpoint);
+  const registered = new Map(known.flatMap((model) => typeof model.adapterConfig['model'] === 'string'
+    ? [[ollamaTag(model.adapterConfig['model']), model.id] as const] : []));
+  const tags: HttpProbeResult = endpoint?.trim()
+    ? await probes.request(baseOf(endpoint) + '/api/tags', timeoutMs)
+    : { ok: false, kind: 'connection', detail: 'no runtime.endpoint configured' };
+  const valid = tags.ok && isObject(tags.body) && Array.isArray(tags.body['models']) &&
+    tags.body['models'].every((entry) => isObject(entry) && typeof entry['name'] === 'string' && entry['name'].trim().length > 0);
+  const resources: LocalResource[] = [];
+  if (valid && tags.ok && isObject(tags.body)) {
+    for (const entry of tags.body['models'] as unknown[]) {
       const tag = isObject(entry) && typeof entry['name'] === 'string' ? entry['name'] : undefined;
-      const resource = ollamaResource(host, endpoint, entry, tag === undefined ? undefined : registered.get(tag));
-      if (resource === undefined) continue;
-      resources.push(resource);
-      found += 1;
+      const resource = ollamaResource(host, endpoint!, entry, tag === undefined ? undefined : registered.get(ollamaTag(tag)));
+      if (resource !== undefined) resources.push({ ...resource, availability: 'available', freshness: 'live', checkedAt });
     }
-    sources.push({
-      id: host.id,
-      kind: 'ollama_model',
-      label: host.name,
-      ok: true,
-      detail: `read ${found} installed model(s) from ${baseOf(endpoint)}/api/tags`,
-      found,
+    if (state.generations.get(key) === generation) state.cache.set(key, { resources, descriptors: [] });
+  } else {
+    resources.push(...(state.cache.get(key)?.resources ?? []).map((resource): LocalResource => {
+      const { modelId: _priorModelId, ...observation } = resource;
+      const modelId = registered.get(ollamaTag(resource.name));
+      return { ...observation, ...(modelId === undefined ? {} : { modelId }), runnable: modelId !== undefined,
+        engineRunning: false, availability: tags.ok ? 'unknown' : 'unavailable', freshness: 'cached',
+        detail: resource.detail + ' (cached; engine could not be verified)' };
+    }));
+  }
+  // Ollama's documented local manifest layout is useful even with its API off.
+  // Never attribute this machine's model store to a remote Ollama endpoint.
+  let localEndpoint = false;
+  try { localEndpoint = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(endpoint ?? '').hostname); } catch {}
+  if (!valid && localEndpoint) {
+    const configuredRoot = host.runtime.env?.['OLLAMA_MODELS']?.trim() || process.env['OLLAMA_MODELS']?.trim();
+    const expandedRoot = configuredRoot?.replace(/^~(?=[/\\]|$)/, homedir())
+      .replace(/%([^%]+)%/g, (token, name: string) => host.runtime.env?.[name] ?? process.env[name] ?? token)
+      .replace(/\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+        (token, braced: string | undefined, plain: string | undefined) => {
+          const name = braced ?? plain!;
+          return host.runtime.env?.[name] ?? process.env[name] ?? token;
+        });
+    const root = join(expandedRoot || join(homedir(), '.ollama', 'models'), 'manifests');
+    try {
+      if (await probes.isDirectory(root)) {
+        const { files } = await bounded(() => listWorkflowFiles(probes, root, () => true), timeoutMs * 3, root + ' manifest scan');
+        const manifests = await Promise.all(files.map(async (file): Promise<LocalResource | undefined> => {
+          try {
+            const manifest: unknown = JSON.parse(await probes.readFile!(file.path));
+            if (!isObject(manifest) || !Array.isArray(manifest['layers']) || !isObject(manifest['config'])) return undefined;
+            const parts = relative(root, file.path).split(/[/\\]/);
+            if (parts.length < 4) return undefined;
+            const namespace = parts.slice(1, -2).join('/');
+            const name = (namespace === 'library' ? '' : namespace + '/') + parts.at(-2) + ':' + basename(file.path);
+            return { id: scannedOllamaModelId(host.id, name), kind: 'ollama_model', typeLabel: 'Ollama Model', name,
+              source: file.path, status: 'ready',
+              ...(registered.get(ollamaTag(name)) === undefined ? {} : { modelId: registered.get(ollamaTag(name))! }),
+              runnable: registered.has(ollamaTag(name)), engineRunning: false, availability: 'unavailable', freshness: 'local', checkedAt,
+              detail: 'Local Ollama manifest found; engine and referenced blobs are not verified' +
+                (registered.has(ollamaTag(name)) ? '' : ' (not registered for hub invocation)') };
+          } catch { return undefined; }
+        }));
+        for (const manifest of manifests) {
+          if (manifest === undefined) continue;
+          const index = resources.findIndex((resource) => ollamaTag(resource.name) === ollamaTag(manifest.name));
+          if (index < 0) resources.push(manifest); else resources[index] = manifest;
+        }
+      }
+    } catch { /* The model store is optional; API/catalog results remain independent. */ }
+  }
+  for (const model of known) {
+    const tag = model.adapterConfig['model'];
+    if (typeof tag !== 'string' || resources.some((resource) => ollamaTag(resource.name) === ollamaTag(tag))) continue;
+    resources.push({
+      id: scannedOllamaModelId(host.id, tag), kind: 'ollama_model', typeLabel: 'Ollama Model', name: tag,
+      source: 'catalog:' + model.id, modelId: model.id, status: 'ready', runnable: model.enabled,
+      engineRunning: valid, availability: valid ? 'unavailable' : 'unknown', freshness: 'catalog', checkedAt,
+      capabilities: model.capabilities,
+      detail: valid ? 'Catalog model was not reported installed by /api/tags' : 'Known to the active catalog; installation and engine availability not verified',
     });
   }
-  return { resources, sources };
+  const detail = valid ? 'read installed models from ' + endpoint + '/api/tags'
+    : tags.ok ? 'the model listing did not contain a valid models array with nonempty model names' : tags.detail;
+  return { resources, descriptors: [], warnings: valid ? [] : [host.name + ': ' + detail],
+    sources: [{ id: host.id, kind: 'ollama_model', label: host.name, ok: valid, detail, found: resources.length }] };
 }
 
 /**
@@ -857,7 +825,7 @@ function workflowResource(
   if (document.name.trim().length === 0) return undefined;
 
   const displayName = workflowDisplayName(document.raw, document.name);
-  const id = scannedWorkflowId(displayName, document.source);
+  const id = scannedWorkflowId(displayName, document.source) + '-' + stableDigest(host.id + '|' + document.source);
 
   // Contents that were never retrieved are *unreadable*, with the transport
   // reason — never "invalid", which would blame a document nobody has seen.
@@ -951,317 +919,206 @@ function workflowResource(
   return { resource, descriptor };
 }
 
-/**
- * Run one host's discovery pass, starting and releasing its engine as needed.
- *
- * @param hub - the live hub.
- * @param host - the ComfyUI host.
- * @param options - probes, budgets, and the workflow directory.
- * @returns everything the pass produced.
- */
-async function runHostPass(
-  hub: ModelHub,
-  host: ModelHost,
-  options: {
-    readonly probes: ScanProbes;
-    readonly timeoutMs: number;
-    readonly startupTimeoutMs: number;
-    readonly workflowDir?: string;
-    readonly startEngine: boolean;
-    readonly log: (message: string) => void;
-  },
-): Promise<HostPass> {
-  const warnings: string[] = [];
-  const sources: ScanSourceReport[] = [];
-  const resources: LocalResource[] = [];
-  const descriptors: ModelDescriptor[] = [];
-  const seen = new Set<string>();
-
-  const endpoint = host.runtime.endpoint;
-  let engineRunning = false;
-  let startedEngine = false;
-  let releasedEngine = false;
-
-  const ready = await engineReady(options.probes, host, options.timeoutMs);
-  engineRunning = ready.running;
-
-  if (!engineRunning && options.startEngine) {
-    const started = await startEngine(hub, host, options.startupTimeoutMs, options.log, async () => {
-      const check = await engineReady(options.probes, host, options.timeoutMs);
-      return check.running;
-    });
-    startedEngine = started.owned;
-    if (started.owned || started.detail.includes('already running')) {
-      const recheck = await engineReady(options.probes, host, options.timeoutMs);
-      engineRunning = recheck.running;
-      if (!engineRunning) warnings.push(`${host.name}: ${recheck.detail}`);
-    } else {
-      warnings.push(`${host.name}: ${started.detail}`);
-    }
-  } else if (!engineRunning) {
-    warnings.push(`${host.name}: not answering and this scan was not allowed to start it (${ready.detail})`);
+/** Reconcile one source independently: failed files keep their last good contract. */
+function reconcileSource(
+  state: HubScanState, key: string, fresh: HostPass, complete: boolean,
+  engineRunning: boolean, availability: 'available' | 'unavailable' | 'unknown', generation: number,
+): HostPass {
+  const previous = state.cache.get(key);
+  const resources = [...fresh.resources];
+  const descriptors = [...fresh.descriptors];
+  for (const old of previous?.resources ?? []) {
+    const index = resources.findIndex((resource) => resource.source === old.source);
+    const current = resources[index];
+    if (current !== undefined && current.status !== 'unreadable' && !(current.freshness === 'cached')) continue;
+    if (current === undefined && complete) continue;
+    const cached: LocalResource = {
+      ...old, engineRunning, availability, freshness: 'cached',
+      detail: old.detail + ' (cached observation; current resource could not be verified)',
+      diagnostics: [...(old.diagnostics ?? []), ...(current?.diagnostics ?? []), ...fresh.warnings],
+    };
+    if (index < 0) resources.push(cached); else resources[index] = cached;
+    const descriptor = previous?.descriptors.find((entry) => entry.id === old.modelId);
+    if (descriptor !== undefined && !descriptors.some((entry) => entry.id === descriptor.id)) descriptors.push(descriptor);
   }
+  // Store only original observations, not repeatedly decorated cache responses.
+  const storedResources = resources.map((resource) => resource.freshness === 'cached'
+    ? previous?.resources.find((entry) => entry.source === resource.source) ?? resource : resource);
+  if (state.generations.get(key) === generation) state.cache.set(key, { resources: storedResources, descriptors });
+  return { ...fresh, resources, descriptors };
+}
 
-  // The host always reports itself, even when it contributed nothing. A
-  // discovery source that stays silent when it fails is indistinguishable from
-  // one that was never asked, and "ComfyUI is not running" is exactly the fact
-  // the page exists to show.
-  sources.push({
-    id: host.id,
-    kind: 'comfyui_workflow',
-    label: host.name,
-    ok: engineRunning,
-    detail: engineRunning
-      ? `${ready.running ? ready.detail : 'became ready after this scan started it'}`
-      : `${host.name} is not answering: ${ready.detail}`,
-    found: 0,
-    ...(startedEngine ? { startedEngine: true } : {}),
+async function runHostPass(
+  hub: ModelHub, host: ModelHost, options: {
+    readonly probes: ScanProbes; readonly timeoutMs: number; readonly workflowDirs: readonly string[];
+    readonly catalogDir?: string;
+  }, state: HubScanState,
+): Promise<HostPass> {
+  const { probes, timeoutMs } = options;
+  const apiKey = JSON.stringify(['api', host]);
+  const apiGeneration = beginSource(state, apiKey);
+  const directoryGenerations = new Map(options.workflowDirs.map((root) =>
+    [root, beginSource(state, JSON.stringify(['directory', host, root]))]));
+  const checkedAt = new Date().toISOString();
+  const warnings: string[] = [];
+  // Start the directory effects immediately, independently of API readiness.
+  const directoryTasks = options.workflowDirs.map(async (root) => {
+    try { return { root, result: await bounded(() => readDirectoryWorkflows(probes, root), timeoutMs * 3, root + ' workflow scan') }; }
+    catch (error) { return { root, result: { documents: [] as WorkflowDocument[], error: root + ': ' + String(error) } }; }
   });
-
+  const ready = await engineReady(probes, host, timeoutMs);
+  const engineRunning = ready.running;
+  if (!engineRunning) warnings.push(host.name + ': not answering; scans never start engines (' + ready.detail + ')');
+  const endpoint = host.runtime.endpoint;
+  const sources: ScanSourceReport[] = [{ id: host.id, kind: 'comfyui_workflow', label: host.name,
+    ok: engineRunning, detail: ready.detail, found: 0 }];
   let io: ComfyNodeIndex | undefined;
   let classes: ReadonlySet<string> | undefined;
-  if (engineRunning && endpoint !== undefined && endpoint.trim().length > 0) {
-    const base = baseOf(endpoint);
-    const info = await options.probes.request(`${base}/object_info`, options.timeoutMs);
-    if (info.ok) {
-      io = readComfyNodeIo(info.body);
-      classes = new Set(isObject(info.body) ? Object.keys(info.body) : []);
-    } else {
-      warnings.push(
-        `${host.name}: node definitions could not be read, so conversions cannot be verified (${info.detail})`,
-      );
-    }
+  let listed: { documents: WorkflowDocument[]; error?: string } = { documents: [], error: ready.detail };
+  let infoOk = false;
+  if (engineRunning && endpoint?.trim()) {
+    const [info, documents] = await Promise.all([
+      probes.request(baseOf(endpoint) + '/object_info', timeoutMs), readServerWorkflows(probes, endpoint, timeoutMs),
+    ]);
+    listed = documents;
+    if (info.ok && isObject(info.body) && Object.values(info.body).some((node) =>
+      isObject(node) && isObject(node['input']))) {
+      io = readComfyNodeIo(info.body); classes = new Set(Object.keys(info.body)); infoOk = true;
+    } else warnings.push(host.name + ': node definitions could not be verified' + (info.ok ? '' : ' (' + info.detail + ')'));
   }
-
-  if (engineRunning && endpoint !== undefined && endpoint.trim().length > 0) {
-    const listed = await readServerWorkflows(options.probes, endpoint, options.timeoutMs);
-    if (listed.error !== undefined) {
-      sources.push({ id: host.id, kind: 'comfyui_workflow', label: host.name, ok: false, detail: listed.error, found: 0 });
-    }
-    let found = 0;
-    for (const document of listed.documents) {
+  const build = (documents: readonly WorkflowDocument[], freshness: 'live' | 'local'): HostPass => {
+    const resources: LocalResource[] = []; const descriptors: ModelDescriptor[] = [];
+    for (const document of documents) {
       const built = workflowResource(host, document, io, classes, engineRunning);
-      if (built === undefined || seen.has(built.resource.id)) continue;
-      seen.add(built.resource.id);
-      resources.push(built.resource);
+      if (built === undefined) continue;
+      resources.push({ ...built.resource,
+        availability: document.unreadable !== undefined ? 'unknown' : engineRunning ? 'unknown' : 'unavailable',
+        detail: built.resource.detail + (engineRunning ? ' (engine answering; workflow dependencies not execution-verified)' : ' (engine not answering)'),
+        freshness, checkedAt });
       if (built.descriptor !== undefined) descriptors.push(built.descriptor);
-      found += 1;
     }
-    if (listed.error === undefined) {
-      sources.push({
-        id: host.id,
-        kind: 'comfyui_workflow',
-        label: host.name,
-        ok: true,
-        detail: `read ${found} saved workflow(s) from ${baseOf(endpoint)}/userdata`,
-        found,
-        ...(startedEngine ? { startedEngine: true } : {}),
-      });
-    }
-  }
-
-  // The configured directory is read even when the engine is down: an API-format
-  // workflow needs no engine to be understood, and this is the only source that
-  // survives ComfyUI being off.
-  const owner = host;
-  const workflowDir = options.workflowDir;
-  if (workflowDir !== undefined && workflowDir.trim().length > 0) {
-    const read = await readDirectoryWorkflows(options.probes, workflowDir);
-    if (read.error !== undefined) {
-      sources.push({ id: 'workflow-dir', kind: 'comfyui_workflow', label: workflowDir, ok: false, detail: read.error, found: 0 });
-    }
-    let found = 0;
-    for (const document of read.documents) {
-      const built = workflowResource(owner, document, io, classes, engineRunning);
-      if (built === undefined || seen.has(built.resource.id)) continue;
-      seen.add(built.resource.id);
-      resources.push(built.resource);
-      if (built.descriptor !== undefined) descriptors.push(built.descriptor);
-      found += 1;
-    }
-    if (read.error === undefined) {
-      sources.push({
-        id: 'workflow-dir',
-        kind: 'comfyui_workflow',
-        label: workflowDir,
-        ok: true,
-        detail: `read ${found} workflow file(s) from ${workflowDir}`,
-        found,
-      });
-    }
-  }
-
-  const pass: HostPass = {
-    hostId: host.id,
-    label: host.name,
-    resources,
-    descriptors,
-    warnings,
-    sources,
-    reachable: engineRunning,
-    engineRunning,
-    startedEngine,
-    releasedEngine,
+    return { resources, descriptors, warnings: [], sources: [] };
   };
-
-  // A reachable pass replaces the cache; an unreachable one must not erase it.
-  if (engineRunning) {
-    hostCache.set(host.id, { resources, descriptors });
+  const apiFresh = build(listed.documents, 'live');
+  // Missing node definitions cannot overwrite previously validated conversions.
+  if (!infoOk) {
+    const previous = state.cache.get(JSON.stringify(['api', host]));
+    for (let index = 0; index < apiFresh.resources.length; index += 1) {
+      const resource = apiFresh.resources[index]!;
+      if (previous?.resources.some((old) => old.source === resource.source)) {
+        apiFresh.resources[index] = { ...resource, freshness: 'cached' };
+        const descriptorIndex = apiFresh.descriptors.findIndex((entry) => entry.id === resource.modelId);
+        if (descriptorIndex >= 0) apiFresh.descriptors.splice(descriptorIndex, 1);
+      }
+    }
   }
-  return pass;
-}
-
-/**
- * Discover one host's workflows, sharing a single pass with any concurrent caller.
- *
- * @param hub - the live hub.
- * @param host - the host to scan.
- * @param options - probes, budgets, directory, and launch permission.
- * @returns the pass, and the engine id to release afterwards when one was started.
- */
-async function hostPass(
-  hub: ModelHub,
-  host: ModelHost,
-  options: {
-    readonly probes: ScanProbes;
-    readonly timeoutMs: number;
-    readonly startupTimeoutMs: number;
-    readonly workflowDir?: string;
-    readonly startEngine: boolean;
-    readonly log: (message: string) => void;
-  },
-): Promise<{ pass: HostPass; engineId?: string }> {
-  const pending = inFlight.get(host.id);
-  if (pending !== undefined) {
-    options.log(`scan: joining the pass already running for ${host.name}`);
-    return { pass: await pending };
+  apiFresh.warnings.push(...warnings, ...(listed.error === undefined ? [] : [listed.error]));
+  const api = reconcileSource(state, JSON.stringify(['api', host]), apiFresh, listed.error === undefined,
+    engineRunning, engineRunning ? 'unknown' : 'unavailable', apiGeneration);
+  const resources = [...api.resources]; const descriptors = [...api.descriptors];
+  if (engineRunning) sources.push({ id: host.id, kind: 'comfyui_workflow', label: host.name,
+    ok: listed.error === undefined, detail: listed.error ?? 'read saved workflows from ' + endpoint + '/userdata',
+    found: api.resources.length });
+  if (listed.error !== undefined && engineRunning) warnings.push(listed.error);
+  let authoritative = listed.error === undefined && infoOk && listed.documents.every((document) => document.unreadable === undefined);
+  for (const { root, result } of await Promise.all(directoryTasks)) {
+    authoritative = authoritative && result.error === undefined && result.documents.every((document) => document.unreadable === undefined);
+    const fresh = build(result.documents, 'local');
+    if (result.error !== undefined) fresh.warnings.push(result.error);
+    if (!infoOk) {
+      const previous = state.cache.get(JSON.stringify(['directory', host, root]));
+      for (let index = 0; index < fresh.resources.length; index += 1) {
+        const resource = fresh.resources[index]!;
+        if (resource.format !== 'ui' || !previous?.resources.some((old) => old.source === resource.source)) continue;
+        fresh.resources[index] = { ...resource, freshness: 'cached' };
+        const descriptorIndex = fresh.descriptors.findIndex((entry) => entry.id === resource.modelId);
+        if (descriptorIndex >= 0) fresh.descriptors.splice(descriptorIndex, 1);
+      }
+    }
+    const local = reconcileSource(state, JSON.stringify(['directory', host, root]), fresh, result.error === undefined,
+      engineRunning, engineRunning ? 'unknown' : 'unavailable', directoryGenerations.get(root)!);
+    resources.push(...local.resources); descriptors.push(...local.descriptors);
+    sources.push({ id: 'workflow-dir', kind: 'comfyui_workflow', label: root, ok: result.error === undefined,
+      detail: result.error ?? 'read workflow files from ' + root, found: local.resources.length });
+    if (result.error !== undefined) warnings.push(result.error);
   }
-  const engineKey = `engine-${host.id}`;
-  const task = runHostPass(hub, host, options);
-  inFlight.set(host.id, task);
-  try {
-    const pass = await task;
-    const engineId = pass.startedEngine && ownedEngines.has(engineKey) ? engineKey : undefined;
-    return engineId === undefined ? { pass } : { pass, engineId };
-  } finally {
-    inFlight.delete(host.id);
-  }
-}
-
-/**
- * The cached resources for a host, marked as belonging to a stopped engine.
- *
- * @param hostId - the host to read.
- * @param detail - why the engine is not answering.
- * @returns the resources, or an empty array when nothing was ever discovered.
- */
-function cachedResources(hostId: string, detail: string): LocalResource[] {
-  const cached = hostCache.get(hostId);
-  if (cached === undefined) return [];
-  return cached.resources.map((resource) => ({
-    ...resource,
-    engineRunning: false,
-    runnable: resource.runnable,
-    detail: resource.runnable
-      ? `${resource.detail} (ComfyUI is not running; it will be started on demand when this workflow is invoked)`
-      : resource.detail,
-    diagnostics: [...(resource.diagnostics ?? []), detail],
+  // Consult the active catalog (not a stale startup config). Read pinned paths
+  // even offline; preserve the declared provider identity instead of republishing it.
+  const known = hub.catalog.listModels().filter((model) => model.hostId === host.id && model.adapter === 'comfyui' &&
+    model.runtime.endpoint === host.runtime.endpoint && !model.tags?.includes('scanned'));
+  const catalogResources = await Promise.all(known.map(async (model): Promise<LocalResource | undefined> => {
+    if (resources.some((resource) => resource.modelId === model.id)) return undefined;
+    const config = model.adapterConfig;
+    const workflowPath = typeof config['workflowPath'] === 'string'
+      ? resolveAdapterPath(config['workflowPath'], options.catalogDir).absolute : undefined;
+    if (workflowPath !== undefined) {
+      const duplicate = resources.findIndex((resource) => resource.source === workflowPath);
+      if (duplicate >= 0) {
+        const resource = resources[duplicate]!;
+        resources[duplicate] = { ...resource, id: model.id, modelId: model.id, name: model.name,
+          runnable: model.enabled && resource.runnable };
+        const descriptorIndex = descriptors.findIndex((entry) => entry.id === resource.modelId);
+        if (descriptorIndex >= 0) descriptors.splice(descriptorIndex, 1);
+        return undefined;
+      }
+    }
+    let raw: unknown = config['workflow']; let unreadable: string | undefined;
+    if (workflowPath !== undefined) {
+      try { raw = JSON.parse(await probes.readFile!(workflowPath)) as unknown; }
+      catch (error) { unreadable = String(error); }
+    }
+    const built = workflowResource(host, { name: model.name, raw, source: workflowPath ?? 'catalog:' + model.id,
+      ...(unreadable === undefined ? {} : { unreadable }) }, io, classes, engineRunning);
+    if (built === undefined) return undefined;
+    return { ...built.resource, id: model.id, modelId: model.id, name: model.name,
+      runnable: model.enabled && built.resource.runnable, checkedAt,
+      freshness: workflowPath !== undefined && unreadable === undefined ? 'local' : 'catalog',
+      availability: unreadable !== undefined ? 'unknown' : engineRunning ? 'unknown' : 'unavailable',
+      detail: built.resource.detail + ' (known to catalog; workflow dependencies not execution-verified)'  };
   }));
+  resources.push(...catalogResources.filter((resource): resource is LocalResource => resource !== undefined));
+  return { resources, descriptors, warnings, sources, authoritative };
 }
 
-/** The cached providers for a host, so a failed scan does not unregister them. */
-function cachedDescriptors(hostId: string): readonly ModelDescriptor[] {
-  return hostCache.get(hostId)?.descriptors ?? [];
-}
-
-/**
- * Scan this machine for the local AI resources the settings page lists.
- *
- * @param hub - the live hub the runnable workflows are published to.
- * @param options - the declared hosts, the workflow directory, and the effects.
- * @returns the resources, the per-source report, and the warnings.
- */
+/** Scan only observes. Neither compatibility flags nor launch policy grant lifecycle effects. */
 export async function scanLocalResources(hub: ModelHub, options: ScanOptions): Promise<LocalScanResult> {
-  const probes: ScanProbes = { ...DEFAULT_SCAN_PROBES, ...(options.probes ?? {}) };
-  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const startupTimeoutMs = Math.max(1_000, options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
-  const log = options.log ?? ((): void => {});
-  const warnings: string[] = [];
-
-  // The two halves never share a failure path: each is awaited on its own, and
-  // each contains its own errors, so one engine being down can only cost its own
-  // rows.
-  const ollama = await scanOllama(hub, options.hosts, probes, timeoutMs);
-
-  const comfyHosts = options.hosts.filter((host) => host.adapter === 'comfyui');
-  const resources: LocalResource[] = [...ollama.resources];
-  const sources: ScanSourceReport[] = [...ollama.sources];
-  const descriptors: ModelDescriptor[] = [];
-  const engineIdsToRelease: string[] = [];
-
-  for (const host of comfyHosts) {
-    const { pass, engineId } = await hostPass(hub, host, {
-      probes,
-      timeoutMs,
-      startupTimeoutMs,
-      ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
-      startEngine: options.startEngine !== false,
-      log,
-    });
-    resources.push(...pass.resources);
-    sources.push(...pass.sources);
-    warnings.push(...pass.warnings);
-    descriptors.push(...pass.descriptors);
-    if (engineId !== undefined) engineIdsToRelease.push(engineId);
-
-    // A host that could not be reached keeps whatever was discovered last time:
-    // a temporary failure must not erase resources that were working, nor
-    // unregister the providers that serve them.
-    if (!pass.reachable) {
-      const cached = cachedResources(host.id, pass.warnings[0] ?? `${pass.label} is not answering`);
-      if (cached.length > 0) {
-        warnings.push(
-          `${pass.label} could not be reached, so ${cached.length} previously discovered workflow(s) are shown from ` +
-            'the last successful scan and remain registered.',
-        );
-        resources.push(...cached.filter((entry) => !resources.some((existing) => existing.id === entry.id)));
-        descriptors.push(...cachedDescriptors(host.id));
+  const requestedTimeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(1, Math.min(60_000, requestedTimeout)) : DEFAULT_TIMEOUT_MS;
+  const probes = boundedProbes({ ...DEFAULT_SCAN_PROBES, ...(options.probes ?? {}) }, timeoutMs);
+  const state = stateFor(hub);
+  const publicationGeneration = ++state.publicationGeneration;
+  const requestedHosts = options.hosts.filter((host) => isOllamaHost(host) || host.adapter === 'comfyui');
+  const previousScanned = hub.catalog.listModels().filter((model) => model.tags?.includes('scanned'));
+  const passes = await Promise.all(options.hosts.filter((host) => isOllamaHost(host) || host.adapter === 'comfyui')
+    .map(async (host): Promise<HostPass> => {
+      try {
+        return isOllamaHost(host) ? await scanOllamaHost(hub, host, probes, timeoutMs, state)
+          : await runHostPass(hub, host, { probes, timeoutMs,
+            ...(options.catalogPath === undefined ? {} : { catalogDir: dirname(resolveAdapterPath(options.catalogPath, undefined).absolute) }),
+            workflowDirs: [...new Set([...(options.workflowDir?.trim() ? [options.workflowDir] : []),
+              ...(options.workflowDirsByHost?.[host.id] ?? []).filter((root) => root.trim())])],
+          }, state);
+      } catch (error) {
+        const detail = host.name + ': scan failed: ' + String(error);
+        return { resources: [], descriptors: [], warnings: [detail], sources: [{ id: host.id,
+          kind: isOllamaHost(host) ? 'ollama_model' : 'comfyui_workflow', label: host.name, ok: false, detail, found: 0 }] };
       }
-    }
-  }
-
+    }));
+  const resources = [...new Map(passes.flatMap((pass) => pass.resources).map((resource) => [resource.id, resource])).values()];
+  const preserved = previousScanned.filter((model) => {
+    const index = requestedHosts.findIndex((host) => host.id === model.hostId && host.runtime.endpoint === model.runtime.endpoint);
+    return index >= 0 && passes[index]?.authoritative !== true;
+  }).map((model) => model.descriptor);
+  const descriptors = dedupeById([...passes.flatMap((pass) => pass.descriptors), ...preserved]);
+  const trustworthyEmpty = requestedHosts.some((host) => host.adapter === 'comfyui') &&
+    passes.every((pass, index) => requestedHosts[index]?.adapter !== 'comfyui' || pass.authoritative === true);
   let registered = 0;
-  if (options.register !== false && descriptors.length > 0) {
-    registered = hub.publishScannedModels(dedupeById(descriptors));
-    log(`scan: published ${registered} provider(s) in the catalog`);
-  } else if (descriptors.length === 0 && comfyHosts.length > 0) {
-    // Nothing fresh and nothing cached: leave the catalog untouched rather than
-    // replacing a working set with an empty one.
-    log('scan: no runnable workflows were discovered; the existing catalog was left as it was');
+  if (options.register !== false && (descriptors.length > 0 || trustworthyEmpty) && state.publicationGeneration === publicationGeneration) {
+    registered = hub.publishScannedModels(descriptors);
+    options.log?.('scan: published ' + registered + ' provider(s) in the catalog');
   }
-
-  // The engines this scan started are shut down only after discovery is complete
-  // and only when nothing else needs them.
-  for (const engineId of engineIdsToRelease) {
-    const released = await releaseEngine(hub, engineId);
-    for (const source of sources) {
-      if (source.id === engineId.replace(/^engine-/, '') || source.startedEngine === true) {
-        (source as { releasedEngine?: boolean }).releasedEngine = released.stopped;
-      }
-    }
-    if (!released.stopped && released.detail.length > 0) {
-      warnings.push(`${released.detail}.`);
-    }
-    log(`scan: engine ${engineId}: ${released.detail}`);
-  }
-
-  return {
-    resources,
-    sources,
-    warnings,
-    registered,
-    generatedAt: new Date().toISOString(),
-  };
+  return { resources, sources: passes.flatMap((pass) => pass.sources), warnings: passes.flatMap((pass) => pass.warnings),
+    registered, generatedAt: new Date().toISOString() };
 }
 
 /**
@@ -1282,9 +1139,7 @@ function dedupeById(descriptors: readonly ModelDescriptor[]): ModelDescriptor[] 
 
 /** Clear the discovery cache. Exported for tests that need a clean machine. */
 export function resetScanCache(): void {
-  hostCache.clear();
-  inFlight.clear();
-  ownedEngines.clear();
+  scanStates = new WeakMap();
 }
 
 /** The digest helper, re-exported so a caller can compare analyses cheaply. */

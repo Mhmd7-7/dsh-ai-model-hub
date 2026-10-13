@@ -108,8 +108,8 @@
       #   # belong to the workflow that uses them.
       #   comfyuiWorkflowDir: ''
       #
-      #   # Budget for one scan request, in milliseconds. Raise it on a slow disk
-      #   # with a large workflow directory.
+      #   # Budget for each probe, in milliseconds; directory walks also have
+      #   # count/depth/deadline limits. Scan/Refresh never launch engines.
       #   scanTimeoutMs: 4000
       #
       #   # Where the saved capability policy lives. The policy — the per-capability

@@ -20,20 +20,11 @@ import type { Capability, CapabilityPolicy, PolicyEntry } from '../src/index.ts'
 import { CAPABILITIES, isCapability } from '../src/index.ts';
 import type { ModelHub } from '../src/index.ts';
 import { savePolicyDocument } from './policy-store.ts';
-import { serviceInScope } from './compat.ts';
+import { installRoute } from './compat.ts';
 import type { PluginLogger } from './types.ts';
 
 /** The route the settings page reads and writes. Absolute, no trailing slash. */
 export const PRIORITIES_ROUTE = '/dsh-ai-model-hub/priorities';
-
-/** The subset of `webServer` this route needs. */
-interface WebServerLike {
-  register(route: {
-    kind: 'exact';
-    path: string;
-    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
-  }): () => void;
-}
 
 /** What the route needs to serve and persist the policy. */
 export interface PrioritiesRouteOptions {
@@ -97,35 +88,27 @@ export function registerPrioritiesRoute(
   log: PluginLogger,
   options: PrioritiesRouteOptions,
 ): void {
-  ctx.inject(['webServer'], (scope) => {
-    const webServer = serviceInScope<WebServerLike>(scope, 'webServer');
-    if (webServer === undefined || typeof webServer.register !== 'function') {
-      log.debug('no web server is mounted, so the Capability priorities route is not served');
-      return;
-    }
-
-    const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-      try {
-        if (req.method === 'GET' || req.method === 'HEAD') {
-          sendJson(res, 200, describe(options));
-          return;
-        }
-        if (req.method === 'PUT' || req.method === 'POST') {
-          const body = await readJsonBody(req);
-          await applyEdit(options, body, res, log);
-          return;
-        }
-        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', allow: 'GET, PUT, POST' });
-        res.end(JSON.stringify({ error: 'method not allowed' }));
-      } catch (error) {
-        log.warn(`the Capability priorities route failed: ${error instanceof Error ? error.message : String(error)}`);
-        sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+  const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      if (req.method === 'GET' || req.method === 'HEAD') {
+        sendJson(res, 200, describe(options));
+        return;
       }
-    };
+      if (req.method === 'PUT' || req.method === 'POST') {
+        const body = await readJsonBody(req);
+        await applyEdit(options, body, res, log);
+        return;
+      }
+      res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', allow: 'GET, PUT, POST' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+    } catch (error) {
+      log.warn(`the Capability priorities route failed: ${error instanceof Error ? error.message : String(error)}`);
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+  };
 
-    webServer.register({ kind: 'exact', path: PRIORITIES_ROUTE, handler });
-    log.debug(`serving Capability priorities on ${PRIORITIES_ROUTE}`);
-  });
+  installRoute(ctx, PRIORITIES_ROUTE, (request, response) => handler(request as IncomingMessage, response as ServerResponse),
+    'Capability priorities', log);
 }
 
 /**

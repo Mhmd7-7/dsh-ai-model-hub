@@ -439,8 +439,9 @@ is it running, and what is inside it.
 
 | Row | Where it comes from |
 |---|---|
-| Installed at | The launch command's `cwd`, then a short list of well-known install directories |
-| Listens on / running | A live probe of the catalog's endpoint (`Scan`), or the last known state |
+| Verified installation | Engine markers or executables in configured/well-known locations; a configured `cwd` alone is not proof |
+| Configured paths | Catalog launch paths, displayed separately from verified installation paths |
+| Listens on / availability | Independent bounded endpoint checks on both **Scan** and **Refresh** |
 | Hub can start it | The descriptor's `startable`, after the deployment's `allowProcessLaunch` |
 | Catalog models / capabilities | The same live hub the tools read, so the page cannot disagree with behaviour |
 
@@ -449,8 +450,8 @@ thing, each row labelled with what it is:
 
 | Kind | What it is | Where it comes from |
 |---|---|---|
-| **Ollama Model** | An installed model | The instance's own `/api/tags` |
-| **ComfyUI Workflow** | One complete, selectable workflow | ComfyUI's saved workflows (`/userdata`) and/or a configured workflow directory |
+| **Ollama Model** | An observed or catalog-known model | Live `/api/tags`, offline loopback-host manifests (`OLLAMA_MODELS` or `~/.ollama/models`), active catalog, or last-good observations |
+| **ComfyUI Workflow** | One complete workflow or an explained unreadable entry | Saved `/userdata` workflows, verified installation's workflow store, configured directories, and active catalog inline/pinned workflows |
 
 A ComfyUI workflow is the smallest thing the list exposes. Its checkpoints,
 LoRAs, VAEs, text encoders, ControlNets and individual nodes are **not** listed —
@@ -462,7 +463,19 @@ cannot hide the workflows and a ComfyUI that is down cannot hide the models; eac
 source reports its own status. Scanning twice refreshes the list rather than
 growing it, because every entry's id comes from its source location.
 
-Workflows are shown with the one status that actually matters:
+**Scan and Refresh never launch or stop engines**, even when invocation is allowed
+to launch them. Engine states distinguish `running`, `installed_unreachable`,
+`not_found` in the checked locations, and `unknown`. Connection failure alone
+proves neither that a process is stopped nor that an installation is absent.
+
+Resource contract status is separate from availability. Each resource reports
+`live`, `local`, `catalog`, or `cached` freshness and its observation timestamp.
+An answering ComfyUI server does not verify a workflow's weights or execution;
+local Ollama manifests do not verify every referenced blob. Failed refreshes keep
+the last useful snapshot visibly stale; Retry requires no page reload. Superseded
+requests cannot replace newer results or cache/provider publications.
+
+Workflow contract statuses include:
 
 | Status | Meaning |
 |---|---|
@@ -501,7 +514,7 @@ than inside ComfyUI:
 ```yaml
 config:
   comfyuiWorkflowDir: 'C:/workflows/comfy'   # every *.json under it, recursively
-  scanTimeoutMs: 4000                        # budget for one scan request
+  scanTimeoutMs: 4000                      # per-probe budget; filesystem walks are also capped
 ```
 
 The directory is a source of workflows only — nothing in it enumerates weights or

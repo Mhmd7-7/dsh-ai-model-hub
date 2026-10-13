@@ -184,7 +184,7 @@ export interface PluginConfig {
    * LoRAs, VAEs or custom nodes — those stay inside the workflow that uses them.
    */
   comfyuiWorkflowDir?: string;
-  /** Budget for one scan request, in milliseconds. Defaults to 4000. */
+  /** Per-probe budget in milliseconds; directory walks also have count/depth/deadline limits. Defaults to 4000. */
   scanTimeoutMs?: number;
   /**
    * Where the saved capability policy lives.
@@ -240,7 +240,8 @@ export const Config = z.object({
   comfyuiWorkflowDir: z.string().default(''),
   scanTimeoutMs: z.number().step(1).min(1).default(4_000),
   policyPath: z.string().default(''),
-  attemptBudget: z.number().step(1).min(1).default(0),
+  // 0 is the unlimited sentinel; the default must itself pass Loader validation.
+  attemptBudget: z.number().step(1).min(0).default(0),
   integrateSubscriptions: z.boolean().default(true),
 });
 

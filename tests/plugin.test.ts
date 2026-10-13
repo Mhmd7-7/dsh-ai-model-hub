@@ -26,7 +26,7 @@ import { Context } from '@deepseek-ai/cordis';
 
 import { apply, inject, name } from '../dsh-plugin/index.ts';
 import { ModelHubService } from '../dsh-plugin/service.ts';
-import { resolvePluginConfig } from '../dsh-plugin/config.ts';
+import { Config, resolvePluginConfig } from '../dsh-plugin/config.ts';
 import { ModelHub, createMockAdapter } from '../src/index.ts';
 import type { PluginLogger } from '../dsh-plugin/types.ts';
 
@@ -977,6 +977,17 @@ describe('apply() end to end', () => {
 });
 
 describe('plugin configuration', () => {
+  it('validates its own defaults through the Loader StandardSchema contract', async () => {
+    const result = await Config['~standard'].validate({});
+    assert.equal(result.issues, undefined, 'default configuration must not abort before apply/route registration');
+    if ('value' in result) {
+      const value = result.value as { attemptBudget: number };
+      assert.equal(value.attemptBudget, 0);
+      assert.equal(resolvePluginConfig(value).attemptBudget, undefined);
+    }
+    const negative = await Config['~standard'].validate({ attemptBudget: -1 });
+    assert.ok(negative.issues?.length);
+  });
   it('defaults to the safe values', () => {
     const config = resolvePluginConfig(undefined);
     assert.equal(config.manageHub, true);

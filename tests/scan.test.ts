@@ -18,6 +18,7 @@
 
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
+import { join } from 'node:path';
 import { beforeEach, describe, it } from 'node:test';
 
 import { ModelHub, renderMockPng } from '../src/index.ts';
@@ -379,9 +380,7 @@ function lifecycleHub(options: {
 }
 
 describe('Local models scan', () => {
-  // The discovery cache is what makes a temporary failure non-destructive, so it
-  // is deliberately process-wide. That also means one test's successful scan
-  // would otherwise be visible to the next, so it is cleared between them.
+  // Cache ownership is per hub/config. Reset weak ownership between fixtures.
   beforeEach(() => {
     resetScanCache();
   });
@@ -397,7 +396,7 @@ describe('Local models scan', () => {
       startEngine: false,
       probes: probesFor({
         ollama: ollamaTags,
-        systemStats: { system: { comfyui_version: '1' } },
+        systemStats: { system: { comfyui_version: '1' }, devices: [] },
         objectInfo,
         workflows: {},
         seen,
@@ -440,7 +439,7 @@ describe('Local models scan', () => {
       startEngine: false,
       probes: probesFor({
         ollama: { models: [] },
-        systemStats: {},
+        systemStats: { system: {}, devices: [] },
         objectInfo,
         // A nested name with a space, so both the directory and the encoding matter.
         workflows: { '3d/image to model_trellis2.json': textToImage },
@@ -467,7 +466,7 @@ describe('Local models scan', () => {
       startEngine: false,
       probes: probesFor({
         ollama: { models: [] },
-        systemStats: {},
+        systemStats: { system: {}, devices: [] },
         objectInfo,
         workflows: { '3d_image_to_model_trellis2_pixal3d.json': textToImage },
         workflowStatus: 404,
@@ -490,7 +489,7 @@ describe('Local models scan', () => {
       startEngine: false,
       probes: probesFor({
         ollama: { models: [] },
-        systemStats: {},
+        systemStats: { system: {}, devices: [] },
         objectInfo,
         workflows: { 'image_to_model.json': imageToThreeD },
       }),
@@ -524,7 +523,7 @@ describe('Local models scan', () => {
       startEngine: false,
       probes: probesFor({
         ollama: { models: [] },
-        systemStats: {},
+        systemStats: { system: {}, devices: [] },
         objectInfo,
         // The UI export carries the titles; the API graph alone cannot.
         workflows: { 'demo.json': editorThreeD },
@@ -547,7 +546,7 @@ describe('Local models scan', () => {
     const result = await scanLocalResources(hub, {
       hosts: hostsOf(),
       startEngine: false,
-      probes: probesFor({ ollama: 'offline', systemStats: {}, objectInfo, workflows: { 'a.json': textToImage } }),
+      probes: probesFor({ ollama: 'offline', systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'a.json': textToImage } }),
     });
     assert.equal(result.resources.filter((entry) => entry.kind === 'ollama_model').length, 0);
     assert.equal(result.resources.filter((entry) => entry.kind === 'comfyui_workflow').length, 1);
@@ -574,22 +573,24 @@ describe('Local models scan', () => {
     assert.equal(local[0]?.engineRunning, false);
   });
 
-  it('starts a stopped engine for the scan and stops only the instance it started', async () => {
+  it('never starts a stopped engine, even with startEngine true', async () => {
     const { hub, calls, state } = lifecycleHub({ running: false, startResult: { started: true, alreadyRunning: false } });
     const result = await scanLocalResources(hub, {
       hosts: hostsOf(),
+      startEngine: true,
       probes: probesFor({
         ollama: { models: [] },
-        systemStats: () => (state.running ? {} : 'offline'),
+        systemStats: () => (state.running ? { system: {}, devices: [] } : 'offline'),
         objectInfo,
         workflows: { 'a.json': textToImage },
         seen: [],
       }),
     });
 
-    assert.ok(calls.includes('start'), 'the engine was started through the hub');
-    assert.ok(calls.includes('stop'), 'the instance this scan started was shut down again');
-    assert.equal(result.registered >= 1, true, 'the workflow found while the engine was up was registered');
+    assert.deepEqual(calls, [], 'scanning has no launch, stop or publish effects when no resources were found');
+    assert.equal(state.running, false);
+    assert.equal(result.registered, 0);
+    assert.match(result.warnings.join(' '), /scans never start engines/);
   });
 
   it('leaves an already-running engine alone', async () => {
@@ -598,7 +599,7 @@ describe('Local models scan', () => {
       hosts: hostsOf(),
       probes: probesFor({
         ollama: { models: [] },
-        systemStats: () => (state.running ? {} : 'offline'),
+        systemStats: () => (state.running ? { system: {}, devices: [] } : 'offline'),
         objectInfo,
         workflows: { 'a.json': textToImage },
       }),
@@ -606,43 +607,44 @@ describe('Local models scan', () => {
     assert.deepEqual(calls.filter((call) => call === 'stop'), [], 'a pre-existing engine is never stopped');
   });
 
-  it('defers shutdown while a graph is queued or running', async () => {
+  it('does not touch engine lifecycle when a graph is queued or running', async () => {
     const { hub, calls, state } = lifecycleHub({ running: false, busy: 1 });
     const result = await scanLocalResources(hub, {
       hosts: hostsOf(),
       probes: probesFor({
         ollama: { models: [] },
-        systemStats: () => (state.running ? {} : 'offline'),
+        systemStats: () => (state.running ? { system: {}, devices: [] } : 'offline'),
         objectInfo,
         workflows: { 'a.json': textToImage },
       }),
     });
-    assert.ok(calls.includes('start'));
+    assert.ok(!calls.includes('start'));
     assert.deepEqual(calls.filter((call) => call === 'stop'), [], 'a busy engine is not interrupted');
-    assert.match(result.warnings.join(' '), /queued or running/);
+    assert.match(result.warnings.join(' '), /scans never start engines/);
   });
 
-  it('refuses to start anything when the deployment forbids process launch, and says so', async () => {
+  it('does not attempt process launch even when lifecycle hooks would reject it', async () => {
     const { hub, calls, state } = lifecycleHub({ running: false, startable: false });
     const result = await scanLocalResources(hub, {
       hosts: hostsOf(),
       probes: probesFor({
         ollama: { models: [] },
-        systemStats: () => (state.running ? {} : 'offline'),
+        systemStats: () => (state.running ? { system: {}, devices: [] } : 'offline'),
         objectInfo,
         workflows: {},
       }),
     });
     assert.deepEqual(calls.filter((call) => call === 'stop'), []);
-    assert.match(result.warnings.join(' '), /process launch is disabled/);
+    assert.deepEqual(calls.filter((call) => call === 'start'), []);
+    assert.match(result.warnings.join(' '), /scans never start engines/);
   });
 
-  it('shares one pass between concurrent scans so no second engine is started', async () => {
+  it('keeps concurrent scans observational without starting engines', async () => {
     let starts = 0;
     const state = { running: false };
     const base = probesFor({
       ollama: { models: [] },
-      systemStats: () => (state.running ? {} : 'offline'),
+      systemStats: () => (state.running ? { system: {}, devices: [] } : 'offline'),
       objectInfo,
       workflows: { 'a.json': textToImage },
     });
@@ -670,13 +672,14 @@ describe('Local models scan', () => {
       scanLocalResources(hub, { hosts: hostsOf(), probes }),
       scanLocalResources(hub, { hosts: hostsOf(), probes }),
     ]);
-    assert.equal(starts, 1, 'two concurrent scans started one engine between them');
+    assert.equal(starts, 0, 'neither concurrent scan starts engines');
     assert.equal(first.resources.length, second.resources.length);
   });
 
   it('keeps previously discovered workflows visible after the engine goes away', async () => {
-    const online = probesFor({ ollama: { models: [] }, systemStats: {}, objectInfo, workflows: { 'a.json': textToImage } });
-    const first = await scanLocalResources(lifecycleHub({ running: true }).hub, {
+    const online = probesFor({ ollama: { models: [] }, systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'a.json': textToImage } });
+    const hub = lifecycleHub({ running: true }).hub;
+    const first = await scanLocalResources(hub, {
       hosts: hostsOf(),
       startEngine: false,
       probes: online,
@@ -685,26 +688,15 @@ describe('Local models scan', () => {
 
     // ComfyUI stops, and is not allowed to be started for this pass.
     const offline = probesFor({ ollama: { models: [] }, systemStats: 'offline', objectInfo: 'offline' });
-    const published: unknown[][] = [];
-    const hub = {
-      catalog: { listModels: () => [] },
-      activeInvocationsFor: () => 0,
-      publishScannedModels: (descriptors: readonly unknown[]) => {
-        published.push([...descriptors]);
-        return descriptors.length;
-      },
-      startEngineForHost: async () => {
-        throw new Error('not startable');
-      },
-      stopEngine: async () => ({ stopped: false, wasRunning: false }),
-    } as unknown as ModelHub;
-
     const second = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes: offline });
     const workflow = second.resources.find((entry) => entry.kind === 'comfyui_workflow');
     assert.ok(workflow, 'the workflow discovered earlier is still listed');
     assert.equal(workflow.engineRunning, false, 'and is reported as belonging to a stopped engine');
     assert.equal(workflow.runnable, true, 'it can still run by starting the engine on demand');
-    assert.match(workflow.detail, /not running/);
+    assert.equal(workflow.freshness, 'cached');
+    assert.equal(workflow.availability, 'unavailable');
+    assert.equal(workflow.checkedAt, first.resources[0]?.checkedAt);
+    assert.match(workflow.detail, /cached/);
     assert.ok(
       (workflow.diagnostics ?? []).some((note) => /not answering|could not be reached|ECONNREFUSED/i.test(note)),
       'the reason is attached',
@@ -716,7 +708,7 @@ describe('Local models scan', () => {
     const result = await scanLocalResources(hub, {
       hosts: hostsOf(),
       startEngine: false,
-      probes: probesFor({ ollama: ollamaTags, systemStats: {}, objectInfo, workflows: { 'demo.json': textToImage } }),
+      probes: probesFor({ ollama: ollamaTags, systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'demo.json': textToImage } }),
     });
 
     assert.deepEqual(
@@ -738,7 +730,7 @@ describe('Local models scan', () => {
   it('refreshes on a second scan instead of duplicating entries', async () => {
     const probes = probesFor({
       ollama: ollamaTags,
-      systemStats: {},
+      systemStats: { system: {}, devices: [] },
       objectInfo,
       workflows: { 'a.json': textToImage, 'b.json': imageToThreeD },
     });
@@ -768,7 +760,7 @@ describe('Local models scan', () => {
         if (url === '/prompt') queued.push(Buffer.concat(chunks).toString('utf8'));
         const body =
           url === '/system_stats'
-            ? { system: {} }
+            ? { system: {}, devices: [] }
             : url === '/object_info'
               ? objectInfo
               : url.startsWith('/userdata?')
@@ -824,56 +816,23 @@ describe('Local models scan', () => {
     }
   });
 
-  it('launches an engine for a host that carries no catalog model', async () => {
-    // The regression this exists for: the scan has to start ComfyUI before it can
-    // discover the first workflow, so at that moment the host has no model to hang
-    // a launch on. The launch resolves an engine record instead — and every later
-    // step (the endpoint probe, the health wait, the stop) looks the model up by
-    // id, so an id the catalog has never heard of must still resolve, or the launch
-    // fails halfway with MODEL_NOT_FOUND. A fake hub could not have caught this.
-    const hub = ModelHub.fromConfig(
-      {
-        version: '1',
-        hosts: [
-          {
-            id: 'comfyui',
-            name: 'ComfyUI',
-            adapter: 'comfyui',
-            // A deliberately dead port: the endpoint is never live, so the only
-            // way past this point is the launch itself.
-            runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint: 'http://127.0.0.1:9' },
-            lifecycle: {
-              startable: true,
-              stoppable: true,
-              startupTimeoutMs: 3_000,
-              awaitHealthOnStart: true,
-              start: { command: 'python', args: ['-c', 'import time; time.sleep(0.3)'] },
-            },
-          },
-        ],
-        models: [],
-      },
-      { manageTimers: false, probeResources: false, log: () => {} },
-    );
+  it('does not launch a configured startable engine even when process launch is allowed', async () => {
+    const hub = ModelHub.fromConfig({
+      version: '1', hosts: [{ id: 'comfyui', name: 'ComfyUI', adapter: 'comfyui',
+        runtime: { engine: 'comfyui', adapter: 'comfyui', endpoint: 'http://127.0.0.1:9' },
+        lifecycle: { startable: true, stoppable: true,
+          start: { command: 'this-command-must-never-run' } },
+      }], models: [],
+    }, { manageTimers: false, probeResources: false, log: () => {} });
+    let starts = 0;
+    hub.startEngineForHost = async () => { starts += 1; throw new Error('must not be called'); };
     try {
-      let failure: { code?: string } | undefined;
-      try {
-        await hub.startEngineForHost('comfyui');
-      } catch (error) {
-        failure = error as { code?: string };
-      }
-      // Any failure is acceptable except "that id does not exist": the point is
-      // that the launch reached the engine, not that a stub process came up.
-      assert.notEqual(failure?.code, 'MODEL_NOT_FOUND', 'an engine record must resolve without a catalog entry');
-
-      // And the id stays addressable, which is what lets a scan that started the
-      // engine wait on it and shut it down again.
-      assert.equal(hub.getModelStatus('engine-comfyui').modelId, 'engine-comfyui');
-      assert.doesNotThrow(() => hub.activeInvocationsFor('engine-comfyui'));
-      await hub.stopModel('engine-comfyui');
-    } finally {
-      await hub.dispose();
-    }
+      const result = await scanLocalResources(hub, { hosts: hub.catalog.listHosts(), startEngine: true,
+        timeoutMs: 20, probes: probesFor({}) });
+      assert.equal(starts, 0);
+      assert.equal(result.resources.length, 0);
+      assert.ok(result.sources.every((source) => source.startedEngine !== true && source.releasedEngine !== true));
+    } finally { await hub.dispose(); }
   });
 
   it('updates a registration when the saved workflow changes, without adding a second one', async () => {
@@ -897,7 +856,7 @@ describe('Local models scan', () => {
       stopEngine: async () => ({ stopped: false, wasRunning: false }),
     } as unknown as ModelHub;
 
-    const before = probesFor({ ollama: { models: [] }, systemStats: {}, objectInfo, workflows: { 'a.json': textToImage } });
+    const before = probesFor({ ollama: { models: [] }, systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'a.json': textToImage } });
     const first = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes: before });
     const firstWorkflow = first.resources.find((entry) => entry.kind === 'comfyui_workflow');
     assert.equal(firstWorkflow?.status, 'ready');
@@ -908,7 +867,7 @@ describe('Local models scan', () => {
     // The same file, saved again after an edit.
     const edited = JSON.parse(JSON.stringify(textToImage)) as Record<string, { inputs: Record<string, unknown> }>;
     edited['5']!.inputs['steps'] = 4;
-    const after = probesFor({ ollama: { models: [] }, systemStats: {}, objectInfo, workflows: { 'a.json': edited } });
+    const after = probesFor({ ollama: { models: [] }, systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'a.json': edited } });
     const second = await scanLocalResources(hub, { hosts: hostsOf(), startEngine: false, probes: after });
 
     const secondWorkflow = second.resources.find((entry) => entry.kind === 'comfyui_workflow');
@@ -918,6 +877,421 @@ describe('Local models scan', () => {
 
     const graph = published[0]?.adapterConfig['workflow'] as Record<string, { inputs: Record<string, unknown> }>;
     assert.equal(graph['5']?.inputs['steps'], 4, 'the registered graph reflects the saved edit');
+  });
+
+  it('bounds thrown and hanging HTTP probes and starts engine passes independently', async () => {
+    for (const mode of ['throw', 'hang'] as const) {
+      const hub = lifecycleHub({}).hub;
+      const seen: string[] = [];
+      const base = probesFor({ systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'ok.json': textToImage }, seen });
+      let comfyStarted = false;
+      const probes: ScanProbes = { ...base, request: (url, budget) => {
+        if (url.includes('/api/tags')) {
+          if (mode === 'throw') throw new Error('injected transport throw');
+          return new Promise(() => {});
+        }
+        if (url.endsWith('/system_stats')) comfyStarted = true;
+        return base.request(url, budget);
+      } };
+      const task = scanLocalResources(hub, { hosts: hostsOf(), timeoutMs: 15, probes });
+      await Promise.resolve(); await Promise.resolve();
+      assert.ok(comfyStarted, 'Comfy starts before the pending Ollama probe completes');
+      const result = await task;
+      assert.equal(result.resources.filter((resource) => resource.kind === 'comfyui_workflow').length, 1);
+      assert.match(result.sources.find((source) => source.id === 'ollama')?.detail ?? '', /throw|timed out/);
+    }
+  });
+
+  it('bounds every filesystem effect without hiding live API results', async () => {
+    for (const effect of ['isDirectory', 'listDir', 'readFile'] as const) {
+      for (const mode of ['throw', 'hang'] as const) {
+        const base = probesFor({ ollama: ollamaTags, systemStats: { system: {}, devices: [] }, objectInfo,
+          workflows: { 'api.json': textToImage }, files: { '/workflows/comfy/local.json': JSON.stringify(textToImage) } });
+        const probes = { ...base, [effect]: () => {
+          if (mode === 'throw') throw new Error('injected ' + effect);
+          return new Promise(() => {});
+        } } as ScanProbes;
+        const result = await scanLocalResources(lifecycleHub({}).hub, { hosts: hostsOf(),
+          timeoutMs: 10, workflowDir: '/workflows/comfy', probes });
+        assert.equal(result.resources.filter((resource) => resource.kind === 'ollama_model').length, 2);
+        assert.ok(result.resources.some((resource) => resource.name === 'api'));
+        if (effect === 'readFile') assert.equal(result.resources.find((resource) => resource.name === 'local')?.status, 'unreadable');
+        else assert.ok(result.sources.some((source) => source.id === 'workflow-dir' && !source.ok));
+      }
+    }
+  });
+
+  it('retains known Ollama catalog entries offline and reports uninstalled entries honestly online', async () => {
+    const config = catalog('http://127.0.0.1:8188');
+    const hub = ModelHub.fromConfig({ ...config, models: [{ id: 'known_llama', name: 'Known llama', type: 'text_generation',
+      host: 'ollama', capabilities: ['text_to_text'], adapterConfig: { model: 'llama3:8b' } }] },
+      { manageTimers: false, probeResources: false });
+    try {
+      const offline = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({}) });
+      assert.equal(offline.resources[0]?.modelId, 'known_llama');
+      assert.equal(offline.resources[0]?.freshness, 'catalog');
+      assert.equal(offline.resources[0]?.availability, 'unknown');
+      const online = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ ollama: { models: [] } }) });
+      assert.equal(online.resources[0]?.availability, 'unavailable');
+      assert.match(online.resources[0]?.detail ?? '', /not reported installed/);
+    } finally { await hub.dispose(); }
+  });
+
+  it('marks cached Ollama models as cached without advancing their observation timestamp', async () => {
+    const hub = lifecycleHub({}).hub;
+    const first = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ ollama: ollamaTags }) });
+    const second = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({}) });
+    assert.equal(second.resources.length, 2);
+    assert.equal(second.resources[0]?.freshness, 'cached');
+    assert.equal(second.resources[0]?.availability, 'unavailable');
+    assert.equal(second.resources[0]?.checkedAt, first.resources[0]?.checkedAt);
+  });
+
+  it('isolates caches across hubs, endpoints and workflow directory configurations', async () => {
+    const hub = lifecycleHub({}).hub;
+    await scanLocalResources(hub, { hosts: hostsOf(), workflowDir: '/old/workflows',
+      probes: probesFor({ ollama: ollamaTags, systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'api.json': textToImage },
+        files: { '/old/workflows/local.json': JSON.stringify(textToImage) } }) });
+    const otherHub = await scanLocalResources(lifecycleHub({}).hub, { hosts: hostsOf(), probes: probesFor({}) });
+    assert.deepEqual(otherHub.resources, []);
+    const changedEndpoint = await scanLocalResources(hub, { hosts: hostsOf('http://127.0.0.1:9999'), probes: probesFor({}) });
+    assert.ok(!changedEndpoint.resources.some((resource) => resource.kind === 'comfyui_workflow'));
+    const changedDir = await scanLocalResources(hub, { hosts: hostsOf(), workflowDir: '/new/workflows', probes: probesFor({}) });
+    assert.ok(!changedDir.resources.some((resource) => resource.name === 'local'));
+    assert.ok(changedDir.resources.some((resource) => resource.name === 'api'), 'API cache stays independent of directory config');
+  });
+
+  it('preserves workflow contracts across listing, file and node-info partial failures', async () => {
+    for (const failure of ['listing', 'file', 'nodes'] as const) {
+      const hub = lifecycleHub({}).hub;
+      const first = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ ollama: { models: [] },
+        systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'a.json': editorThreeD } }) });
+      const second = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ ollama: { models: [] },
+        systemStats: { system: {}, devices: [] }, objectInfo: failure === 'nodes' ? 'offline' : objectInfo, workflows: { 'a.json': editorThreeD },
+        ...(failure === 'listing' ? { listingStatus: 500 } : {}), ...(failure === 'file' ? { workflowStatus: 500 } : {}) }) });
+      assert.equal(second.resources[0]?.freshness, 'cached', failure);
+      assert.equal(second.resources[0]?.availability, 'unknown', failure);
+      assert.equal(second.resources[0]?.checkedAt, first.resources[0]?.checkedAt);
+      assert.equal(second.resources[0]?.runnable, true);
+      assert.equal(second.registered, 1, 'last good descriptor is republished');
+    }
+  });
+
+  it('uses active catalog inline workflows and pinned files offline', async () => {
+    const hub = hubFor();
+    hub.catalog.replaceModels([{ id: 'inline', name: 'Inline graph', type: 'image_generation', host: 'comfyui',
+      capabilities: ['text_to_image'], providerKind: 'workflow', workflowId: 'inline',
+      adapterConfig: { workflow: textToImage, bindings: { prompt: { node: '2', input: 'text' } },
+        outputs: [{ node: '7', type: 'image' }] } },
+      { id: 'pinned', name: 'Pinned graph', type: 'image_generation', host: 'comfyui', capabilities: ['text_to_image'],
+        providerKind: 'workflow', workflowId: 'pinned', adapterConfig: { workflowPath: '/pinned/graph.json',
+          bindings: { prompt: { node: '2', input: 'text' } }, outputs: [{ node: '7', type: 'image' }] } }]);
+    try {
+      const result = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({
+        files: { '/pinned/graph.json': JSON.stringify(textToImage) } }) });
+      assert.deepEqual(result.resources.map((resource) => resource.modelId).sort(), ['inline', 'pinned']);
+      assert.equal(result.resources.find((resource) => resource.modelId === 'inline')?.freshness, 'catalog');
+      assert.equal(result.resources.find((resource) => resource.modelId === 'pinned')?.freshness, 'local');
+      assert.ok(result.resources.every((resource) => resource.availability === 'unavailable'));
+    } finally { await hub.dispose(); }
+  });
+
+  it('reads per-host workflow directories offline without sharing stores', async () => {
+    const result = await scanLocalResources(lifecycleHub({}).hub, { hosts: hostsOf(),
+      workflowDirsByHost: { comfyui: ['/one/workflows', '/two/workflows'], other: ['/ignored/workflows'] },
+      probes: probesFor({ files: { '/one/workflows/first.json': JSON.stringify(textToImage),
+        '/two/workflows/second.json': JSON.stringify(textToImage), '/ignored/workflows/leak.json': JSON.stringify(textToImage) } }) });
+    assert.deepEqual(result.resources.map((resource) => resource.name).sort(), ['first', 'second']);
+    assert.ok(result.resources.every((resource) => resource.freshness === 'local' && resource.availability === 'unavailable'));
+  });
+
+  it('discovers supported local Ollama manifests but never attributes them to remote hosts', async () => {
+    const previous = process.env['OLLAMA_MODELS'];
+    process.env['OLLAMA_MODELS'] = '/ollama/models';
+    try {
+      const probes = probesFor({ files: { '/ollama/models/manifests/registry.ollama.ai/library/llama3/8b':
+        JSON.stringify({ config: { digest: 'sha256:config' }, layers: [] }) } });
+      const local = await scanLocalResources(lifecycleHub({}).hub, { hosts: hostsOf(), probes });
+      assert.equal(local.resources[0]?.name, 'llama3:8b');
+      assert.equal(local.resources[0]?.freshness, 'local');
+      assert.equal(local.resources[0]?.availability, 'unavailable');
+      const remoteHosts = hostsOf().map((host) => host.id === 'ollama'
+        ? { ...host, runtime: { ...host.runtime, endpoint: 'http://remote:11434' } } : host);
+      const remote = await scanLocalResources(lifecycleHub({}).hub, { hosts: remoteHosts, probes });
+      assert.deepEqual(remote.resources, []);
+    } finally {
+      if (previous === undefined) delete process.env['OLLAMA_MODELS']; else process.env['OLLAMA_MODELS'] = previous;
+    }
+  });
+
+  it('bounds hanging Comfy API calls without hiding Ollama or offline directories', async () => {
+    for (const suffix of ['/system_stats', '/object_info', '/userdata?'] as const) {
+      const base = probesFor({ ollama: ollamaTags, systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'api.json': textToImage },
+        files: { '/workflows/comfy/local.json': JSON.stringify(textToImage) } });
+      const result = await scanLocalResources(lifecycleHub({}).hub, { hosts: hostsOf(), workflowDir: '/workflows/comfy',
+        timeoutMs: 10, probes: { ...base, request: (url, timeout) => url.includes(suffix)
+          ? new Promise(() => {}) : base.request(url, timeout) } });
+      assert.equal(result.resources.filter((resource) => resource.kind === 'ollama_model').length, 2);
+      assert.ok(result.resources.some((resource) => resource.name === 'local'));
+    }
+  });
+
+  it('retains failed files while refreshing healthy files from the same listing', async () => {
+    const hub = lifecycleHub({}).hub;
+    const first = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ systemStats: { system: {}, devices: [] }, objectInfo,
+      workflows: { 'a.json': textToImage, 'b.json': textToImage } }) });
+    const edited = JSON.parse(JSON.stringify(textToImage)) as typeof textToImage;
+    edited['5'].inputs.steps = 4;
+    const base = probesFor({ systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'a.json': textToImage, 'b.json': edited } });
+    const second = await scanLocalResources(hub, { hosts: hostsOf(), timeoutMs: 10,
+      probes: { ...base, request: (url, timeout) => url.includes('/userdata/') && decodeURIComponent(url).endsWith('/a.json')
+        ? new Promise(() => {}) : base.request(url, timeout) } });
+    assert.equal(second.resources.find((resource) => resource.name === 'a')?.freshness, 'cached');
+    assert.equal(second.resources.find((resource) => resource.name === 'a')?.checkedAt,
+      first.resources.find((resource) => resource.name === 'a')?.checkedAt);
+    assert.equal(second.resources.find((resource) => resource.name === 'b')?.freshness, 'live');
+    assert.equal(second.resources.length, 2);
+    assert.equal(second.registered, 2);
+  });
+
+  it('does not resurrect published API workflows from another endpoint via the active catalog', async () => {
+    const hub = hubFor();
+    try {
+      await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ systemStats: { system: {}, devices: [] }, objectInfo,
+        workflows: { 'api.json': textToImage } }) });
+      assert.ok(hub.catalog.listModels().length > 0);
+      const changed = await scanLocalResources(hub, { hosts: hostsOf('http://127.0.0.1:9999'), probes: probesFor({}) });
+      assert.deepEqual(changed.resources, []);
+    } finally { await hub.dispose(); }
+  });
+
+  it('lets the latest scan intent own cache and provider publication', async () => {
+    const { hub, calls } = lifecycleHub({});
+    const oldBase = probesFor({ ollama: { models: [{ name: 'old:latest' }] }, systemStats: { system: {}, devices: [] }, objectInfo,
+      workflows: { 'old.json': textToImage } });
+    let releaseOld!: () => void;
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseOld = resolve; });
+    const oldTask = scanLocalResources(hub, { hosts: hostsOf(), probes: { ...oldBase, request: async (url, timeout) => {
+      if (url.endsWith('/system_stats') || url.includes('/api/tags')) { signalEntered(); await gate; }
+      return oldBase.request(url, timeout);
+    } } });
+    await entered;
+    const fresh = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({
+      ollama: { models: [{ name: 'new:latest' }] }, systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'new.json': textToImage } }) });
+    assert.equal(fresh.registered, 1);
+    releaseOld();
+    const old = await oldTask;
+    assert.equal(old.registered, 0, 'a superseded pass cannot republish stale descriptors');
+    const cached = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({}) });
+    assert.deepEqual(cached.resources.map((resource) => resource.name).sort(), ['new', 'new:latest']);
+    assert.equal(calls.filter((call) => call === 'publish:1').length, 2, 'only current and cached scans publish');
+  });
+
+  it('does not equate an answering Comfy engine with verified workflow dependencies', async () => {
+    const result = await scanLocalResources(lifecycleHub({}).hub, { hosts: hostsOf(), probes: probesFor({
+      systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'a.json': textToImage } }) });
+    assert.equal(result.resources[0]?.engineRunning, true);
+    assert.equal(result.resources[0]?.availability, 'unknown');
+    assert.equal(result.resources[0]?.freshness, 'live');
+    assert.match(result.resources[0]?.detail ?? '', /dependencies not execution-verified/);
+  });
+
+  it('resolves pinned relative workflow paths against the catalog and deduplicates directory discoveries', async () => {
+    const hub = hubFor();
+    const catalogDir = join(process.cwd(), 'fixture-catalog');
+    const absolute = join(catalogDir, 'workflows', 'z-image.json');
+    hub.catalog.replaceModels([{ id: 'z_image', name: 'Z-Image', type: 'image_generation', host: 'comfyui',
+      capabilities: ['text_to_image'], providerKind: 'workflow', workflowId: 'z_image',
+      adapterConfig: { workflowPath: 'workflows/z-image.json', bindings: { prompt: { node: '2', input: 'text' } },
+        outputs: [{ node: '7', type: 'image' }] } }]);
+    const probes = probesFor({ files: { [absolute.replace(/\\/g, '/')]: JSON.stringify(textToImage) } });
+    try {
+      const pinned = await scanLocalResources(hub, { hosts: hostsOf(), catalogPath: join(catalogDir, 'models.json'), probes });
+      assert.equal(pinned.resources[0]?.source, absolute);
+      assert.equal(pinned.resources[0]?.freshness, 'local');
+      assert.equal(pinned.resources[0]?.status, 'ready');
+      const deduped = await scanLocalResources(hub, { hosts: hostsOf(), catalogPath: join(catalogDir, 'models.json'),
+        workflowDir: join(catalogDir, 'workflows'), probes });
+      assert.equal(deduped.resources.length, 1);
+      assert.equal(deduped.resources[0]?.id, 'z_image');
+      assert.equal(deduped.resources[0]?.modelId, 'z_image');
+      assert.equal(deduped.resources[0]?.source, absolute);
+      assert.equal(deduped.registered, 0, 'catalog-pinned workflow is not published under another scan identity');
+    } finally { await hub.dispose(); }
+  });
+
+  it('clears the final scanned provider after a trustworthy deletion or invalid workflow', async () => {
+    for (const outcome of ['deleted', 'invalid'] as const) {
+      const hub = hubFor();
+      try {
+        await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ systemStats: { system: {}, devices: [] }, objectInfo,
+          workflows: { 'a.json': textToImage } }) });
+        assert.equal(hub.scannedProviderIds.length, 1);
+        const result = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ systemStats: { system: {}, devices: [] }, objectInfo,
+          workflows: outcome === 'deleted' ? {} : { 'a.json': { not: 'a workflow' } } }) });
+        assert.equal(hub.scannedProviderIds.length, 0, outcome);
+        assert.equal(result.resources.length, outcome === 'deleted' ? 0 : 1);
+        const offline = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({}) });
+        assert.ok(offline.resources.every((resource) => !resource.runnable));
+      } finally { await hub.dispose(); }
+    }
+  });
+
+  it('preserves prior publication after a source failure or an unexpected host-pass exception', async () => {
+    for (const unexpected of [false, true]) {
+      const hub = hubFor();
+      try {
+        await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ systemStats: { system: {}, devices: [] }, objectInfo,
+          workflows: { 'a.json': textToImage } }) });
+        const previous = [...hub.scannedProviderIds];
+        const invalidInfo = new Proxy({}, { ownKeys: () => { throw new Error('injected unexpected parse failure'); } });
+        await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({
+          systemStats: unexpected ? { system: {}, devices: [] } : 'offline', objectInfo: unexpected ? invalidInfo : objectInfo, workflows: {} }) });
+        assert.deepEqual(hub.scannedProviderIds, previous);
+      } finally { await hub.dispose(); }
+    }
+  });
+
+  it('retains last good Ollama results on malformed model entries', async () => {
+    const hub = lifecycleHub({}).hub;
+    await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ ollama: ollamaTags }) });
+    const malformed = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ ollama: { models: [null] } }) });
+    assert.equal(malformed.resources.length, 2);
+    assert.ok(malformed.resources.every((resource) => resource.freshness === 'cached' && resource.availability === 'unknown'));
+    assert.equal(malformed.sources.find((source) => source.id === 'ollama')?.ok, false);
+  });
+
+  it('normalizes Ollama implicit latest tags when matching active catalog identities', async () => {
+    for (const reverse of [false, true]) {
+      const config = catalog('http://127.0.0.1:8188');
+      const hub = ModelHub.fromConfig({ ...config, models: [{ id: 'known', name: 'Known', type: 'text_generation',
+        host: 'ollama', capabilities: ['text_to_text'], adapterConfig: { model: reverse ? 'llama3.2:latest' : 'llama3.2' } }] },
+        { manageTimers: false, probeResources: false });
+      try {
+        const result = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({
+          ollama: { models: [{ name: reverse ? 'llama3.2' : 'llama3.2:latest' }] } }) });
+        assert.equal(result.resources.length, 1);
+        assert.equal(result.resources[0]?.modelId, 'known');
+        assert.equal(result.resources[0]?.availability, 'available');
+      } finally { await hub.dispose(); }
+    }
+  });
+
+  it('honours active host OLLAMA_MODELS environment before the process store', async () => {
+    const previous = process.env['OLLAMA_MODELS'];
+    process.env['OLLAMA_MODELS'] = '/wrong/process/store';
+    try {
+      const hosts = hostsOf().map((host) => host.id === 'ollama' ? { ...host, runtime: { ...host.runtime,
+        env: { OLLAMA_MODELS: '%SCAN_STORE%/models', SCAN_STORE: '/configured/ollama' } } } : host);
+      const result = await scanLocalResources(lifecycleHub({}).hub, { hosts, probes: probesFor({ files: {
+        '/configured/ollama/models/manifests/registry.ollama.ai/library/llama3/latest':
+          JSON.stringify({ config: {}, layers: [] }),
+        '/wrong/process/store/manifests/registry.ollama.ai/library/leaked/latest':
+          JSON.stringify({ config: {}, layers: [] }),
+      } }) });
+      assert.deepEqual(result.resources.map((resource) => resource.name), ['llama3:latest']);
+      assert.equal(result.resources[0]?.freshness, 'local');
+    } finally {
+      if (previous === undefined) delete process.env['OLLAMA_MODELS']; else process.env['OLLAMA_MODELS'] = previous;
+    }
+  });
+
+  it('does not advertise invented invocation IDs for uncatalogued Ollama observations', async () => {
+    const hub = lifecycleHub({}).hub;
+    const live = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({ ollama: ollamaTags }) });
+    assert.ok(live.resources.every((resource) => resource.modelId === undefined && !resource.runnable));
+    assert.ok(live.resources.every((resource) => resource.availability === 'available'));
+    assert.match(live.resources[0]?.detail ?? '', /not registered for hub invocation/);
+    const cached = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({}) });
+    assert.ok(cached.resources.every((resource) => resource.modelId === undefined && !resource.runnable));
+    const previous = process.env['OLLAMA_MODELS'];
+    process.env['OLLAMA_MODELS'] = '/ollama/unregistered';
+    try {
+      const local = await scanLocalResources(lifecycleHub({}).hub, { hosts: hostsOf(), probes: probesFor({ files: {
+        '/ollama/unregistered/manifests/registry.ollama.ai/library/local/latest': JSON.stringify({ config: {}, layers: [] }),
+      } }) });
+      assert.equal(local.resources[0]?.freshness, 'local');
+      assert.equal(local.resources[0]?.modelId, undefined);
+      assert.equal(local.resources[0]?.runnable, false);
+    } finally {
+      if (previous === undefined) delete process.env['OLLAMA_MODELS']; else process.env['OLLAMA_MODELS'] = previous;
+    }
+  });
+
+  it('keeps healthy root workflows when a nested directory listing fails', async () => {
+    for (const failure of ['undefined', 'throw'] as const) {
+      const base = probesFor({ files: { '/partial/workflows/root.json': JSON.stringify(textToImage),
+        '/partial/workflows/blocked/hidden.json': JSON.stringify(textToImage) } });
+      const result = await scanLocalResources(lifecycleHub({}).hub, { hosts: hostsOf(), workflowDir: '/partial/workflows',
+        probes: { ...base, listDir: async (path) => {
+          if (path.replace(/\\/g, '/').endsWith('/blocked')) {
+            if (failure === 'throw') throw new Error('injected denied subdirectory');
+            return undefined;
+          }
+          return base.listDir(path);
+        } } });
+      assert.deepEqual(result.resources.map((resource) => resource.name), ['root']);
+      assert.equal(result.sources.find((source) => source.id === 'workflow-dir')?.ok, false);
+      assert.match(result.sources.find((source) => source.id === 'workflow-dir')?.detail ?? '', /blocked/);
+    }
+  });
+
+  it('honours disabled catalog providers when a pinned workflow is also found in a directory', async () => {
+    const hub = hubFor();
+    const directory = join(process.cwd(), 'disabled-workflow');
+    const path = join(directory, 'graph.json');
+    hub.catalog.replaceModels([{ id: 'disabled', name: 'Disabled workflow', type: 'image_generation', host: 'comfyui',
+      capabilities: ['text_to_image'], enabled: false, providerKind: 'workflow', workflowId: 'disabled',
+      adapterConfig: { workflowPath: path, bindings: { prompt: { node: '2', input: 'text' } }, outputs: [{ node: '7', type: 'image' }] } }]);
+    try {
+      const result = await scanLocalResources(hub, { hosts: hostsOf(), workflowDir: directory,
+        probes: probesFor({ files: { [path.replace(/\\/g, '/')]: JSON.stringify(textToImage) } }) });
+      assert.equal(result.resources.length, 1);
+      assert.equal(result.resources[0]?.modelId, 'disabled');
+      assert.equal(result.resources[0]?.runnable, false);
+      assert.deepEqual(hub.scannedProviderIds, []);
+    } finally { await hub.dispose(); }
+  });
+
+  it('rejects malformed Comfy readiness and empty node metadata without erasing good contracts', async () => {
+    for (const stage of ['readiness', 'nodes'] as const) {
+      const hub = lifecycleHub({}).hub;
+      const first = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({
+        systemStats: { system: {}, devices: [] }, objectInfo, workflows: { 'a.json': editorThreeD } }) });
+      const second = await scanLocalResources(hub, { hosts: hostsOf(), probes: probesFor({
+        systemStats: stage === 'readiness' ? {} : { system: {}, devices: [] },
+        objectInfo: stage === 'nodes' ? {} : objectInfo, workflows: { 'a.json': editorThreeD } }) });
+      assert.equal(second.resources[0]?.freshness, 'cached');
+      assert.equal(second.resources[0]?.runnable, true);
+      assert.equal(second.resources[0]?.checkedAt, first.resources[0]?.checkedAt);
+      assert.ok(second.warnings.some((warning) => /system.device|node definitions/.test(warning)));
+    }
+  });
+
+  it('keeps same-name workflows distinct and stable across hosts and directories', async () => {
+    const firstHost = hostsOf().find((host) => host.id === 'comfyui')!;
+    const secondHost = { ...firstHost, id: 'second-comfy', name: 'Second Comfy',
+      runtime: { ...firstHost.runtime, endpoint: 'http://127.0.0.1:8288' } };
+    let published: readonly { id: string; host?: string }[] = [];
+    const { hub } = lifecycleHub({});
+    hub.publishScannedModels = (descriptors) => { published = descriptors; return descriptors.length; };
+    const options = { hosts: [firstHost, secondHost],
+      workflowDirsByHost: { comfyui: ['/identity/one', '/identity/two'] },
+      probes: probesFor({ systemStats: { system: {}, devices: [] }, objectInfo,
+        workflows: { 'same.json': textToImage }, files: {
+          '/identity/one/same.json': JSON.stringify(textToImage), '/identity/two/same.json': JSON.stringify(textToImage),
+        } }) };
+    const first = await scanLocalResources(hub, options);
+    assert.equal(first.resources.length, 4);
+    assert.equal(new Set(first.resources.map((resource) => resource.id)).size, 4);
+    assert.equal(published.length, 4);
+    const sourceHosts = new Map(first.resources.map((resource) => [resource.id,
+      resource.source.includes(':8288') ? 'second-comfy' : 'comfyui']));
+    assert.ok(published.every((descriptor) => descriptor.host === sourceHosts.get(descriptor.id)));
+    const second = await scanLocalResources(hub, options);
+    assert.deepEqual(second.resources.map((resource) => resource.id).sort(), first.resources.map((resource) => resource.id).sort());
   });
 
   it('builds several candidate retrieval URLs, the documented one first', () => {
