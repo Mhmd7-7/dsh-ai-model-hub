@@ -111,8 +111,18 @@
       #   comfyuiWorkflowDir: ''
       #
       #   # Budget for each probe, in milliseconds; directory walks also have
-      #   # count/depth/deadline limits. Scan/Refresh never launch engines.
+      #   # count/depth/deadline limits. Opening or reloading the page only LOOKS;
+      #   # pressing Scan starts the configured engines, waits for their APIs, and
+      #   # releases them when it finishes. Scan never stops an engine that was
+      #   # already running, and never installs anything.
       #   scanTimeoutMs: 4000
+      #
+      #   # How long one engine may take to answer after Scan starts it, in
+      #   # milliseconds. 0 (the default) means "use the host's own declared
+      #   # startupTimeoutMs, then a per-engine default" — ComfyUI gets 300s,
+      #   # because loading checkpoints takes minutes; Ollama gets 120s. Set it to
+      #   # put a shorter leash on a cold start.
+      #   engineStartupTimeoutMs: 0
       #
       #   # Where the workflows a scan discovers are remembered, so they stay
       #   # listed while ComfyUI is stopped — including on a first launch, where

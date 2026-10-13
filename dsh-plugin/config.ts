@@ -187,6 +187,17 @@ export interface PluginConfig {
   /** Per-probe budget in milliseconds; directory walks also have count/depth/deadline limits. Defaults to 4000. */
   scanTimeoutMs?: number;
   /**
+   * How long one engine may take to answer after **Scan** starts it, in
+   * milliseconds. `0` — the default — means "use the host's own declared
+   * `startupTimeoutMs`, then a per-engine default".
+   *
+   * Scan is the only action that starts an engine, and a cold ComfyUI can spend
+   * minutes loading checkpoints, so this is the budget a user is agreeing to when
+   * they press the button. Omitted is usually right: the catalog's own figure is
+   * the better answer for a machine whose owner has already measured it.
+   */
+  engineStartupTimeoutMs?: number;
+  /**
    * Where the workflows a scan discovers are remembered between launches.
    *
    * Omitted means `~/.dsh/plugins/dsh-ai-model-hub/workflow-catalog.json`, beside
@@ -249,6 +260,8 @@ export const Config = z.object({
   discoveryTimeoutMs: z.number().step(1).min(1).default(5_000),
   comfyuiWorkflowDir: z.string().default(''),
   scanTimeoutMs: z.number().step(1).min(1).default(4_000),
+  // 0 is "no override": fall back to the host's declared startup budget.
+  engineStartupTimeoutMs: z.number().step(1).min(0).default(0),
   workflowCatalogPath: z.string().default(''),
   policyPath: z.string().default(''),
   // 0 is the unlimited sentinel; the default must itself pass Loader validation.
@@ -277,6 +290,10 @@ export function resolvePluginConfig(config: Partial<PluginConfig> | undefined): 
     discoveryTimeoutMs: config?.discoveryTimeoutMs ?? 5_000,
     comfyuiWorkflowDir: config?.comfyuiWorkflowDir ?? '',
     scanTimeoutMs: config?.scanTimeoutMs ?? 4_000,
+    // Normalized away like `attemptBudget`: absent means "no override", so the
+    // catalog's declared startup budget is what the scan honors.
+    ...(config?.engineStartupTimeoutMs === undefined || config.engineStartupTimeoutMs <= 0
+      ? {} : { engineStartupTimeoutMs: config.engineStartupTimeoutMs }),
     workflowCatalogPath: config?.workflowCatalogPath ?? '',
     policyPath: config?.policyPath ?? '',
     // `0` is the schema's "not configured" spelling for an absent budget, since
@@ -300,7 +317,9 @@ export function resolvePluginConfig(config: Partial<PluginConfig> | undefined): 
  * configured" as `0` and resolution drops it. A consumer therefore sees the
  * honest shape: the property is present only when the operator set a budget.
  */
-export type ResolvedPluginConfig = Required<Omit<PluginConfig, 'attemptBudget'>> & {
+export type ResolvedPluginConfig = Required<Omit<PluginConfig, 'attemptBudget' | 'engineStartupTimeoutMs'>> & {
   /** Present only when the operator configured an attempt budget. */
   readonly attemptBudget?: number;
+  /** Present only when the operator overrode the engines' own startup budgets. */
+  readonly engineStartupTimeoutMs?: number;
 };

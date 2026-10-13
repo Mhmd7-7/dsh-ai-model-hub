@@ -590,7 +590,7 @@ describe('Local models scan', () => {
     assert.deepEqual(calls, [], 'scanning has no launch, stop or publish effects when no resources were found');
     assert.equal(state.running, false);
     assert.equal(result.registered, 0);
-    assert.match(result.warnings.join(' '), /scans never start engines/);
+    assert.match(result.warnings.join(' '), /reading never starts engines/);
   });
 
   it('leaves an already-running engine alone', async () => {
@@ -620,7 +620,7 @@ describe('Local models scan', () => {
     });
     assert.ok(!calls.includes('start'));
     assert.deepEqual(calls.filter((call) => call === 'stop'), [], 'a busy engine is not interrupted');
-    assert.match(result.warnings.join(' '), /scans never start engines/);
+    assert.match(result.warnings.join(' '), /reading never starts engines/);
   });
 
   it('does not attempt process launch even when lifecycle hooks would reject it', async () => {
@@ -636,7 +636,7 @@ describe('Local models scan', () => {
     });
     assert.deepEqual(calls.filter((call) => call === 'stop'), []);
     assert.deepEqual(calls.filter((call) => call === 'start'), []);
-    assert.match(result.warnings.join(' '), /scans never start engines/);
+    assert.match(result.warnings.join(' '), /reading never starts engines/);
   });
 
   it('keeps concurrent scans observational without starting engines', async () => {

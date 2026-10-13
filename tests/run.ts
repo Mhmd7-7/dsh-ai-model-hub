@@ -50,6 +50,8 @@ import './comfy-workflow-boundary.test.ts';
 import './subgraph.test.ts';
 import './scan.test.ts';
 import './comfyui-offline.test.ts';
+import './engine-start.test.ts';
+import './scan-engines.test.ts';
 import './policy.test.ts';
 import './readiness.test.ts';
 import './startup.test.ts';

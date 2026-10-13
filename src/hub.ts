@@ -1119,13 +1119,20 @@ export class ModelHub {
       throw new ModelHubError('MODEL_NOT_FOUND', `no host with id "${hostId}" is declared`, { hostId });
     }
     const existing = this.catalog.listModels().find((model) => model.hostId === hostId);
+    // A host with no servable model still has a process, and the runtime tracks it
+    // under a synthetic id. That id has no catalog entry and therefore no
+    // capability policy, so it must be declared here *before* the launch reaches
+    // the policy gate — otherwise the gate reads the hub's own management action as
+    // an unknown option and refuses it. See `permissionFor`.
+    const engineId = `engine-${host.id}`;
+    if (existing === undefined) this.engineRecordIds.add(engineId);
     const result =
       existing !== undefined
         ? await this.runtime.startModel(existing.id)
         : await this.runtime.startEngineRecord(
             resolveDescriptor(
               {
-                id: `engine-${host.id}`,
+                id: engineId,
                 name: host.name,
                 type: 'custom',
                 capabilities: ['text_to_text'],
@@ -1134,7 +1141,7 @@ export class ModelHub {
               host,
             ),
           );
-    const modelId = existing?.id ?? `engine-${host.id}`;
+    const modelId = existing?.id ?? engineId;
     if (result.started) {
       this.emit({ type: 'model/started', modelId, pid: this.runtime.getModelStatus(modelId).pid, coldStartMs: 0 });
     }
@@ -1178,6 +1185,23 @@ export class ModelHub {
     } catch {
       return 0;
     }
+  }
+
+  /**
+   * Ask the runtime's idle sweeper to leave a model's process alone.
+   *
+   * A routed invocation already holds its model for the duration of the call; this
+   * is for work that is *not* an invocation but still must not be interrupted by
+   * automatic unloading — a scan reading an engine's stores, for instance. It
+   * suppresses only the timer: an explicit {@link stopModel} or a restart still
+   * works, because those are decisions rather than a sweep.
+   *
+   * @param modelId - the model or engine record to protect.
+   * @returns a release function; safe to call more than once.
+   * @throws ModelHubError with `MODEL_NOT_FOUND` when the id is unknown.
+   */
+  protectModel(modelId: string): () => void {
+    return this.runtime.protectModel(modelId);
   }
 
   /**

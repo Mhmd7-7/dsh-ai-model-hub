@@ -268,6 +268,7 @@ export function apply(ctx: Context, rawConfig: PluginConfig): void {
     ...(config.comfyuiWorkflowDir.length === 0 ? {} : { workflowDir: config.comfyuiWorkflowDir }),
     scanTimeoutMs: config.scanTimeoutMs,
     ...(config.workflowCatalogPath.length === 0 ? {} : { workflowCatalogPath: config.workflowCatalogPath }),
+    ...(config.engineStartupTimeoutMs === undefined ? {} : { engineStartupTimeoutMs: config.engineStartupTimeoutMs }),
   });
 
   // One diagnostic line per invocation, so an operator can see what ran without

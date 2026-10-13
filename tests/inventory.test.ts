@@ -495,6 +495,105 @@ describe('the inventory route (host half)', () => {
     }
   });
 
+  it('treats only an explicit Scan as permission to start engines', async () => {
+    // The page opening and a plain Refresh read the machine as they find it. The
+    // route is the only place that can tell them apart from the Scan button, so
+    // this is where the policy has to hold.
+    const instance = hub();
+    try {
+      const { handler } = captureRoute(instance);
+
+      const opened = fakeResponse();
+      await handler({ method: 'GET', url: INVENTORY_ROUTE } as IncomingMessage, opened.res);
+      const onOpen = JSON.parse(opened.captured.body ?? '{}') as Inventory;
+      assert.equal(onOpen.scan.managedEngines, false, 'opening the page may not launch anything');
+
+      const scanned = fakeResponse();
+      await handler({ method: 'GET', url: `${INVENTORY_ROUTE}?scan=1` } as IncomingMessage, scanned.res);
+      const onScan = JSON.parse(scanned.captured.body ?? '{}') as Inventory;
+      assert.equal(onScan.scan.managedEngines, true, 'the Scan action may start a stopped engine');
+
+      // The spelling is generous, the meaning is not.
+      for (const query of ['?scan', '?scan=true']) {
+        const spelled = fakeResponse();
+        await handler({ method: 'GET', url: `${INVENTORY_ROUTE}${query}` } as IncomingMessage, spelled.res);
+        assert.equal((JSON.parse(spelled.captured.body ?? '{}') as Inventory).scan.managedEngines, true, query);
+      }
+      const refused = fakeResponse();
+      await handler({ method: 'GET', url: `${INVENTORY_ROUTE}?scan=0` } as IncomingMessage, refused.res);
+      assert.equal((JSON.parse(refused.captured.body ?? '{}') as Inventory).scan.managedEngines, false, '?scan=0 is not a scan');
+    } finally {
+      await instance.dispose();
+    }
+  });
+
+  it('reports partial completion, per-engine outcomes, and progress stages', async () => {
+    // The fixture machine has both engines answering, so a Scan over it is a
+    // complete read and nothing needed starting.
+    const healthyHub = hub();
+    try {
+      const { handler } = captureRoute(healthyHub);
+      const { captured, res } = fakeResponse();
+      await handler({ method: 'GET', url: `${INVENTORY_ROUTE}?scan=1` } as IncomingMessage, res);
+      const parsed = JSON.parse(captured.body ?? '{}') as Inventory;
+
+      assert.equal(typeof parsed.scan.complete, 'boolean');
+      assert.ok(Array.isArray(parsed.scan.engines), 'each engine the scan considered is reported');
+      assert.ok(Array.isArray(parsed.scan.phases), 'the stages it passed through are reported');
+      assert.ok(parsed.scan.phases.includes('scanning'), `expected a scanning stage, saw ${parsed.scan.phases.join(', ')}`);
+      assert.equal(typeof parsed.scan.progress, 'string');
+      assert.equal(parsed.scan.complete, true, 'both engines answered, so the scan read everything it asked about');
+      assert.ok(parsed.scan.engines.every((engine) => engine.ready), 'and every engine is reported ready');
+    } finally {
+      await healthyHub.dispose();
+    }
+
+    // The same route against a machine where ComfyUI is stopped. The deployment
+    // here forbids launching, so the honest answer is "partially complete", with
+    // the setting to change named in the engine's own report.
+    const stoppedHub = hub();
+    const stopped = {
+      ...machine(),
+      fetchJson: async (url: string, timeout: number) => {
+        if (url.includes(':8188')) throw new Error('connect ECONNREFUSED');
+        return await machine().fetchJson(url, timeout);
+      },
+    };
+    try {
+      const { lines, logger } = recordingLogger();
+      let handler: ((req: IncomingMessage, res: ServerResponse) => void | Promise<void>) | undefined;
+      const ctx = {
+        inject: (_deps: readonly string[], callback: (scope: unknown) => void) => {
+          callback({
+            effect: (execute: () => unknown) => execute(),
+            webServer: { register(route: { handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) { handler = route.handler; return () => {}; } },
+          });
+        },
+      } as unknown as Context;
+      registerInventoryRoute(ctx, logger, {
+        hub: stoppedHub as never,
+        hosts: (catalog()['hosts'] ?? []) as never,
+        catalogPath: 'C:/catalog/models.json',
+        artifactRoot: '',
+        allowProcessLaunch: false,
+        probes: stopped,
+      });
+
+      const { captured, res } = fakeResponse();
+      await handler?.({ method: 'GET', url: `${INVENTORY_ROUTE}?scan=1` } as IncomingMessage, res);
+      const parsed = JSON.parse(captured.body ?? '{}') as Inventory;
+
+      assert.equal(parsed.scan.complete, false, 'a stopped engine it may not launch is not a complete scan');
+      const comfy = parsed.scan.engines.find((engine) => engine.hostId === 'comfyui');
+      assert.ok(comfy, 'the engine is reported on');
+      assert.equal(comfy?.ready, false);
+      assert.match(comfy?.detail ?? '', /allowProcessLaunch|launch command/, 'and names the setting that would fix it');
+      assert.ok(lines.some((line) => line.startsWith('debug')), 'the scan narrates itself to the log');
+    } finally {
+      await stoppedHub.dispose();
+    }
+  });
+
   it('serves an explained page, not a 404, when the model hub is not loaded', async () => {
     // The regression this exists for: a catalog that fails to load used to take
     // the route down with it, so the settings page answered an opaque HTTP 404 on

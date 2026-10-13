@@ -974,7 +974,10 @@ window.__ModuleLoader__.load({
       }, [request]);
 
       useEffect(() => {
-        load('?scan=1');
+        // Opening the page *looks*; it never launches. Only the Scan button asks
+        // for the engines to be started, which is why the mount read carries no
+        // `scan=1` — a settings page appearing on screen must not start a server.
+        load('');
       }, [load]);
 
       const data = state.data;
@@ -983,6 +986,21 @@ window.__ModuleLoader__.load({
       const workflowCount = resources.filter((entry) => entry.kind === 'comfyui_workflow').length;
       const scanSources = (data && data.scan && data.scan.sources) || [];
       const scanWarnings = (data && data.scan && data.scan.warnings) || [];
+      const scanEngines = (data && data.scan && data.scan.engines) || [];
+      const scanPhases = (data && data.scan && data.scan.phases) || [];
+      const scanComplete = !data || !data.scan ? true : data.scan.complete !== false;
+      const launched = scanEngines.filter((engine) => engine.started === true);
+      const held = scanEngines.filter((engine) => engine.protectedFromIdleStop === true);
+      const PHASE_LABELS = {
+        checking: 'Checking engines',
+        starting: 'Starting engines',
+        waiting: 'Waiting for readiness',
+        'engine-ready': 'Engine ready',
+        'engine-failed': 'Engine unavailable',
+        scanning: 'Scanning',
+        complete: 'Complete',
+        partial: 'Partially complete',
+      };
 
       return h('section', {
         'aria-busy': state.status === 'loading' || state.status === 'refreshing',
@@ -1005,14 +1023,18 @@ window.__ModuleLoader__.load({
           h('div', {
             style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
             children: [
+              // Never disabled: pressing Scan while a read is in flight is a
+              // deliberate act, and the answer is to supersede that read rather
+              // than to ignore the click. The server coalesces engine launches, so
+              // repeated clicks cost a request, never a second process.
               button(
-                'Scan',
+                state.status === 'refreshing' && lastQuery.current === '?scan=1' ? 'Scanning…' : 'Scan',
                 () => load('?scan=1'),
                 false,
               ),
               button('Refresh', () => load(''), false),
-              state.status === 'refreshing'
-                ? h('span', { style: { fontSize: '12px', color: text.tertiary }, children: 'scanning…' })
+              data && data.scan && data.scan.managedEngines
+                ? h(Pill, { tone: 'muted', children: 'Scan may start stopped engines' })
                 : null,
             ],
           }),
@@ -1026,7 +1048,70 @@ window.__ModuleLoader__.load({
                   fontSize: '12px',
                   color: text.tertiary,
                 },
-                children: 'Scanning this machine for Ollama models and ComfyUI workflows…',
+                children: 'Reading Ollama models and ComfyUI workflows…',
+              })
+            : null,
+
+          // The stage the last scan reached, and — while one is running — what it is
+          // doing now. A scan that starts an engine can take minutes, so silence
+          // would read as a hang; the phase names are the answer to "is it stuck?".
+          state.status === 'refreshing' && lastQuery.current === '?scan=1'
+            ? h('div', {
+                style: { fontSize: '12px', color: text.tertiary, lineHeight: '18px' },
+                children: 'Scanning… checking engines, starting any that are stopped, waiting for readiness, then reading them.',
+              })
+            : null,
+
+          data && data.scan && scanPhases.length > 0
+            ? h('div', {
+                style: { display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' },
+                children: [
+                  h('span', { style: { fontSize: '12px', color: text.tertiary }, children: 'progress' }),
+                  ...scanPhases.map((phase, index) =>
+                    h(Pill, {
+                      key: 'phase-' + index + '-' + phase,
+                      tone: phase === 'partial' ? 'error' : phase === 'complete' ? 'ok' : 'muted',
+                      children: PHASE_LABELS[phase] || phase,
+                    }),
+                  ),
+                  data.scan.progress
+                    ? h('span', { style: { fontSize: '12px', color: text.tertiary }, children: data.scan.progress })
+                    : null,
+                ],
+              })
+            : null,
+
+          // A scan that could not read everything says so, and says which engine was
+          // the problem. Presenting a partial look as a success is exactly how a
+          // user concludes the machine has no models.
+          data && data.scan && data.scan.complete === false
+            ? h('div', {
+                style: {
+                  border: '1px solid ' + text.error,
+                  borderRadius: '12px',
+                  padding: '10px 14px',
+                  fontSize: '12px',
+                  color: text.error,
+                  lineHeight: '18px',
+                },
+                role: 'status',
+                children: [
+                  'Partially complete: some engines could not be started or read, so this list may be missing models or workflows. ',
+                  ...scanEngines.filter((engine) => engine.ready !== true).map((engine, index) =>
+                    h('div', { key: 'engine-problem-' + index, children: engine.detail }),
+                  ),
+                ],
+              })
+            : null,
+
+          launched.length > 0
+            ? h('div', {
+                style: { fontSize: '12px', color: text.tertiary, lineHeight: '18px' },
+                children:
+                  'This scan started ' + launched.map((engine) => engine.hostName).join(', ') + '. ' +
+                  (held.length > 0
+                    ? 'They are held against automatic idle unloading until the scan finishes; an engine that was already running is never touched.'
+                    : 'Nothing was stopped afterwards.'),
               })
             : null,
 

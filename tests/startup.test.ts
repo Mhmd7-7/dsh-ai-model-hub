@@ -534,4 +534,33 @@ describe('local engine startup', () => {
     );
     assert.equal(stillUp, false, 'disposing the hub stops the engine it started');
   });
+
+  it('starts a host that carries no model, which is how a Scan brings an engine up', async () => {
+    // The regression this exists for: a ComfyUI host whose catalog entries were all
+    // ignored has *no* servable model, so the launch has to be tracked as an engine
+    // record — and the policy gate must be told that id is a management action
+    // rather than an unknown option. Without that, the hub refused to start its own
+    // engine with `"...is not in the catalog"`, and a Scan on a real machine could
+    // never bring ComfyUI up.
+    const port = await unusedPort();
+    const config = engineCatalog(port, { id: 'ignored_image' }) as MutableCatalog;
+    config.models = [];
+    const { hub, cleanup } = await hubFor(config);
+    try {
+      assert.deepEqual(hub.catalog.listModels(), [], 'the host genuinely carries no model');
+
+      const result = await hub.startEngineForHost('engine_host');
+      assert.equal(result.modelId, 'engine-engine_host');
+      assert.equal(result.started, true, 'the engine was started even though nothing routable is declared on it');
+      assert.equal(result.health.healthy, true);
+
+      // It is a real process the hub owns: probeable and stoppable by that id.
+      assert.equal(hub.getModelStatus('engine-engine_host').lifecycle, 'running');
+      const stopped = await hub.stopModel('engine-engine_host');
+      assert.equal(stopped.stopped, true);
+      assert.equal((await fetch(`http://127.0.0.1:${String(port)}/stats`).then(() => true, () => false)), false);
+    } finally {
+      await cleanup();
+    }
+  });
 });

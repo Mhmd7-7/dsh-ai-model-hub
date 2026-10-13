@@ -681,6 +681,75 @@ describe('RuntimeManager', () => {
     }
   });
 
+  it('spares a protected model while a scan holds it, and sweeps it once released', async () => {
+    // Protection is what keeps an engine alive while a scan reads it. Unlike an
+    // in-flight invocation it is taken by a caller that holds no model, and it must
+    // be released exactly once — a leaked protection is a process nobody sweeps.
+    const port = await unusedPort();
+
+    const script = [
+      "const {createServer}=require('node:http');",
+      "const s=createServer((q,r)=>{r.writeHead(200);r.end('ok')});",
+      's.listen(Number(process.env.AIMH_TEST_PORT),"127.0.0.1");',
+    ].join('');
+
+    const context = await fixture({
+      models: [
+        {
+          id: 'scanned_model',
+          name: 'Scanned',
+          type: 'custom',
+          capabilities: ['text_to_text'],
+          adapter: 'mock',
+          runtime: {
+            engine: 'node-http',
+            adapter: 'mock',
+            endpoint: `http://127.0.0.1:${port}`,
+            env: { AIMH_TEST_PORT: String(port) },
+          },
+          health: { kind: 'http', path: '/', timeoutMs: 1000 },
+          lifecycle: {
+            startable: true,
+            stoppable: true,
+            start: { command: 'node', args: ['-e', script] },
+            startupTimeoutMs: 20_000,
+            shutdownTimeoutMs: 3_000,
+            idleTimeoutMs: 100,
+          },
+        },
+      ],
+    });
+
+    try {
+      await context.runtime.startModel('scanned_model');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const release = context.runtime.protectModel('scanned_model');
+      assert.equal(context.runtime.protectionCount('scanned_model'), 1);
+      assert.deepEqual(await context.runtime.stopIdleModels(), [], 'a protected engine is not swept mid-scan');
+      assert.equal(context.runtime.getModelStatus('scanned_model').availability, 'available');
+
+      // Releasing twice must not unprotect a second holder, and an explicit stop
+      // still works — protection suppresses the timer, not the operator.
+      release();
+      release();
+      assert.equal(context.runtime.protectionCount('scanned_model'), 0);
+      assert.deepEqual(await context.runtime.stopIdleModels(), ['scanned_model'], 'normal policy is restored');
+      assert.equal(context.runtime.getModelStatus('scanned_model').availability, 'stopped');
+    } finally {
+      await context.cleanup();
+    }
+  });
+
+  it('refuses to protect a model the runtime does not know', async () => {
+    const context = await fixture({ models: [] });
+    try {
+      assert.throws(() => context.runtime.protectModel('nobody'), /no runtime state|not found/i);
+    } finally {
+      await context.cleanup();
+    }
+  });
+
   it('never sweeps a model that declares no idle timeout', async () => {
     const context = await fixture({
       models: [

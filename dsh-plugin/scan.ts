@@ -36,9 +36,19 @@
  * workflow in a subdirectory. This module asks the documented shape first and
  * falls back to the alternatives, so a different ComfyUI version still works.
  *
- * Scanning is observational: it never starts or stops engines. Live APIs, local
- * workflows and the active catalog are independent sources; failures retain prior
- * observations with explicit freshness and availability, scoped to this hub/config.
+ * ## Looking versus scanning
+ *
+ * A scan reads only what answers. **Looking is never a reason to launch a
+ * process**: opening or reloading the settings page reads the machine as it is,
+ * and reports what did not answer. An explicit **Scan** is different, and
+ * `manageEngines` is exactly that difference — it starts the engines the catalog
+ * declares startable, waits for their APIs, and holds them until the read
+ * finishes, all through the lifecycle manager (see `engine-start.ts`).
+ *
+ * Live APIs, local workflows, the remembered catalog and the active catalog are
+ * independent sources; failures retain prior observations with explicit freshness
+ * and availability, scoped to this hub and configuration. Every result says
+ * whether it is `complete`, so a partial look is never presented as a full one.
  *
  * @module dsh-ai-model-hub/dsh-plugin/scan
  */
@@ -60,6 +70,8 @@ import {
   workflowModelTypeFor,
 } from '../src/index.ts';
 import type { ComfyNodeIndex, PublicInput, PublicOutput, ScannedWorkflowReadiness } from '../src/index.ts';
+import { bringUpEngines, markInterruptedEngines } from './engine-start.ts';
+import type { EngineAvailability, EngineStartupReport, ScanPhase, ScanProgress } from './engine-start.ts';
 
 /** One directory entry, as the probes report it. */
 export interface ScannedDirEntry {
@@ -189,6 +201,19 @@ export interface LocalScanResult {
   readonly warnings: readonly string[];
   readonly registered: number;
   readonly generatedAt: string;
+  /**
+   * Whether every requested engine was readable when the scan finished.
+   *
+   * `false` means the scan is **partially complete**: what it did collect is real
+   * and is kept, but at least one engine could not be started, timed out, died, or
+   * was never configured with a launch command. Reporting that honestly is the
+   * difference between "this machine has no models" and "we could not look".
+   */
+  readonly complete: boolean;
+  /** The engines this scan started or found, and how each one ended up. */
+  readonly engines: readonly EngineStartupReport[];
+  /** The stages this scan passed through, in order, for a progress view. */
+  readonly phases: readonly ScanPhase[];
 }
 
 /**
@@ -237,7 +262,7 @@ export interface ScanOptions {
   readonly persisted?: readonly ScannedHostSnapshot[];
   /** Budget for each HTTP or filesystem effect, in milliseconds. Defaults to 4000. */
   readonly timeoutMs?: number;
-  /** Legacy compatibility option; scans never start engines. */
+  /** Legacy compatibility option; {@link engineStartupTimeoutMs} is the real budget. */
   readonly startupTimeoutMs?: number;
   /** Injectable effects; omitted members fall back to the real machine. */
   readonly probes?: Partial<ScanProbes>;
@@ -251,9 +276,43 @@ export interface ScanOptions {
    * live, local and remembered observations into the list a user actually sees.
    */
   readonly onHostScanned?: (snapshot: ScannedHostSnapshot) => void;
-  /** Legacy compatibility option, ignored even when true: scanning never launches engines. */
-  readonly startEngine?: boolean;
-  /** Diagnostic sink. */
+  /**
+   * Whether this scan may start the engines it is about to read.
+   *
+   * Off by default, and deliberately so: opening the settings page or refreshing
+   * it is an act of *looking*, and looking must never launch a process. An
+   * explicit **Scan** turns this on, which is what makes "start ComfyUI and read
+   * it" a decision the user made rather than a side effect of a page view.
+   *
+   * It is a permission, not an instruction: the deployment's `allowProcessLaunch`
+   * and the host's own `lifecycle` still decide whether anything can be launched,
+   * and an engine that is already answering is never touched.
+   */
+  readonly manageEngines?: boolean;
+  /**
+   * How long one engine may take to answer after this scan starts it, in
+   * milliseconds. Defaults to the host's declared `startupTimeoutMs`, then to a
+   * per-engine budget (ComfyUI cold-starts are slow; Ollama's are not).
+   */
+  readonly engineStartupTimeoutMs?: number;
+  /**
+   * Called as the scan moves between stages, so a UI can show progress instead of
+   * spinning: checking → starting → waiting → scanning → complete/partial.
+   */
+  readonly onProgress?: (progress: ScanProgress) => void;
+  /** The deployment's process-launch permission, consulted before any launch attempt. */
+  readonly allowProcessLaunch?: boolean;
+  /**
+   * Injectable clock and sleep for the readiness wait.
+   *
+   * Readiness is a deadline, and a deadline needs a clock; a test that scales the
+   * startup budget down instead of injecting one either waits for real seconds or
+   * proves nothing about the budget.
+   */
+  readonly now?: () => number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** Legacy compatibility option, superseded by {@link manageEngines}. */
+  readonly startEngine?: boolean;  /** Diagnostic sink. */
   readonly log?: (message: string) => void;
 }
 
@@ -496,18 +555,6 @@ export function workflowDisplayName(raw: unknown, fallback: string): string {
 }
 
 /**
- * Why an engine is not answering, at the level a user can act on.
- *
- * `stopped` and `unreachable` are different claims and must not be collapsed:
- * a refused connection on a loopback address is the signature of a process that
- * is not running, while a timeout, a DNS failure or a routed address that does
- * not answer leaves the process's state genuinely unknown. Saying "stopped" about
- * a remote engine that is merely behind a closed port would send someone looking
- * for a process that may be running fine.
- */
-export type EngineAvailability = 'answering' | 'stopped' | 'unreachable' | 'unconfigured' | 'not-comfyui' | 'error';
-
-/**
  * Classify a connection failure from its message.
  *
  * @param detail - the transport detail the probe reported.
@@ -522,16 +569,17 @@ function classifyConnection(detail: string): EngineAvailability {
  *
  * @param availability - the classified state.
  * @param path - the readiness route that was probed.
+ * @param engine - the engine's display name, so the sentence is about the right one.
  * @returns a short phrase, suitable for appending to a row's detail.
  */
-function describeAvailability(availability: EngineAvailability, path: string): string {
+function describeAvailability(availability: EngineAvailability, path: string, engine: string): string {
   switch (availability) {
-    case 'answering': return 'ComfyUI answering ' + path;
-    case 'stopped': return 'ComfyUI stopped';
-    case 'unreachable': return 'ComfyUI unreachable';
-    case 'unconfigured': return 'ComfyUI has no configured endpoint';
-    case 'not-comfyui': return 'ComfyUI did not report valid system/device information';
-    case 'error': return 'ComfyUI answered with an error';
+    case 'answering': return engine + ' answering ' + path;
+    case 'stopped': return engine + ' stopped';
+    case 'unreachable': return engine + ' unreachable';
+    case 'unconfigured': return engine + ' has no configured endpoint';
+    case 'not-comfyui': return engine + ' did not report valid system/device information';
+    case 'error': return engine + ' answered with an error';
   }
 }
 
@@ -1091,7 +1139,7 @@ function rememberWorkflows(
   const rememberedDescriptors: ModelDescriptor[] = [];
   const stateSuffix = engine.running
     ? ' (remembered from an earlier scan; this pass did not read it live)'
-    : ' (cached; ' + describeAvailability(engine.availability, readyPathFor(host.runtime.engine)) +
+    : ' (cached; ' + describeAvailability(engine.availability, readyPathFor(host.runtime.engine), host.name) +
       ', so readiness could not be re-verified)';
 
   for (const snapshot of candidates) {
@@ -1188,6 +1236,8 @@ async function runHostPass(
     readonly catalogDir?: string;
     /** Workflows a previous scan observed, already scoped to this host and endpoint. */
     readonly persisted?: readonly ScannedHostSnapshot[];
+    /** Whether this scan was allowed to start the engine before reading it. */
+    readonly managed?: boolean;
   }, state: HubScanState,
 ): Promise<HostPass> {
   const { probes, timeoutMs } = options;
@@ -1204,11 +1254,19 @@ async function runHostPass(
   });
   const ready = await engineReady(probes, host, timeoutMs);
   const engineRunning = ready.running;
-  if (!engineRunning) warnings.push(host.name + ': not answering; scans never start engines (' + ready.detail + ')');
+  // What a silent engine means depends on what this scan was allowed to do about
+  // it: a passive read never starts anything, while a Scan already tried and the
+  // per-engine report says how that went.
+  const engineState = describeAvailability(ready.availability, readyPathFor(host.runtime.engine), host.name);
+  if (!engineRunning) {
+    warnings.push(options.managed === true
+      ? host.name + ': started or adopted for this scan, but not answering (' + ready.detail + ')'
+      : host.name + ': not answering; reading never starts engines (' + ready.detail + ')');
+  }
   const endpoint = host.runtime.endpoint;
   const sources: ScanSourceReport[] = [{ id: host.id, kind: 'comfyui_workflow', label: host.name,
     ok: engineRunning,
-    detail: (engineRunning ? '' : describeAvailability(ready.availability, readyPathFor(host.runtime.engine)) + ': ') + ready.detail,
+    detail: (engineRunning ? '' : engineState + ': ') + ready.detail,
     found: 0 }];
   let io: ComfyNodeIndex | undefined;
   let classes: ReadonlySet<string> | undefined;
@@ -1233,7 +1291,7 @@ async function runHostPass(
         availability: document.unreadable !== undefined ? 'unknown' : engineRunning ? 'unknown' : 'unavailable',
         detail: built.resource.detail + (engineRunning
           ? ' (engine answering; workflow dependencies not execution-verified)'
-          : ' (' + describeAvailability(ready.availability, readyPathFor(host.runtime.engine)) + ')'),
+          : ' (' + describeAvailability(ready.availability, readyPathFor(host.runtime.engine), host.name) + ')'),
         freshness, checkedAt });
       if (built.descriptor !== undefined) descriptors.push(built.descriptor);
     }
@@ -1348,7 +1406,27 @@ async function runHostPass(
   return { resources, descriptors, warnings, sources, authoritative, rememberedSources: remembered.sources };
 }
 
-/** Scan only observes. Neither compatibility flags nor launch policy grant lifecycle effects. */
+/**
+ * Scan the machine's local resources.
+ *
+ * By default this **only observes**: it contacts each engine's readiness route,
+ * reads what answers, and reports what did not. No process is started, and the
+ * compatibility flag `startEngine` no longer grants lifecycle effects — looking at
+ * a machine must never launch anything on it.
+ *
+ * An explicit Scan sets {@link ScanOptions.manageEngines}, which is the one thing
+ * that changes: the engines the catalog declares startable are started through the
+ * lifecycle manager, their readiness is confirmed by polling their own API under a
+ * bounded budget, and they are held against automatic idle unloading until the
+ * read finishes. Everything that can go wrong per engine — no launch command, a
+ * refused launch, a timeout, a process that dies mid-read — is reported per engine
+ * while the others are still read, and the result says `complete: false` rather
+ * than pretending a partial look was a full one.
+ *
+ * @param hub - the live hub, for the catalog, the runtime and provider publication.
+ * @param options - the hosts to read, the scan's budgets, and its permissions.
+ * @returns the resources, the per-source and per-engine reports, and the warnings.
+ */
 export async function scanLocalResources(hub: ModelHub, options: ScanOptions): Promise<LocalScanResult> {
   const requestedTimeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(1, Math.min(60_000, requestedTimeout)) : DEFAULT_TIMEOUT_MS;
@@ -1359,51 +1437,160 @@ export async function scanLocalResources(hub: ModelHub, options: ScanOptions): P
   const previousScanned = hub.catalog.listModels().filter((model) => model.tags?.includes('scanned'));
   const hostCount = requestedHosts.length;
   const snapshots: (ScannedHostSnapshot | undefined)[] = new Array<ScannedHostSnapshot | undefined>(hostCount).fill(undefined);
-  const passes = await Promise.all(options.hosts.filter((host) => isOllamaHost(host) || host.adapter === 'comfyui')
-    .map(async (host, index): Promise<HostPass> => {
-      try {
-        if (isOllamaHost(host)) return await scanOllamaHost(hub, host, probes, timeoutMs, state);
-        const pass = await runHostPass(hub, host, { probes, timeoutMs,
-          ...(options.catalogPath === undefined ? {} : { catalogDir: dirname(resolveAdapterPath(options.catalogPath, undefined).absolute) }),
-          workflowDirs: [...new Set([...(options.workflowDir?.trim() ? [options.workflowDir] : []),
-            ...(options.workflowDirsByHost?.[host.id] ?? []).filter((root) => root.trim())])],
-          ...(options.persisted === undefined ? {} : { persisted: options.persisted }),
-        }, state);
-        const observed = originalObservations(pass.resources, pass.rememberedSources ?? []);
-        const observedIds = new Set(observed.flatMap((resource) => resource.modelId === undefined ? [] : [resource.modelId]));
-        snapshots[index] = { hostId: host.id,
-          ...(host.runtime.endpoint === undefined ? {} : { endpoint: host.runtime.endpoint }),
-          authoritative: pass.authoritative === true,
-          resources: observed, descriptors: pass.descriptors.filter((descriptor) => observedIds.has(descriptor.id)) };
-        return pass;
-      } catch (error) {
-        const detail = host.name + ': scan failed: ' + String(error);
-        return { resources: [], descriptors: [], warnings: [detail], sources: [{ id: host.id,
-          kind: isOllamaHost(host) ? 'ollama_model' : 'comfyui_workflow', label: host.name, ok: false, detail, found: 0 }] };
-      }
-    }));
-  const resources = [...new Map(passes.flatMap((pass) => pass.resources).map((resource) => [resource.id, resource])).values()];
-  const preserved = previousScanned.filter((model) => {
-    const index = requestedHosts.findIndex((host) => host.id === model.hostId && host.runtime.endpoint === model.runtime.endpoint);
-    return index >= 0 && passes[index]?.authoritative !== true;
-  }).map((model) => model.descriptor);
-  const descriptors = dedupeById([...passes.flatMap((pass) => pass.descriptors), ...preserved]);
-  const trustworthyEmpty = requestedHosts.some((host) => host.adapter === 'comfyui') &&
-    passes.every((pass, index) => requestedHosts[index]?.adapter !== 'comfyui' || pass.authoritative === true);
-  let registered = 0;
-  if (options.register !== false && (descriptors.length > 0 || trustworthyEmpty) && state.publicationGeneration === publicationGeneration) {
-    registered = hub.publishScannedModels(descriptors);
-    options.log?.('scan: published ' + registered + ' provider(s) in the catalog');
+  const phases: ScanPhase[] = [];
+  const note = (progress: ScanProgress): void => {
+    if (phases.at(-1) !== progress.phase) phases.push(progress.phase);
+    options.onProgress?.(progress);
+  };
+
+  // ── start the engines an explicit Scan is about to read ────────────────────
+  // This is the only place a scan may launch anything, and it does so through the
+  // same gate a cold invocation uses, so a Scan and a generation racing for one
+  // engine join a single launch instead of starting two.
+  const bringUp = options.manageEngines === true
+    ? await bringUpEngines({
+      hosts: requestedHosts,
+      allowProcessLaunch: options.allowProcessLaunch === true,
+      ...(options.engineStartupTimeoutMs === undefined ? {} : { timeoutMs: options.engineStartupTimeoutMs }),
+      effects: {
+        probe: async (host) => await engineReady(probes, host, timeoutMs),
+        ensureReady: async (host) => {
+          const result = await hub.startEngineForHost(host.id);
+          return {
+            modelId: result.modelId,
+            started: result.started,
+            alreadyRunning: result.alreadyRunning,
+            ...(result.health.detail === undefined ? {} : { detail: result.health.detail }),
+          };
+        },
+        protect: (modelId) => hub.protectModel(modelId),
+        stillRunning: (modelId) => {
+          try { return hub.getModelStatus(modelId).pid !== undefined; }
+          catch { return false; }
+        },
+      },
+      onProgress: (progress) => note(progress),
+      ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+      ...(options.log === undefined ? {} : { log: options.log }),
+    })
+    : { reports: [] as readonly EngineStartupReport[], readyHostIds: [] as readonly string[], modelIds: new Map<string, string>(), release: () => {} };
+
+  // The read itself, and the release of engine protection, are one critical
+  // section: the `finally` gives the engines back on success, on failure and on
+  // cancellation alike, so a scan that is aborted cannot leave an engine pinned
+  // and unable to be idle-stopped for the life of the process.
+  try {
+    note({ phase: 'scanning', message: 'Reading the engines that are answering' });
+    const passes = await Promise.all(requestedHosts
+      .map(async (host, index): Promise<HostPass> => {
+        try {
+          if (isOllamaHost(host)) return await scanOllamaHost(hub, host, probes, timeoutMs, state);
+          const pass = await runHostPass(hub, host, { probes, timeoutMs,
+            ...(options.catalogPath === undefined ? {} : { catalogDir: dirname(resolveAdapterPath(options.catalogPath, undefined).absolute) }),
+            workflowDirs: [...new Set([...(options.workflowDir?.trim() ? [options.workflowDir] : []),
+              ...(options.workflowDirsByHost?.[host.id] ?? []).filter((root) => root.trim())])],
+            ...(options.persisted === undefined ? {} : { persisted: options.persisted }),
+            managed: options.manageEngines === true,
+          }, state);
+          const observed = originalObservations(pass.resources, pass.rememberedSources ?? []);
+          const observedIds = new Set(observed.flatMap((resource) => resource.modelId === undefined ? [] : [resource.modelId]));
+          snapshots[index] = { hostId: host.id,
+            ...(host.runtime.endpoint === undefined ? {} : { endpoint: host.runtime.endpoint }),
+            authoritative: pass.authoritative === true,
+            resources: observed, descriptors: pass.descriptors.filter((descriptor) => observedIds.has(descriptor.id)) };
+          return pass;
+        } catch (error) {
+          const detail = host.name + ': scan failed: ' + String(error);
+          return { resources: [], descriptors: [], warnings: [detail], sources: [{ id: host.id,
+            kind: isOllamaHost(host) ? 'ollama_model' : 'comfyui_workflow', label: host.name, ok: false, detail, found: 0 }] };
+        }
+      }));
+    const resources = [...new Map(passes.flatMap((pass) => pass.resources).map((resource) => [resource.id, resource])).values()];
+    const preserved = previousScanned.filter((model) => {
+      const index = requestedHosts.findIndex((host) => host.id === model.hostId && host.runtime.endpoint === model.runtime.endpoint);
+      return index >= 0 && passes[index]?.authoritative !== true;
+    }).map((model) => model.descriptor);
+    const descriptors = dedupeById([...passes.flatMap((pass) => pass.descriptors), ...preserved]);
+    const trustworthyEmpty = requestedHosts.some((host) => host.adapter === 'comfyui') &&
+      passes.every((pass, index) => requestedHosts[index]?.adapter !== 'comfyui' || pass.authoritative === true);
+    let registered = 0;
+    if (options.register !== false && (descriptors.length > 0 || trustworthyEmpty) && state.publicationGeneration === publicationGeneration) {
+      registered = hub.publishScannedModels(descriptors);
+      options.log?.('scan: published ' + registered + ' provider(s) in the catalog');
+    }
+    // Hand each host's reconciled observations to the caller before returning, so a
+    // caller that owns durable state can record them without this module writing.
+    for (const snapshot of snapshots) {
+      if (snapshot === undefined) continue;
+      try { options.onHostScanned?.(snapshot); }
+      catch (error) { options.log?.('scan: a host snapshot could not be recorded: ' + String(error)); }
+    }
+
+    // An engine that died between being started and the read finishing is not the
+    // same as one that never started: results collected before it died are kept,
+    // and the report says exactly that. It also cannot be called a complete scan —
+    // whatever the read collected, it was cut short.
+    const reports = [...bringUp.reports];
+    const interrupted = markInterruptedEngines(reports, (modelId) => {
+      try { return hub.getModelStatus(modelId).pid !== undefined; }
+      catch { return false; }
+    }, bringUp.modelIds);
+
+    const warnings = [
+      ...passes.flatMap((pass) => pass.warnings),
+      ...reports.filter((report) => !report.ready).map((report) => report.detail),
+      ...(interrupted.length === 0 ? [] : [`${interrupted.join(', ')} stopped during the scan; collected results were kept`]),
+    ];
+    const complete = interrupted.length === 0 && engineScanComplete(requestedHosts, passes, reports);
+    const unreadable = requestedHosts.filter((_host, index) => passes[index]?.sources.some((source) => source.ok) !== true).map((host) => host.name);
+    const failedEngines = reports.filter((report) => !report.ready).map((report) => report.hostName);
+    note({
+      phase: complete ? 'complete' : 'partial',
+      message: complete
+        ? 'Scan complete'
+        : 'Scan partially complete: ' +
+          ([...new Set([...failedEngines, ...unreadable])].join(', ') || 'one or more sources failed'),
+    });
+    return { resources, sources: passes.flatMap((pass) => pass.sources), warnings,
+      registered, generatedAt: new Date().toISOString(), complete, engines: reports, phases: [...phases] };
+  } finally {
+    // The one thing this scan must never leak, on any path out of it.
+    bringUp.release();
   }
-  // Hand each host's reconciled observations to the caller before returning, so a
-  // caller that owns durable state can record them without this module writing.
-  for (const snapshot of snapshots) {
-    if (snapshot === undefined) continue;
-    try { options.onHostScanned?.(snapshot); }
-    catch (error) { options.log?.('scan: a host snapshot could not be recorded: ' + String(error)); }
-  }
-  return { resources, sources: passes.flatMap((pass) => pass.sources), warnings: passes.flatMap((pass) => pass.warnings),
-    registered, generatedAt: new Date().toISOString() };
+}
+
+/**
+ * Whether a scan can honestly be called complete.
+ *
+ * Complete means two things, and both are needed:
+ *
+ * 1. **Every engine this scan managed was readable.** A managed engine that could
+ *    not be launched, timed out, or died is not a complete read, however much the
+ *    other sources yielded — "the engine is down but a directory had files" is a
+ *    partial look at the machine, and the per-engine report says so.
+ * 2. **Every host it did not manage produced at least one source that succeeded.**
+ *
+ * It is deliberately not "found something": a machine with a running engine and
+ * nothing installed is a complete scan. This flag is what stops a partial look
+ * from being presented as a finished one.
+ *
+ * @param hosts - the engines this scan asked about.
+ * @param passes - what each pass produced, in host order.
+ * @param reports - the bring-up outcome for each managed engine, empty for a passive read.
+ * @returns whether the scan is complete.
+ */
+function engineScanComplete(
+  hosts: readonly ModelHost[],
+  passes: readonly HostPass[],
+  reports: readonly EngineStartupReport[],
+): boolean {
+  if (reports.some((report) => !report.ready)) return false;
+  const managed = new Set(reports.map((report) => report.hostId));
+  return hosts.every((host, index) => {
+    if (managed.has(host.id)) return true;
+    return passes[index]?.sources.some((source) => source.ok) === true;
+  });
 }
 
 /**
@@ -1428,7 +1615,8 @@ function originalObservations(resources: readonly LocalResource[], rememberedSou
  * Keep the first descriptor for each id.
  * @param descriptors - the descriptors to deduplicate.
  * @returns the unique descriptors, in order.
- */function dedupeById(descriptors: readonly ModelDescriptor[]): ModelDescriptor[] {
+ */
+function dedupeById(descriptors: readonly ModelDescriptor[]): ModelDescriptor[] {
   const seen = new Set<string>();
   const unique: ModelDescriptor[] = [];
   for (const descriptor of descriptors) {

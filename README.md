@@ -126,7 +126,7 @@ List the available AI model capabilities.
 | What you want | Command |
 |---|---|
 | Another profile | `dsh plugin --profile hubtest add github:Mhmd7-7/dsh-ai-model-hub` |
-| A pinned release | `dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub#v0.6.0` |
+| A pinned release | `dsh plugin --profile web add github:Mhmd7-7/dsh-ai-model-hub#v0.7.0` |
 | A published copy | `dsh plugin --profile web add dsh-ai-model-hub` |
 | A checkout you are editing | `node --no-deprecation scripts/install-plugin.mjs --profile web` |
 
@@ -481,13 +481,34 @@ editing a file. It is per host *and* endpoint, so repointing the catalog at anot
 ComfyUI does not resurrect the old engine's workflows. `workflowCatalogPath`
 configures it; `DSH_AI_MODEL_HUB_WORKFLOW_CATALOG` redirects it for a test.
 
-**Scan and Refresh never launch or stop engines**, even when invocation is allowed
-to launch them. Engine states distinguish `running`, `installed_unreachable`,
-`not_found` in the checked locations, and `unknown`. Connection failure alone
-proves neither that a process is stopped nor that an installation is absent. The
-installation is the directory whose *contents* are the engine — a ComfyUI whose
-`main.py` lives under `src/` is installed at `src/`, which is also where its
-saved-workflow store hangs from.
+**Scan starts the configured engines; looking never does.** Opening or reloading the
+page reads the machine as it finds it, and says what did not answer. Pressing
+**Scan** is a deliberate act, so it checks each engine, starts any that is stopped
+through the lifecycle manager's own launch path, polls its API until it answers
+within a bounded budget, reads it, and finally releases its hold:
+
+| Stage | What happens |
+|---|---|
+| Checking engines | Each engine's own readiness route is probed. An engine that answers is adopted and never restarted |
+| Starting engines | A stopped engine is launched with the catalog's configured command; a missing command, a forbidden launch, or a refused spawn is reported with the setting that fixes it |
+| Waiting for readiness | Bounded polling of the engine's API — a listening socket is not readiness. ComfyUI cold-starts get a longer default budget because loading checkpoints takes minutes |
+| Scanning | Every readable engine is read: Ollama's models, ComfyUI's saved workflows |
+| Complete / Partially complete | `complete` is false whenever an engine could not be started, timed out, died mid-read, or has no launch command, and the engine's own report says which and why |
+
+While the scan reads, the engines it started are **held against automatic idle
+unloading**; the hold is released in a `finally`, on success, failure and
+cancellation alike, so a scan can never leave an engine permanently unsweepable. An
+engine that was already running is neither started nor held — it is the user's
+process, not the scan's. Repeated Scan clicks cannot start a second copy: the launch
+goes through the same gate a cold invocation uses, which serializes transitions per
+model, and a later scan simply reuses what is now running.
+
+Engine states distinguish `running`, `installed_unreachable`, `not_found` in the
+checked locations, and `unknown`. Connection failure alone proves neither that a
+process is stopped nor that an installation is absent. The installation is the
+directory whose *contents* are the engine — a ComfyUI whose `main.py` lives under
+`src/` is installed at `src/`, which is also where its saved-workflow store hangs
+from. Nothing is ever installed automatically.
 
 Resource contract status is separate from availability. Each resource reports
 `live`, `local`, `catalog`, or `cached` freshness and its observation timestamp.

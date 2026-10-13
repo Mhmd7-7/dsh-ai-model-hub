@@ -37,6 +37,7 @@ import type { ModelHost } from '../src/index.ts';
 import { resolveAdapterPath } from '../src/adapters/paths.ts';
 import { scanLocalResources, readyPathFor } from './scan.ts';
 import type { LocalResource, ScanProbes, ScanSourceReport, ScannedHostSnapshot } from './scan.ts';
+import type { EngineStartupReport, ScanPhase, ScanProgress } from './engine-start.ts';
 import { resolveConfiguredPath } from './paths.ts';
 import {
   defaultWorkflowCatalogPath,
@@ -175,6 +176,22 @@ export interface Inventory {
     readonly sources: readonly ScanSourceReport[];
     readonly warnings: readonly string[];
     readonly registered: number;
+    /**
+     * Whether every engine this scan asked about was actually read.
+     *
+     * `false` is not an error: it means at least one engine could not be started,
+     * timed out, died, or has no launch command, and the results are **partially
+     * complete** rather than a full view of the machine.
+     */
+    readonly complete: boolean;
+    /** What happened to each engine this scan started, or found already running, and why. */
+    readonly engines: readonly EngineStartupReport[];
+    /** The stages this scan passed through, in order. */
+    readonly phases: readonly ScanPhase[];
+    /** The last stage's own sentence, for a progress line. */
+    readonly progress: string;
+    /** Whether this request was allowed to start engines, as opposed to merely looking. */
+    readonly managedEngines: boolean;
   };
   /** The catalog file the hub actually loaded. */
   readonly catalogPath: string;
@@ -407,6 +424,19 @@ export async function buildInventory(
     readonly catalogPath: string;
     readonly artifactRoot?: string;
     readonly allowProcessLaunch: boolean;
+    /**
+     * Whether this read may start the configured engines.
+     *
+     * Omitted — the default — means "look only", which is what opening or
+     * reloading the page does. An explicit **Scan** sets it, and that is the only
+     * difference between the two: the same route, the same sources, one extra
+     * permission the user granted by pressing a button.
+     */
+    readonly manageEngines?: boolean;
+    /** How long one engine may take to answer after this scan starts it, in milliseconds. */
+    readonly engineStartupTimeoutMs?: number;
+    /** Progress sink, so a long scan can be described while it runs. */
+    readonly onProgress?: (progress: ScanProgress) => void;
     readonly probes?: InventoryProbes;
     /** Probe every endpoint live. Slower, and the page asks for it explicitly. */
     readonly probe?: boolean;
@@ -524,16 +554,30 @@ export async function buildInventory(
   const remembered = rememberedSnapshots(loaded.document);
   const scanned: ScannedHostSnapshot[] = [];
   const scannedHosts = new Set<string>();
+  const phases: ScanPhase[] = [];
+  let progress = '';
 
   // The scan is the page's actual job, so it always runs. It is contained by
   // construction — each engine is contacted on its own and reports its own
   // failure — so a machine with only one of the two engines still lists what it
   // has instead of showing an error page.
+  //
+  // `manageEngines` is the whole difference between looking and scanning: it is set
+  // only by an explicit Scan, and it is what lets that action start the configured
+  // engines and hold them until the read finishes. Every other read of this route
+  // — opening the page, reloading it — stays observational.
   const scan = await scanLocalResources(hub, {
     hosts: declaredHosts,
     catalogPath: options.catalogPath,
     workflowDirsByHost,
-    startEngine: false,
+    manageEngines: options.manageEngines === true,
+    allowProcessLaunch: options.allowProcessLaunch,
+    ...(options.engineStartupTimeoutMs === undefined ? {} : { engineStartupTimeoutMs: options.engineStartupTimeoutMs }),
+    onProgress: (update: ScanProgress) => {
+      if (phases.at(-1) !== update.phase) phases.push(update.phase);
+      progress = update.message;
+      options.onProgress?.(update);
+    },
     ...(options.workflowDir === undefined || options.workflowDir.trim().length === 0
       ? {}
       : { workflowDir: resolveConfiguredPath(options.workflowDir, catalogDir) }),
@@ -573,7 +617,16 @@ export async function buildInventory(
   return {
     generatedAt: new Date().toISOString(),
     resources: scan.resources,
-    scan: { sources: scan.sources, warnings: scan.warnings, registered: scan.registered },
+    scan: {
+      sources: scan.sources,
+      warnings: scan.warnings,
+      registered: scan.registered,
+      complete: scan.complete,
+      engines: scan.engines,
+      phases: scan.phases.length > 0 ? scan.phases : phases,
+      progress,
+      managedEngines: options.manageEngines === true,
+    },
     catalogPath: options.catalogPath,
     ...(hub.catalog.loadDiagnostics.length === 0
       ? {}
@@ -1021,6 +1074,8 @@ export function registerInventoryRoute(
     readonly workflowDir?: string;
     /** Per-probe budget in milliseconds; filesystem traversal is separately capped. */
     readonly scanTimeoutMs?: number;
+    /** How long one engine may take to answer after this scan starts it, in milliseconds. */
+    readonly engineStartupTimeoutMs?: number;
     /** Where discovered workflows are remembered between launches. */
     readonly workflowCatalogPath?: string;
   },
@@ -1052,6 +1107,11 @@ export function registerInventoryRoute(
         sources: [],
         warnings: options.catalogError === undefined ? [] : [options.catalogError],
         registered: 0,
+        complete: false,
+        engines: [],
+        phases: [],
+        progress: options.catalogError ?? 'the model hub is not loaded',
+        managedEngines: false,
       },
       catalogPath: options.catalogPath,
       ...(options.artifactRoot.length === 0 ? {} : { artifactRoot: options.artifactRoot }),
@@ -1075,16 +1135,23 @@ export function registerInventoryRoute(
         return;
       }
       try {
+        // `scan=1` is the explicit Scan action and the only request that may start
+        // an engine. Everything else — the page opening, a reload, a retry — reads
+        // the machine as it finds it, because looking is not a decision to launch a
+        // process and must never be treated as one.
+        const explicitScan = scanRequested(req.url);
         const inventory = await buildInventory(options.hub, {
           hosts: options.hosts ?? [],
           catalogPath: options.catalogPath,
           artifactRoot: options.artifactRoot,
           allowProcessLaunch: options.allowProcessLaunch,
+          manageEngines: explicitScan,
+          ...(options.engineStartupTimeoutMs === undefined ? {} : { engineStartupTimeoutMs: options.engineStartupTimeoutMs }),
           ...(options.probes === undefined ? {} : { probes: options.probes }),
           ...(options.workflowDir === undefined ? {} : { workflowDir: options.workflowDir }),
           ...(options.scanTimeoutMs === undefined ? {} : { scanTimeoutMs: options.scanTimeoutMs }),
           ...(options.workflowCatalogPath === undefined ? {} : { workflowCatalogPath: options.workflowCatalogPath }),
-          // Both Scan and Refresh re-check availability; neither launches engines.
+          // Every read re-checks availability; only the explicit Scan may launch.
           probe: true,
           logger: log,
           log: (message) => log.debug(message),
@@ -1098,4 +1165,27 @@ export function registerInventoryRoute(
     };
 
     installRoute(ctx, INVENTORY_ROUTE, (req, res) => handler(req as IncomingMessage, res as ServerResponse), 'engine inventory', log);
+}
+
+/**
+ * Whether a request is the explicit Scan action.
+ *
+ * `?scan=1` is the contract the settings page already used to mean "the user
+ * pressed Scan"; this is the first time the route acts on it, so the reading is
+ * deliberately generous about the spelling and strict about the meaning.
+ *
+ * @param url - the request's URL, path and query included.
+ * @returns whether this request asked for a scan.
+ */
+function scanRequested(url: string | undefined): boolean {
+  if (url === undefined) return false;
+  const query = url.slice(url.indexOf('?') + 1);
+  if (url.indexOf('?') < 0) return false;
+  for (const pair of query.split('&')) {
+    const [key, value] = pair.split('=');
+    if (key !== 'scan') continue;
+    // `?scan`, `?scan=1` and `?scan=true` all mean yes; `?scan=0` means no.
+    return value === undefined || value === '' || value === '1' || value === 'true';
+  }
+  return false;
 }

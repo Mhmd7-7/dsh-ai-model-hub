@@ -105,6 +105,14 @@ interface ModelState {
   lastUsedAt: number | undefined;
   activeInvocations: number;
   reason: string | undefined;
+  /**
+   * How many concurrent callers have asked for this process to be left alone.
+   *
+   * A count rather than a flag because the interesting callers overlap: a scan
+   * holding an engine warm while a second scan starts, or a generation running
+   * across a sweep. Releasing one must not unprotect the other.
+   */
+  protection: number;
   /** Serializes start/stop so two concurrent invocations cannot double-spawn. */
   transition: Promise<unknown>;
 }
@@ -190,6 +198,7 @@ export class RuntimeManager {
         lastUsedAt: undefined,
         activeInvocations: 0,
         reason: model.enabled ? undefined : 'disabled in configuration',
+        protection: 0,
         transition: Promise.resolve(),
       });
       this.validateModel(model.id);
@@ -702,6 +711,7 @@ export class RuntimeManager {
         lastUsedAt: undefined,
         activeInvocations: 0,
         reason: undefined,
+        protection: 0,
         transition: Promise.resolve(),
       });
     }
@@ -1007,6 +1017,11 @@ export class RuntimeManager {
    * `idleTimeoutMs`". Models that declare no timeout are never swept — an idle
    * timeout is opt-in because unloading a model the user is about to reuse is a
    * far worse outcome than holding VRAM.
+   *
+   * A **protected** model is never swept either. Protection exists for work that
+   * is in flight but is not an invocation — a scan walking an engine's store, for
+   * instance — where unloading the engine mid-walk would turn a readable machine
+   * into a half-read one. See {@link protectModel}.
    */
   async stopIdleModels(): Promise<readonly string[]> {
     if (this.disposed) return [];
@@ -1017,6 +1032,7 @@ export class RuntimeManager {
       const state = this.states.get(model.id);
       if (state === undefined || state.process === undefined) continue;
       if (state.activeInvocations > 0) continue;
+      if (state.protection > 0) continue;
       const since = state.lastUsedAt ?? state.startedAt;
       if (since === undefined) continue;
       if (now - since < model.lifecycle.idleTimeoutMs) continue;
@@ -1031,6 +1047,42 @@ export class RuntimeManager {
       }
     }
     return stopped;
+  }
+
+  /**
+   * Ask the idle sweeper to leave one model's process alone.
+   *
+   * This is deliberately *not* "never stop it": an explicit {@link stopModel}, a
+   * restart, or disposing the hub all still work, because those are decisions
+   * someone made rather than a timer firing. It only suppresses the automatic
+   * sweep, which is the one actor that can interrupt work nobody asked it to
+   * interrupt.
+   *
+   * @param modelId - the model to protect.
+   * @returns a release function; calling it more than once releases once.
+   */
+  protectModel(modelId: string): () => void {
+    const state = this.requireState(modelId);
+    state.protection += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      state.protection = Math.max(0, state.protection - 1);
+    };
+  }
+
+  /**
+   * How many callers are currently protecting one model's process.
+   *
+   * Exposed for diagnostics and tests: the count is the whole contract of
+   * {@link protectModel}, and a leak here is a process that never gets swept.
+   *
+   * @param modelId - the model to inspect.
+   * @returns the number of outstanding protections.
+   */
+  protectionCount(modelId: string): number {
+    return this.states.get(modelId)?.protection ?? 0;
   }
 
   /**
